@@ -11,7 +11,9 @@ PAL_OPTS :=
 
 # The memory model's own modules are checked once, in `pulse/`, and found from
 # there rather than re-verified in every test.
-FSTAR_EXE ?= ../../opt/run-fstar.sh --include ../../pulse/_cache
+FSTAR_RUN := ../../opt/run-fstar.sh
+PULSE_CACHE := ../../pulse/_cache
+FSTAR_EXE ?= $(FSTAR_RUN) --include $(PULSE_CACHE)
 HELPERS := helpers
 
 # If there's an include/ directory, add -I include
@@ -27,6 +29,22 @@ PAL_OPTS += $(EXTRA_OPTS)
 endif
 
 all: verify compile
+
+ifneq ($(wildcard native-check.c),)
+.PHONY: native-check
+all: native-check
+native-check:
+	@mkdir -p $(OBJ_DIR)
+	$(CC) $(INCLUDES) $(EXTRA_OPTS) $(C_FILES) -o $(OBJ_DIR)/native-check
+	$(OBJ_DIR)/native-check
+endif
+
+ifneq ($(wildcard reverse-order),)
+.PHONY: linkage-controls
+all: linkage-controls
+linkage-controls: verify
+	python3 ../check-linkage.py "$(abspath $(C2PULSE))" "$(abspath $(FSTAR_RUN)) --include $(abspath $(PULSE_CACHE))" "$(abspath $(OUT_DIR))" "$(CC)"
+endif
 
 translate: $(OUT_DIR)/.stamp
 
@@ -60,7 +78,9 @@ else
 verify: $(OUT_DIR)/.stamp
 	@$(MAKE) --no-print-directory -f ../verify.mk \
 		OUT_DIR=$(OUT_DIR) FSTAR_EXE="$(FSTAR_EXE)" CACHE_DIR=$(CACHE_DIR) \
-		HELPERS=$(HELPERS)
+		HELPERS=$(HELPERS) \
+		EXPECTED_FAILURES_FILE=expected-verification-failures.txt \
+		EXPECTED_FAILURE_TEXT_FILE=expected-verification-error.txt
 endif
 
 compile: $(patsubst %.c,$(OBJ_DIR)/%.o,$(C_FILES))

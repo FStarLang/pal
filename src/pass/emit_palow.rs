@@ -2730,6 +2730,15 @@ impl<'a> Spec<'a> {
             // `&*p` is `p`, and `p->f` is `(*p).f`, so this is where the
             // recursion bottoms out at the pointer the contract already names.
             ExprT::Deref(inner) => self.value(inner, w),
+            // Every member of a union is at the union's own address.
+            ExprT::Member(base, _)
+                if matches!(
+                    &peel(self.tds, &*self.ty_of(base)?).val,
+                    TypeT::TypeRef(TypeRefKind::Union(_))
+                ) =>
+            {
+                self.addr_of(base, w)
+            }
             ExprT::Member(base, f) => {
                 let bty = self.ty_of(base)?;
                 let sn = palow_name(self.tds, &bty)
@@ -3374,6 +3383,13 @@ impl<'a> Spec<'a> {
             // As in a body: the enclosing structure is the field pointer less
             // the field's offset.
             ExprT::ContainerOf(inner, ty, field) => {
+                // Every member of a union is at offset 0, so the union is at
+                // the member's own address.
+                if let TypeT::TypeRef(TypeRefKind::Union(uname)) = &self.tds.resolve(ty).val
+                    && self.tds.unions.contains_key(&*uname.val)
+                {
+                    return self.value(inner, w);
+                }
                 let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &self.tds.resolve(ty).val else {
                     return Err(format!(
                         "`_container_of` of {}",
@@ -7319,6 +7335,38 @@ fn emit_struct_own(tds: &Typedefs, name: &str) -> String {
             .collect::<Vec<_>>()
             .join("; ")
     );
+    // The ownership is keyed to the struct's value, so a write to a field it
+    // does not depend on -- a count beside an `_array` -- leaves it keyed to a
+    // value the object no longer holds. It is the same ownership as long as
+    // the fields it reads are unchanged, and this moves it over.
+    let read: Vec<&str> = si
+        .fields
+        .iter()
+        .map(|f| f.name.as_str())
+        .filter(|f| {
+            items
+                .iter()
+                .any(|i| i.at.contains(&format!("(x).fld_{})", f)))
+        })
+        .collect();
+    let same = if read.is_empty() {
+        "True".to_string()
+    } else {
+        read.iter()
+            .map(|f| format!("(x).fld_{f} == (y).fld_{f}"))
+            .collect::<Vec<_>>()
+            .join(" /\\ ")
+    };
+    c += &format!(
+        "ghost fn {sn}_own_follow (a: ptr) (x: {sn}) (#p #q: perm) (#y: {sn}) (#s: {sn}_own_spec)\n\
+         \x20 requires {sn}_pts_to a p y ** {sn}_own x q s ** pure ({same})\n\
+         \x20 ensures  {sn}_pts_to a p y ** {sn}_own y q s\n\
+         {{\n  unfold {sn}_own x q s;\n{rw}  fold {sn}_own y q s;\n}}\n\n",
+        rw = read
+            .iter()
+            .map(|f| format!("  rewrite each (x).fld_{f} as (y).fld_{f};\n"))
+            .collect::<String>(),
+    );
     c
 }
 
@@ -7861,6 +7909,10 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                 // scalar's or a struct's is a lemma.
                 if !matches!(f.shape, FieldShape::Array { .. }) {
                     r += &format!("  {}_repr_len {} {};\n", pn, val, v);
+                    // The lemma states the length as `SizeT.v` of the type's
+                    // `sizeof`. The joins below need it as a number, and the
+                    // solver does not reliably unfold the constant for them.
+                    r += &format!("  assert pure (len {} == {});\n", v, f.size);
                 }
             }
             Region::Gap(off, n) => {
@@ -10119,7 +10171,11 @@ pub fn decl_name(decl: &Decl) -> String {
     }
 }
 
-pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
+pub fn emit_palow(
+    tu: &TranslationUnit,
+    header_statics: &[super::linkage::HeaderStatic],
+    has_errors: bool,
+) -> Vec<PalowModule> {
     let mut tds = Typedefs::new(tu);
     let mut base = Env::new();
     for decl in &tu.decls {
@@ -10249,6 +10305,28 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
             _ => None,
         })
         .collect();
+    // Header functions that are the same function in every translation unit
+    // that includes them are verified once: every other copy forwards to a
+    // representative. A function whose address is taken keeps its own body,
+    // since its code address is part of what it is.
+    let shared: HashMap<Rc<str>, Rc<str>> = if has_errors {
+        HashMap::new()
+    } else {
+        let mut t = Touched::default();
+        for decl in &tu.decls {
+            match &decl.val {
+                DeclT::FnDefn(d) => touch_stmts(&d.body, &mut t),
+                DeclT::GlobalVar(gv) => {
+                    if let Some(init) = &gv.init {
+                        touch_expr(init, &mut t);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let addr_taken: HashSet<Rc<str>> = t.refs.iter().map(|r| Rc::from(r.as_str())).collect();
+        super::linkage::shared_header_proofs(tu, header_statics, &addr_taken)
+    };
     for decl in &tu.decls {
         let (fndecl, body) = match &decl.val {
             DeclT::FnDefn(d) => (&d.decl, Some(&*d.body)),
@@ -10284,6 +10362,24 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
             origin: origin_of(decl),
         });
     }
+    // A `_pure` copy of a header function whose proof another copy already
+    // carries is that copy, by definition. It is moved to the end so that the
+    // representative's module exists by the time it is named.
+    let mut aliased: Vec<Chunk> = Vec::new();
+    for (name, rep) in &shared {
+        if !tds.pure_fns.contains(&**name) || !tds.pure_fns.contains(&**rep) {
+            continue;
+        }
+        let module = format!("Func_{}", name);
+        let Some(i) = chunks.iter().position(|c| c.module == module) else {
+            continue;
+        };
+        let mut ch = chunks.remove(i);
+        ch.code = format!("let func_{} = Func_{}.func_{}\n\n", name, rep, rep);
+        aliased.push(ch);
+    }
+    aliased.sort_by(|a, b| a.module.cmp(&b.module));
+    chunks.extend(aliased);
     let tds = tds;
 
     // The whole callee map is built before any body is translated. What a call
@@ -10538,15 +10634,28 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
     // translated, and a caller of a divergent function is divergent in turn,
     // so the set is reached by repeating the whole pass until it settles.
     let mut divergent_fns: HashSet<String> = HashSet::new();
+    // A representative has to have a signature to forward to.
+    let items_ok: HashSet<String> = items
+        .iter()
+        .filter(|it| it.sig.is_some() && it.defn.is_some())
+        .map(|it| it.name.clone())
+        .collect();
     let order = loop {
         let mut found: HashSet<String> = HashSet::new();
         for it in &mut items {
             let Some(sig) = &it.sig else { continue };
             let empty = HashSet::new();
             let no = forbidden.get(&it.name).unwrap_or(&empty);
-            let body = match it.defn {
-                None => Err(EXTERNAL.to_string()),
-                Some(d) => emit_body(&tds, it.env.clone(), d, sig, &callees, no, &divergent_fns),
+            let rep = shared
+                .get(&*it.name)
+                .filter(|r| items_ok.contains(&***r))
+                .cloned();
+            let body = match (it.defn, &rep) {
+                (Some(d), Some(rep)) => Ok(forward_body(&d.decl, sig, rep, &divergent_fns)),
+                (None, _) => Err(EXTERNAL.to_string()),
+                (Some(d), None) => {
+                    emit_body(&tds, it.env.clone(), d, sig, &callees, no, &divergent_fns)
+                }
             };
             if matches!(&body, Ok(b) if b.divergent) {
                 found.insert(it.name.clone());
@@ -10655,6 +10764,36 @@ pub fn emit_palow(tu: &TranslationUnit) -> Vec<PalowModule> {
         }
     }
     modules
+}
+
+/// The body of a header function whose proof is its representative's: a call
+/// to it, with the same arguments. The two signatures are the same text up to
+/// the function's name, so the implicits line up by name as well.
+fn forward_body(
+    decl: &FnDecl,
+    sig: &FnSurface,
+    rep: &str,
+    divergent: &HashSet<String>,
+) -> TranslatedBody {
+    let mut call = format!("Func_{}.func_{}", rep, rep);
+    if decl.args.is_empty() {
+        call += " ()";
+    }
+    for (i, a) in decl.args.iter().enumerate() {
+        match &a.name {
+            Some(n) => call += &format!(" var_{}", n.val),
+            None => call += &format!(" arg_{}", i),
+        }
+    }
+    for i in &sig.implicits {
+        call += &format!(" #{}", i);
+    }
+    TranslatedBody {
+        lines: vec![call],
+        divergent: divergent.contains(rep),
+        decls: Vec::new(),
+        uses: HashSet::from([rep.to_string()]),
+    }
 }
 
 /// `FStar.SizeT.fits_at_least_16` is the only bound available without a
@@ -11442,6 +11581,10 @@ struct Body<'a> {
     /// per statement rather than per function is what keeps every branch,
     /// loop and call seeing the same shape.
     own_open: Vec<(String, String)>,
+    /// Parameters whose struct pointee had a field written that its deep
+    /// ownership does not depend on, with the struct's Palow name: on the way
+    /// out, the ownership is moved to the value the object now holds.
+    own_moved: Vec<(String, String)>,
     /// How many slots existed when the enclosing loop's body began. A `break`
     /// or `continue` past a slot allocated since then would skip its release.
     loop_mark: Option<usize>,
@@ -12215,6 +12358,41 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// Record a write to `p->f` that leaves `p`'s deep ownership keyed to a
+    /// stale value: `f` is a field the ownership does not read. A write to a
+    /// field it does read is not recorded, since the ownership then really
+    /// is about something else.
+    fn note_own_moved(&mut self, lhs: &Expr) {
+        let ExprT::Member(base, f) = &strip_vattr(lhs).val else {
+            return;
+        };
+        let ExprT::Deref(root) = &strip_vattr(base).val else {
+            return;
+        };
+        let ExprT::Var(v) = &strip_vattr(root).val else {
+            return;
+        };
+        let p = v.val.to_string();
+        if !self.granted.contains(&p) || !self.params.contains(&p) {
+            return;
+        }
+        let Ok(ty) = self.ty_of(base) else {
+            return;
+        };
+        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(self.tds, &ty).val else {
+            return;
+        };
+        let items = self.own_items_of(&n.val);
+        let read = format!("(x).fld_{})", f.val);
+        if items.is_empty() || items.iter().any(|i| i.at.contains(&read)) {
+            return;
+        }
+        let sn = format!("struct_{}", n.val);
+        if !self.own_moved.iter().any(|(q, _)| *q == p) {
+            self.own_moved.push((p, sn));
+        }
+    }
+
     /// Fold back every deep ownership this statement unfolded, innermost
     /// first: a later item's address can be an earlier one's value.
     fn close_own(&mut self) {
@@ -12484,6 +12662,8 @@ impl<'a> Body<'a> {
             // Taking an address needs no ownership -- nothing is read by it --
             // so this does not have to open the field the way an access does,
             // and there is no focus left hanging past the statement.
+            // Every member of a union is at the union's own address.
+            ExprT::Member(base, _) if self.union_of(base).is_some() => self.addr(base),
             ExprT::Member(base, f) => {
                 let (sn, _) = self.struct_of(base)?;
                 self.field_ty(base, f)?;
@@ -12592,6 +12772,8 @@ impl<'a> Body<'a> {
             return Err(format!("`{}`, whose place would have to escape", v));
         }
         match &strip_vattr(e).val {
+            // Every member of a union is at the union's own address.
+            ExprT::Member(base, _) if self.union_of(base).is_some() => self.addr_only(base),
             ExprT::Member(base, f) => {
                 let (sn, _) = self.struct_of(base)?;
                 self.field_ty(base, f)?;
@@ -15929,6 +16111,13 @@ impl<'a> Body<'a> {
             // pointer came from a structure knows it as `base +! offset`, and
             // that is exactly the form the lemma fires on.
             ExprT::ContainerOf(inner, ty, field) => {
+                // Every member of a union is at offset 0, so the union is at
+                // the member's own address.
+                if let TypeT::TypeRef(TypeRefKind::Union(uname)) = &self.tds.resolve(ty).val
+                    && self.tds.unions.contains_key(&*uname.val)
+                {
+                    return self.rvalue(inner);
+                }
                 let TypeT::TypeRef(TypeRefKind::Struct(sname)) = &self.tds.resolve(ty).val else {
                     return Err(format!(
                         "`_container_of` of {}",
@@ -16698,6 +16887,11 @@ impl<'a> Body<'a> {
         // and a specification can name one sequence for whichever it is given.
         // As for a stack array, the length rides along in the type from
         // `const_seq_with_len`: the solver cannot count a list literal itself.
+        // It is bound to a name of its own because the type is only seen
+        // through that name: the term written out again would ask the solver
+        // to prove the implicit length argument once more, which it can do
+        // only by unfolding `xs`, and that runs out of fuel past a handful of
+        // elements.
         // The ownership is assumed here rather than taken from a library
         // function, because a library function would have to take the
         // element's representation as a parameter and a trusted one that
@@ -16706,14 +16900,17 @@ impl<'a> Body<'a> {
         // literal, the representation is the element type's own and the
         // assumption says one true thing about one piece of static data --
         // the same trust an immutable global's `acquire_var_*` asks for.
+        let contents = self.named_const(
+            "lit_seq",
+            &format!(
+                "Pulse.Lib.C.Palow.ConstSeq.const_seq_with_len {} {}",
+                xs,
+                vs.len()
+            ),
+        );
         let own = format!(
-            "exists* (p: perm). array_pts_to {}_repr {} (SizeT.v {}_alignof) {} p (Pulse.Lib.C.Palow.ConstSeq.const_seq_with_len {} {})",
-            pn,
-            esize,
-            pn,
-            addr,
-            xs,
-            vs.len()
+            "exists* (p: perm). array_pts_to {}_repr {} (SizeT.v {}_alignof) {} p {}",
+            pn, esize, pn, addr, contents
         );
         let name = self.assumed_slprop("acquire_literal", &own);
         self.lines.push(format!("{} ();", name));
@@ -17744,6 +17941,7 @@ impl<'a> Body<'a> {
                 }
             }
         }
+        self.note_own_moved(lhs);
         if matches!(lhs.val, ExprT::Member(..) | ExprT::Index(..)) {
             let f = self.access(lhs, true)?;
             self.lines.extend(f.open_write.iter().cloned());
@@ -19046,6 +19244,17 @@ impl<'a> Body<'a> {
             }
             StmtT::Return(None) => Ok(()),
             StmtT::Call(e) => match &e.val {
+                // A `_pure` function is an F* term with no effect, so a call
+                // whose value is dropped is one only its arguments can make
+                // matter -- and evaluating them is all this does.
+                ExprT::FnCall(name, _)
+                    if self.tds.pure_fns.contains(&*name.val.to_string())
+                        && !self.callees.contains_key(&*name.val.to_string()) =>
+                {
+                    let v = self.rvalue(e)?;
+                    self.lines.push(format!("let _ = {};", v));
+                    Ok(())
+                }
                 ExprT::FnCall(name, args) => {
                     let callee = self.callees.get(&*name.val.to_string());
                     let void = callee.is_some_and(|c| c.void);
@@ -19919,6 +20128,12 @@ impl<'a> Body<'a> {
     }
 
     fn release_from(&mut self, mark: usize) {
+        if mark == 0 {
+            for (p, sn) in self.own_moved.clone() {
+                self.lines
+                    .push(format!("{}_own_follow var_{} (reveal val_{});", sn, p, p));
+            }
+        }
         // Leaving the function: anything still held has to go, including a
         // validity seeded for a use that did not consume it -- storing a
         // decayed function in a slot, say.
@@ -20961,6 +21176,12 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
         ) {
             continue;
         }
+        // Every use of an alias re-evaluates the place, so `&a[i++]` would
+        // step `i` once per use instead of once. `hoist_alias_effects` has
+        // already bound such an index; whatever effect is left is refused.
+        if has_effects(place) {
+            continue;
+        }
         cand.push((q, place.clone()));
     }
 
@@ -21035,6 +21256,7 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
         if let ExprT::BinOp(BinOp::Add, base, idx) = &strip_vattr(rhs).val
             && lvalue_name(base).is_some()
             && ptr_base(base)
+            && !has_effects(rhs)
             && stable_names(rhs, &out, &locals, &t)
         {
             out.insert(
@@ -21251,6 +21473,79 @@ fn derived_ptr(e: &Expr) -> bool {
     }
 }
 
+/// `q = &a[i++]` and `q = a + i++` evaluate the index once, but an alias
+/// stands for its place at every use and would evaluate it each time. Binding
+/// the index first -- `__pal_idx_n = i++; q = &a[__pal_idx_n]` -- keeps the
+/// one evaluation and lets `q` stay an alias. Only the top-level statements
+/// are looked at, because only those can define an alias. `None` when there
+/// was nothing to do.
+fn hoist_alias_effects(env: &Env, body: &Stmts) -> Option<Stmts> {
+    fn place(
+        env: &Env,
+        e: &Rc<Expr>,
+        n: &mut usize,
+        out: &mut Stmts,
+        loc: &Rc<SourceInfo>,
+    ) -> Option<Rc<Expr>> {
+        let v = match &e.val {
+            ExprT::VAttr(a, x) => ExprT::VAttr(a.clone(), place(env, x, n, out, loc)?),
+            ExprT::Member(b, f) => ExprT::Member(place(env, b, n, out, loc)?, f.clone()),
+            ExprT::Index(b, i) | ExprT::BinOp(BinOp::Add, b, i)
+                if !has_effects(b) && has_effects(i) =>
+            {
+                let ty = env.infer_expr(i).ok()?.to_rc();
+                *n += 1;
+                let id: Rc<Ident> =
+                    Rc::<str>::from(format!("__pal_idx_{}", n)).with_loc(loc.clone());
+                out.push(StmtT::Let(id.clone(), ty, i.clone()).with_loc(loc.clone()));
+                let i = ExprT::Var(id).with_loc(i.loc.clone());
+                match &e.val {
+                    ExprT::Index(..) => ExprT::Index(b.clone(), i),
+                    _ => ExprT::BinOp(BinOp::Add, b.clone(), i),
+                }
+            }
+            _ if !has_effects(e) => return Some(e.clone()),
+            _ => return None,
+        };
+        Some(v.with_loc(e.loc.clone()))
+    }
+    let mut env = env.clone();
+    let mut n = 0;
+    let mut out: Stmts = Vec::new();
+    let mut changed = false;
+    for st in body {
+        if let StmtT::Assign(lhs, rhs) = &st.val
+            && lvalue_name(lhs).is_some()
+            && has_effects(rhs)
+        {
+            let rhs_core = strip_vattr(rhs);
+            let mut pre = Vec::new();
+            let rewritten = match &rhs_core.val {
+                ExprT::Ref(p) => place(&env, p, &mut n, &mut pre, &st.loc)
+                    .map(|p| ExprT::Ref(p).with_loc(rhs_core.loc.clone())),
+                ExprT::BinOp(BinOp::Add, ..) => {
+                    place(&env, &Rc::new(rhs_core.clone()), &mut n, &mut pre, &st.loc)
+                }
+                _ => None,
+            };
+            if let Some(r) = rewritten
+                && !has_effects(&r)
+            {
+                for p in &pre {
+                    env.push_stmt(p);
+                }
+                out.extend(pre);
+                out.push(StmtT::Assign(lhs.clone(), r).with_loc(st.loc.clone()));
+                changed = true;
+                continue;
+            }
+        }
+        env.push_stmt(st);
+        out.push(st.clone());
+    }
+    changed.then_some(out)
+}
+
 /// Translate a function body, or say why not. `env` must already have the
 /// function's parameters pushed.
 fn emit_body(
@@ -21265,6 +21560,17 @@ fn emit_body(
     // An array parameter's ownership is a sequence, so every access through it
     // goes through `array_focus` rather than a plain read. Record what each one
     // needs to be focused: the element's Palow type and its size.
+    let hoisted;
+    let defn = match hoist_alias_effects(&env, &defn.body) {
+        Some(body) => {
+            hoisted = FnDefn {
+                body,
+                ..defn.clone()
+            };
+            &hoisted
+        }
+        None => defn,
+    };
     let aliases = alias_map(&defn.body, &|x| ptr_base(tds, &env, x));
     let mut arrays = HashMap::new();
     for a in &defn.decl.args {
@@ -21368,6 +21674,7 @@ fn emit_body(
         prescattered: HashSet::new(),
         decls: Vec::new(),
         own_open: Vec::new(),
+        own_moved: Vec::new(),
         loop_mark: None,
         mirrors: HashMap::new(),
         mirror_reads: false,

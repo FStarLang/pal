@@ -57,3 +57,11 @@ void init_truncated(void) {
 }
 */
 
+
+/* `__func__` is a string literal holding the function name, NUL included. */
+void name_sink(const _array char *name)
+    _requires(name._length == 10);
+
+void func_name(void) {
+    name_sink(__func__);
+}
