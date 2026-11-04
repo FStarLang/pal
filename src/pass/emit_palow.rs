@@ -22616,7 +22616,9 @@ fn emit_body(
         if extent(tds, &a.ty) != Some(Extent::Array) || is_arrayptr(tds, &a.ty) {
             continue;
         }
-        let (Some(name), Some(pt)) = (a.name.as_ref(), pointee(tds, &a.ty)) else {
+        // Layout is needed even for `_plain` arrays. It grants no ownership:
+        // accesses must find the caller's explicitly supplied array resource.
+        let (Some(name), Some(pt)) = (a.name.as_ref(), pointee(tds, peel(tds, &a.ty))) else {
             continue;
         };
         let (Some(pn), Some(esize), Some(fty)) = (
