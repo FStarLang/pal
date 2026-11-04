@@ -16,6 +16,20 @@ struct holder {
     union choice value;
 };
 
+uint32_t read_value_first(union choice u)
+    _requires(u.pair._active)
+    _ensures(return == u.pair.first)
+{
+    return u.pair.first;
+}
+
+uint32_t read_value_last(union choice u)
+    _requires(u.pair._active)
+    _ensures(return == u.pair.last)
+{
+    return u.pair.last;
+}
+
 uint32_t read_value(const uint32_t *p)
     _ensures(return == *p)
 {

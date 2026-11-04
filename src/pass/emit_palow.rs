@@ -13610,16 +13610,15 @@ impl<'a> Body<'a> {
             return None;
         };
         let (sn, pn) = (format!("struct_{}", sname), pn.clone());
-        // Everything below may emit, so anything that turns out not to be a
-        // pun has to leave the body as it found it.
-        let mark = self.lines.len();
-        let Ok((a, bcr, _)) = self.base_addr(&u, false) else {
-            self.lines.truncate(mark);
-            return None;
-        };
+        // Probing an address may allocate parameter storage as well as emit
+        // lines. A failed pun must roll back both.
+        let saved = self.clone();
         let give_up = |me: &mut Self| {
-            me.lines.truncate(mark);
+            *me = saved.clone();
             None
+        };
+        let Ok((a, bcr, _)) = self.base_addr(&u, false) else {
+            return give_up(self);
         };
         let Some(live) = self.active.get(&a).cloned() else {
             return give_up(self);
@@ -13724,15 +13723,11 @@ impl<'a> Body<'a> {
         if o % n != 0 || ui.align % n != 0 {
             return None;
         }
-        // Finding the base may emit focusing steps and record arms as live;
-        // anything that turns out not to be a pun has to undo both.
-        let mark = self.lines.len();
-        let saved_active = self.active.clone();
-        let saved_close = self.pending_close.clone();
+        // Restore all bookkeeping on failure, including storage allocated
+        // while finding the base.
+        let saved = self.clone();
         let give_up = |me: &mut Self| {
-            me.lines.truncate(mark);
-            me.active = saved_active.clone();
-            me.pending_close = saved_close.clone();
+            *me = saved.clone();
             None
         };
         let Ok((a, bcr, bcw)) = self.base_addr(&u, writing) else {
