@@ -40,3 +40,65 @@ halve(uint32_t n) _requires(n % 2 == 0)
 
     return n / 2;
 }
+
+union status {
+    uint32_t code;
+    uint64_t raw;
+};
+
+// The dead default must not inspect the unwritten status at the cleanup label.
+uint32_t
+cleanup_after_abort(uint32_t version) _requires(version == 1)
+{
+    union status status;
+    uint32_t code = 0;
+    switch (version)
+    {
+    case 1:
+        code = 17;
+        break;
+    default:
+        _assert(0);
+        if (!0)
+        {
+            __builtin_unreachable();
+        }
+        goto Finally;
+    }
+    status = (union status){.code = code};
+
+Finally:
+    _ensures(_live(status));
+    return status.code;
+}
+
+uint32_t
+abort_in_tail(uint32_t n) _requires(n == 1)
+{
+    if (n != 1)
+    {
+        _assert(0);
+        return *(uint32_t *)0;
+    }
+    return n;
+}
+
+uint32_t
+return_beside_abort(uint32_t n) _requires(n == 1) _ensures(return == 11)
+{
+    uint32_t result;
+    if (n == 1)
+    {
+        result = 11;
+        goto Finally;
+    }
+    else
+    {
+        _assert(0);
+        __builtin_unreachable();
+    }
+
+Finally:
+    _ensures(_live(result));
+    return result;
+}

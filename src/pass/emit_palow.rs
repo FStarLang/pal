@@ -20652,6 +20652,9 @@ impl<'a> Body<'a> {
     /// which is what a chain of early returns needs.
     fn rest(&mut self, stmts: &[Rc<Stmt>]) -> Result<bool, String> {
         for (i, s) in stmts.iter().enumerate() {
+            if self.diverged {
+                return Ok(false);
+            }
             if matches!(s.val, StmtT::Return(Some(_)))
                 && let Some(s2) = self.split_byte_field(s)?
             {
@@ -20815,7 +20818,7 @@ impl<'a> Body<'a> {
                     };
                     open(self, pt_live_then);
                     let r = self.tail_arm(&then_stmts);
-                    let (mut then_lines, then_val) = match r {
+                    let (mut then_lines, then_val, then_diverged) = match r {
                         Ok(r) => r,
                         Err(e) => {
                             close(self, pt_live_then, &mut Vec::new());
@@ -20829,7 +20832,7 @@ impl<'a> Body<'a> {
                     }
                     open(self, !pt_live_then);
                     let r = self.tail_arm(&else_stmts);
-                    let (mut else_lines, else_val) = match r {
+                    let (mut else_lines, else_val, else_diverged) = match r {
                         Ok(r) => r,
                         Err(e) => {
                             close(self, !pt_live_then, &mut Vec::new());
@@ -20840,7 +20843,7 @@ impl<'a> Body<'a> {
                     self.blocks = entry_blocks;
                     let then_lines: Vec<String> = then_pre.into_iter().chain(then_lines).collect();
                     let else_lines: Vec<String> = else_pre.into_iter().chain(else_lines).collect();
-                    if then_val != else_val {
+                    if then_val != else_val && !then_diverged && !else_diverged {
                         return Err("an `if` where only one arm returns a value".to_string());
                     }
                     self.lines.push(format!("if ({})", c));
@@ -20849,7 +20852,8 @@ impl<'a> Body<'a> {
                     self.lines.push("} else {".to_string());
                     self.lines.extend(else_lines.iter().map(|l| indent(l)));
                     self.lines.push("}".to_string());
-                    return Ok(then_val);
+                    self.diverged = then_diverged && else_diverged;
+                    return Ok(then_val || else_val);
                 }
                 // A labelled block carries its own label: the statements that
                 // follow the block are what a `goto` jumps *to*, so they are
@@ -20908,6 +20912,9 @@ impl<'a> Body<'a> {
                 }
             }
         }
+        if self.diverged {
+            return Ok(false);
+        }
         self.release_from(0);
         if self.in_loop {
             self.lines.push("return ();".to_string());
@@ -20917,7 +20924,7 @@ impl<'a> Body<'a> {
 
     /// One arm of a returning `if`, translated into its own line buffer
     /// against a copy of the state at the `if`.
-    fn tail_arm(&mut self, stmts: &[Rc<Stmt>]) -> Result<(Vec<String>, bool), String> {
+    fn tail_arm(&mut self, stmts: &[Rc<Stmt>]) -> Result<(Vec<String>, bool, bool), String> {
         let outer_env = self.env.clone();
         let outer_union_values = self.union_values.clone();
         let outer_lines = std::mem::take(&mut self.lines);
@@ -20930,12 +20937,14 @@ impl<'a> Body<'a> {
         let outer_prescattered = self.prescattered.clone();
         let outer_in_branch = std::mem::replace(&mut self.in_branch, true);
         let outer_tail_branch = std::mem::replace(&mut self.tail_branch, true);
+        let outer_diverged = std::mem::replace(&mut self.diverged, false);
 
         let out = self
             .rest(stmts)
-            .map(|v| (std::mem::take(&mut self.lines), v));
+            .map(|v| (std::mem::take(&mut self.lines), v, self.diverged));
 
         self.tail_branch = outer_tail_branch;
+        self.diverged = outer_diverged;
         self.in_branch = outer_in_branch;
         self.open_elems = outer_open;
         self.nested_scatter = outer_nested;
@@ -20993,6 +21002,9 @@ impl<'a> Body<'a> {
 
         let result = (|| -> Result<bool, String> {
             for s in stmts.iter() {
+                if self.diverged {
+                    break;
+                }
                 if self.in_loop && matches!(s.val, StmtT::Goto(_)) {
                     self.rest(std::slice::from_ref(s))?;
                     return Ok(true);
