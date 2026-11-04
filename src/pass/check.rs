@@ -554,9 +554,20 @@ impl<'a> Checker<'a> {
                                 );
                             }
                         }
+                        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+                            let Some(u) = env.lookup_union(n) else {
+                                return self.report(format!("unknown union {}", n), &rval.loc);
+                            };
+                            if u.get_field(field).is_none() {
+                                return self.report(
+                                    format!("no field {} in union {}", field, n),
+                                    &rval.loc,
+                                );
+                            }
+                        }
                         t => {
                             return self.report(
-                                format!("_container_of expects a struct type, got {}", t),
+                                format!("_container_of expects a struct or union type, got {}", t),
                                 &struct_ty.loc,
                             );
                         }

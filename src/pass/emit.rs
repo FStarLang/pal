@@ -143,10 +143,10 @@ fn module_for_name(name: &Name) -> Option<String> {
         Name::StructDirectFieldName(s, _) => Some(format!("Struct_{}", s)),
         Name::StructGhostFieldProj(s, _) => Some(format!("Struct_{}", s)),
         Name::StructAuxFn(s, _) => Some(format!("Struct_{}", s)),
-        Name::StructContainerFn(s, _) => Some(format!("Struct_{}", s)),
-        Name::StructContainerInv(s, _) => Some(format!("Struct_{}", s)),
-        Name::StructProjContainerInv(s, _) => Some(format!("Struct_{}", s)),
-        Name::StructProjNull(s, _) => Some(format!("Struct_{}", s)),
+        Name::ContainerFn(t, _)
+        | Name::ContainerInv(t, _)
+        | Name::ProjContainerInv(t, _)
+        | Name::ProjNull(t, _) => module_for_name(&Name::TypeRef(t.clone())),
         Name::UnionFieldConstructor(u, _) => Some(format!("Union_{}", u)),
         Name::UnionGhostFieldProj(u, _) => Some(format!("Union_{}", u)),
         Name::UnionFieldProj(u, _) => Some(format!("Union_{}", u)),
@@ -471,21 +471,21 @@ enum Name {
     StructDirectFieldName(Rc<IdentT>, Rc<IdentT>),
     StructGhostFieldProj(Rc<IdentT>, Rc<IdentT>),
     StructAuxFn(Rc<IdentT>, String),
-    /// Inverse of the field-address projection: maps a `ref` of an embedded
-    /// (by-value) struct/union field back to a `ref` of the enclosing struct.
-    StructContainerFn(Rc<IdentT>, Rc<IdentT>),
-    /// Left-inverse lemma tying `StructContainerFn` to `StructGhostFieldProj`.
-    StructContainerInv(Rc<IdentT>, Rc<IdentT>),
+    /// Inverse of the field-address projection: maps a `ref` of a struct/union
+    /// member back to a `ref` of the enclosing struct/union.
+    ContainerFn(TypeRef, Rc<IdentT>),
+    /// Left-inverse lemma tying `ContainerFn` to the ghost field projection.
+    ContainerInv(TypeRef, Rc<IdentT>),
     /// Right-inverse (dual) lemma: `proj (container r) == r`. Lets a caller that
     /// owns a struct *via* `container_of(field_ref)` still address the field
     /// through the original `field_ref`.
-    StructProjContainerInv(Rc<IdentT>, Rc<IdentT>),
-    /// Ground axiom `proj (null #outer) == null #inner` for the offset-0 member:
-    /// `container_of` on a struct's first field is pointer identity, so the
-    /// field projection maps the null enclosing pointer to the null inner one.
+    ProjContainerInv(TypeRef, Rc<IdentT>),
+    /// Ground axiom `proj (null #outer) == null #inner` for an offset-0 member:
+    /// `container_of` on such a member is pointer identity, so the field
+    /// projection maps the null enclosing pointer to the null inner one.
     /// The dual `container (null #inner) == null #outer` is not emitted: it
-    /// follows from `StructContainerInv` at `p = null`.
-    StructProjNull(Rc<IdentT>, Rc<IdentT>),
+    /// follows from `ContainerInv` at `p = null`.
+    ProjNull(TypeRef, Rc<IdentT>),
 
     UnionFieldConstructor(Rc<IdentT>, Rc<IdentT>),
     UnionGhostFieldProj(Rc<IdentT>, Rc<IdentT>),
@@ -555,17 +555,17 @@ impl Name {
             Name::StructDirectFieldName(str, fld) => format!("{}__{}", struct_to_string(str), fld),
             Name::StructGhostFieldProj(str, fld) => format!("{}__{}", struct_to_string(str), fld),
             Name::StructAuxFn(str, f) => format!("{}__aux_{}", struct_to_string(str), f),
-            Name::StructContainerFn(str, fld) => {
-                format!("{}__{}_container", struct_to_string(str), fld)
+            Name::ContainerFn(t, fld) => {
+                format!("{}__{}_container", typeref_to_string(t), fld)
             }
-            Name::StructContainerInv(str, fld) => {
-                format!("{}__{}_container_inv", struct_to_string(str), fld)
+            Name::ContainerInv(t, fld) => {
+                format!("{}__{}_container_inv", typeref_to_string(t), fld)
             }
-            Name::StructProjContainerInv(str, fld) => {
-                format!("{}__{}_proj_container_inv", struct_to_string(str), fld)
+            Name::ProjContainerInv(t, fld) => {
+                format!("{}__{}_proj_container_inv", typeref_to_string(t), fld)
             }
-            Name::StructProjNull(str, fld) => {
-                format!("{}__{}_proj_null", struct_to_string(str), fld)
+            Name::ProjNull(t, fld) => {
+                format!("{}__{}_proj_null", typeref_to_string(t), fld)
             }
             Name::UnionFieldConstructor(u, fld) => {
                 format!("Field_{}__{}", u, fld)
@@ -3906,16 +3906,17 @@ impl<'a> Emitter<'a> {
                 ExprT::ContainerOf(ptr, struct_ty, field) => {
                     let resolved = env.vtype_whnf(struct_ty.clone().into());
                     match &resolved.val {
-                        TypeT::TypeRef(TypeRefKind::Struct(struct_name)) => {
-                            let container = self.emit_name(Name::StructContainerFn(
-                                struct_name.val.clone(),
-                                field.val.clone(),
-                            ));
+                        TypeT::TypeRef(k @ (TypeRefKind::Struct(_) | TypeRefKind::Union(_))) => {
+                            let container =
+                                self.emit_name(Name::ContainerFn(k.into(), field.val.clone()));
                             parens(unaryfn(container, self.emit_rvalue(env, ptr)))
                         }
                         _ => {
                             self.report(
-                                format!("_container_of expects a struct type, got {}", struct_ty),
+                                format!(
+                                    "_container_of expects a struct or union type, got {}",
+                                    struct_ty
+                                ),
                                 &struct_ty.loc,
                             );
                             Doc::text("(admit())")
@@ -5784,145 +5785,16 @@ impl<'a> Emitter<'a> {
             ));
         }
 
-        // For every field, emit the inverse of the field-address projection: a
-        // total function mapping the field's `ref` (or, for inline-array fields,
-        // the array handle) back to a `ref` of the enclosing struct, plus a
-        // left-inverse lemma (`container (proj p) == p`). The `SMTPat` triggers
-        // on the round-trip term `container (proj p)` rather than the bare
-        // projection, so the equality is injected only where a `container_of`
-        // was actually formed — not in every proof that mentions a field
-        // projection. The user composes `container_of` out of these symbols.
-        for f in fields {
-            let fld = f.val.name();
-            let projected_type = self.emit_field_projection_type(env, f);
-            let container_name =
-                self.emit_name(Name::StructContainerFn(name.val.clone(), fld.val.clone()));
-
-            ses.push(mk_assume_val(
-                vec![],
-                container_name.clone(),
-                &[parens(
-                    Doc::text("r:").append(Doc::line()).append(projected_type),
-                )],
-                ref_struct_type.clone(),
-            ));
-
-            let proj_name = self.emit_name(ghost_fld(fld));
-            let inv_name =
-                self.emit_name(Name::StructContainerInv(name.val.clone(), fld.val.clone()));
-            let proj_app = unaryfn(proj_name, Doc::text("p"));
-            let container_app = unaryfn(container_name, proj_app);
-            let ensures = parens(
-                Doc::text("ensures")
-                    .append(Doc::line())
-                    .append(container_app.clone())
-                    .append(Doc::text(" == p")),
-            );
-            let smtpat = Doc::text("[SMTPat ")
-                .append(container_app)
-                .append(Doc::text("]"));
-
-            ses.push(mk_assume_val(
-                vec![],
-                inv_name,
-                &[parens(
-                    Doc::text("p:")
-                        .append(Doc::line())
-                        .append(ref_struct_type.clone()),
-                )],
-                Doc::text("Lemma")
-                    .append(Doc::line().append(ensures))
-                    .append(Doc::line().append(smtpat))
-                    .nest(2)
-                    .group(),
-            ));
-
-            // Dual (right-inverse) lemma: `proj (container r) == r`. Sound for
-            // the same reason as `container_inv` -- both compose the field
-            // offset with its negation. Needed so a caller owning the struct via
-            // `container_of(field_ref)` can still address the field through the
-            // original `field_ref`: the SMTPat rewrites the round-trip term
-            // `proj (container r)` back to `r`.
-            let projected_type_dual = self.emit_field_projection_type(env, f);
-            let container_name_dual =
-                self.emit_name(Name::StructContainerFn(name.val.clone(), fld.val.clone()));
-            let proj_name_dual = self.emit_name(ghost_fld(fld));
-            let dual_name = self.emit_name(Name::StructProjContainerInv(
-                name.val.clone(),
-                fld.val.clone(),
-            ));
-            let container_app_r = unaryfn(container_name_dual, Doc::text("r"));
-            let proj_container_app = unaryfn(proj_name_dual, container_app_r);
-            let ensures_dual = parens(
-                Doc::text("ensures")
-                    .append(Doc::line())
-                    .append(proj_container_app.clone())
-                    .append(Doc::text(" == r")),
-            );
-            let smtpat_dual = Doc::text("[SMTPat ")
-                .append(proj_container_app)
-                .append(Doc::text("]"));
-
-            ses.push(mk_assume_val(
-                vec![],
-                dual_name,
-                &[parens(
-                    Doc::text("r:")
-                        .append(Doc::line())
-                        .append(projected_type_dual),
-                )],
-                Doc::text("Lemma")
-                    .append(Doc::line().append(ensures_dual))
-                    .append(Doc::line().append(smtpat_dual))
-                    .nest(2)
-                    .group(),
-            ));
-        }
-
-        // Offset-0 `container_of` null-preservation axiom.
-        //
-        // `container_of` on a struct's *first* (offset-0) member is pointer
-        // identity (C 6.7.2.1: no leading padding). We capture this for the
-        // null pointer with a single ground `squash` axiom on the field
-        // projection (which fires automatically into the SMT context):
-        //
-        //   proj (null #outer) == null #inner
-        //
-        // The dual direction, `container (null #inner) == null #outer`, is NOT
-        // emitted separately: it follows automatically from the `container_inv`
-        // lemma (`container (proj p) == p`, carrying an SMTPat) instantiated at
-        // `p = null`, rewritten with the axiom above. Sound ONLY at offset 0 —
-        // a nonzero-offset `container_of(NULL)` is undefined behaviour — so we
-        // restrict to the first field, and only when it is a `Plain`
-        // (non-array, non-bitfield) member whose projection is a genuine `ref`.
-        if let Some(f0) = fields.first() {
-            if !f0.val.is_array() {
-                if let FieldT::Plain { ty, .. } = &f0.val {
-                    let fld = f0.val.name();
-                    let inner_ty = self.emit_type(env, ty);
-                    let null_inner =
-                        parens(Doc::text("Pulse.Lib.Reference.null #").append(parens(inner_ty)));
-                    let null_outer = parens(
-                        Doc::text("Pulse.Lib.Reference.null #")
-                            .append(parens(struct_type_name.clone())),
-                    );
-
-                    let proj_name = self.emit_name(ghost_fld(fld));
-                    let proj_eq = parens(
-                        unaryfn(proj_name, null_outer)
-                            .append(Doc::text(" =="))
-                            .append(Doc::line())
-                            .append(null_inner),
-                    );
-                    ses.push(mk_assume_val(
-                        vec![],
-                        self.emit_name(Name::StructProjNull(name.val.clone(), fld.val.clone())),
-                        &[],
-                        unaryfn(Doc::text("squash"), proj_eq),
-                    ));
-                }
-            }
-        }
+        self.emit_container_axioms(
+            env,
+            &mut ses,
+            TypeRef::Struct(name.val.clone()),
+            fields,
+            &ghost_fld,
+            &ref_struct_type,
+            &struct_type_name,
+            false,
+        );
 
         ses.push(mk_assume_val(
             vec![Doc::text("pulse_intro")],
@@ -6313,6 +6185,129 @@ impl<'a> Emitter<'a> {
         Doc::intersperse(ses.into_iter().map(|se| se.group()), Doc::hardline())
     }
 
+    /// Emits, for every member of a struct/union, the inverse of the
+    /// field-address projection: a total function mapping the field's `ref`
+    /// (or, for inline-array fields, the array handle) back to a `ref` of the
+    /// enclosing aggregate, plus a left-inverse lemma (`container (proj p) ==
+    /// p`) and a right-inverse lemma (`proj (container r) == r`). The `SMTPat`s
+    /// trigger on the round-trip terms rather than the bare projection, so the
+    /// equalities are injected only where a `container_of` was actually formed
+    /// -- not in every proof that mentions a field projection. Both lemmas are
+    /// sound because they compose the field offset with its negation.
+    ///
+    /// Additionally emits the offset-0 null-preservation axiom
+    /// `proj (null #outer) == null #inner` for offset-0 members: only the
+    /// first field of a struct (C 6.7.2.1: no leading padding), but every
+    /// member of a union (`all_offset_zero`). The dual direction follows from
+    /// the left-inverse lemma at `p = null`. Sound ONLY at offset 0 -- a
+    /// nonzero-offset `container_of(NULL)` is undefined behaviour -- and only
+    /// for `Plain` (non-array, non-bitfield) members whose projection is a
+    /// genuine `ref`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_container_axioms(
+        &mut self,
+        env: &Env,
+        ses: &mut Vec<Doc>,
+        outer: TypeRef,
+        fields: &[Field],
+        ghost_fld: &dyn Fn(&Ident) -> Name,
+        ref_outer_type: &Doc,
+        outer_type_name: &Doc,
+        all_offset_zero: bool,
+    ) {
+        for f in fields {
+            let fld = f.val.name();
+            let projected_type = self.emit_field_projection_type(env, f);
+            let container_name = self.emit_name(Name::ContainerFn(outer.clone(), fld.val.clone()));
+            let proj_name = self.emit_name(ghost_fld(fld));
+
+            ses.push(mk_assume_val(
+                vec![],
+                container_name.clone(),
+                &[parens(
+                    Doc::text("r:")
+                        .append(Doc::line())
+                        .append(projected_type.clone()),
+                )],
+                ref_outer_type.clone(),
+            ));
+
+            let container_app = unaryfn(
+                container_name.clone(),
+                unaryfn(proj_name.clone(), Doc::text("p")),
+            );
+            ses.push(mk_assume_val(
+                vec![],
+                self.emit_name(Name::ContainerInv(outer.clone(), fld.val.clone())),
+                &[parens(
+                    Doc::text("p:")
+                        .append(Doc::line())
+                        .append(ref_outer_type.clone()),
+                )],
+                Self::round_trip_lemma(container_app, "p"),
+            ));
+
+            let proj_container_app = unaryfn(proj_name, unaryfn(container_name, Doc::text("r")));
+            ses.push(mk_assume_val(
+                vec![],
+                self.emit_name(Name::ProjContainerInv(outer.clone(), fld.val.clone())),
+                &[parens(
+                    Doc::text("r:").append(Doc::line()).append(projected_type),
+                )],
+                Self::round_trip_lemma(proj_container_app, "r"),
+            ));
+        }
+
+        let offset_zero_fields = if all_offset_zero {
+            fields
+        } else {
+            &fields[..fields.len().min(1)]
+        };
+        for f in offset_zero_fields {
+            if f.val.is_array() {
+                continue;
+            }
+            let FieldT::Plain { ty, .. } = &f.val else {
+                continue;
+            };
+            let fld = f.val.name();
+            let inner_ty = self.emit_type(env, ty);
+            let null_inner =
+                parens(Doc::text("Pulse.Lib.Reference.null #").append(parens(inner_ty)));
+            let null_outer = parens(
+                Doc::text("Pulse.Lib.Reference.null #").append(parens(outer_type_name.clone())),
+            );
+            let proj_eq = parens(
+                unaryfn(self.emit_name(ghost_fld(fld)), null_outer)
+                    .append(Doc::text(" =="))
+                    .append(Doc::line())
+                    .append(null_inner),
+            );
+            ses.push(mk_assume_val(
+                vec![],
+                self.emit_name(Name::ProjNull(outer.clone(), fld.val.clone())),
+                &[],
+                unaryfn(Doc::text("squash"), proj_eq),
+            ));
+        }
+    }
+
+    /// `Lemma (ensures lhs == var) [SMTPat lhs]`
+    fn round_trip_lemma(lhs: Doc, var: &str) -> Doc {
+        let ensures = parens(
+            Doc::text("ensures")
+                .append(Doc::line())
+                .append(lhs.clone())
+                .append(Doc::text(format!(" == {}", var))),
+        );
+        let smtpat = Doc::text("[SMTPat ").append(lhs).append(Doc::text("]"));
+        Doc::text("Lemma")
+            .append(Doc::line().append(ensures))
+            .append(Doc::line().append(smtpat))
+            .nest(2)
+            .group()
+    }
+
     fn emit_uniondefn(&mut self, env: &Env, decl @ UnionDefn { name, fields }: &UnionDefn) -> Doc {
         let env = &mut env.clone();
         env.push_union(decl.clone());
@@ -6441,6 +6436,19 @@ impl<'a> Emitter<'a> {
                     .group(),
             ));
         }
+
+        // Every union member lives at offset 0, so `container_of` is supported
+        // for all of them, and the null-preservation axiom holds for each.
+        self.emit_container_axioms(
+            env,
+            &mut ses,
+            TypeRef::Union(name.val.clone()),
+            fields,
+            &ghost_fld,
+            &ref_union_type,
+            &union_type_name,
+            true,
+        );
 
         // Per-field unfold: requires pts_to x #p vx ** pure (Field_foo__x? vx)
         // gives back unfolded token plus the field's `pts_to` clause
