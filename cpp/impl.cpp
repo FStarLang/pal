@@ -1865,16 +1865,14 @@ public:
           }
           return mk_free(std::move(loc), trRValue(arg));
         }
-        // Detect memset(ptr, 0, ...). Only a zero fill value is supported:
-        // C `memset` writes raw bytes, and the only fill we can faithfully
-        // model for arbitrary types is the all-zero one. Two shapes are
-        // recognized:
+        // Detect memset with a constant byte fill. The native emitter checks
+        // whether the element type has a supported representation of it.
+        // Zero additionally supports a whole-object write:
         //   * memset(ptr, 0, sizeof(T))      — zero a single object of type T
         //     (struct, scalar, ...), emitted as a whole-object write of
         //     `zero_default`.
         //   * memset(ptr, 0, sizeof(T) * n)  — zero an array of byte-sized
         //     element type (e.g. uint8_t, char).
-        // Non-zero fill values are rejected with a clear diagnostic.
         // A platform's zeroing wrapper is the memset intrinsic under another
         // name and a shorter argument list: `zero_memory(ptr, size)`,
         // `RtlZeroMemory(ptr, size)`, `bzero(ptr, size)`. Declaring it
@@ -1911,16 +1909,21 @@ public:
           auto *sizeArg =
               c->getArg(isMemsetAlias ? 1 : 2)->IgnoreParenImpCasts();
           Expr::EvalResult valRes;
-          bool valIsZero =
-              isMemsetAlias || (valArg->EvaluateAsInt(valRes, *astCtx) &&
-                                valRes.Val.isInt() && valRes.Val.getInt() == 0);
-          if (!valIsZero) {
+          if (!isMemsetAlias && (!valArg->EvaluateAsInt(valRes, *astCtx) ||
+                                 !valRes.Val.isInt())) {
             reportUnsupported(e->getSourceRange(), loc,
-                              "memset is only supported with a zero fill value",
+                              "memset requires a constant fill value",
                               std::string());
             return mk_rvalue_err(std::move(loc),
                                  trQualType(c->getType(), c->getSourceRange()));
           }
+          const uint64_t fillByte =
+              isMemsetAlias ? 0
+                            : valRes.Val.getInt().zextOrTrunc(8).getZExtValue();
+          const bool valIsZero = fillByte == 0;
+          auto fillExpr = mk_int_lit(
+              loc.clone(), mk_bigint(toStr(std::to_string(fillByte))),
+              trQualType(astCtx->UnsignedCharTy, e->getSourceRange()));
           // Zeroing a single object: memset(ptr, 0, sizeof(T)) where the size
           // is a bare sizeof (no multiplication) whose type matches the
           // pointee of `ptr`. Works for any type with a `has_zero_default`
@@ -1930,7 +1933,7 @@ public:
             if (szof->getKind() == UETT_SizeOf) {
               auto objQt = szof->getTypeOfArgument();
               auto pointeeQt = ptrArg->getType()->getPointeeType();
-              if (!pointeeQt.isNull() &&
+              if (valIsZero && !pointeeQt.isNull() &&
                   astCtx->hasSameUnqualifiedType(objQt, pointeeQt)) {
                 auto objTy = trQualType(pointeeQt, szof->getSourceRange());
                 return mk_memset_zero(std::move(loc), std::move(objTy),
@@ -1938,7 +1941,7 @@ public:
               }
             }
           }
-          // Zeroing a whole array: `f(arr, N)` where `arr` is an array-typed
+          // Filling a whole array: `f(arr, N)` where `arr` is an array-typed
           // lvalue that decays to the pointer argument and `N` is its size in
           // bytes. The extent lives in the array's own type, so nothing has to
           // be inferred from the way the count was spelled: `sizeof(s->field)`
@@ -1953,39 +1956,33 @@ public:
             if (const auto *arrTy = astCtx->getAsConstantArrayType(destQt)) {
               auto elemQt = arrTy->getElementType();
               Expr::EvalResult szRes;
-              const bool byteSized =
+              const bool complete =
                   !elemQt->isIncompleteType() && !elemQt->isDependentType() &&
-                  astCtx->getTypeSizeInChars(elemQt).getQuantity() == 1;
+                  astCtx->getTypeSizeInChars(elemQt).getQuantity() > 0;
               const auto arrBytes =
                   astCtx->getTypeSizeInChars(destQt).getQuantity();
-              if (byteSized && sizeArg->EvaluateAsInt(szRes, *astCtx) &&
+              if (complete && sizeArg->EvaluateAsInt(szRes, *astCtx) &&
                   szRes.Val.isInt() && szRes.Val.getInt() == arrBytes) {
                 auto elemTy = trQualType(elemQt, destObj->getSourceRange());
                 llvm::SmallString<20> countStr;
-                llvm::APInt(64, arrBytes, true).toStringSigned(countStr);
+                arrTy->getSize().toStringUnsigned(countStr);
                 auto countExpr = mk_int_lit(
                     loc.clone(), mk_bigint(toStr(StringRef(countStr))),
                     trQualType(astCtx->getSizeType(), e->getSourceRange()));
-                auto zeroExpr =
-                    mk_int_lit(loc.clone(), mk_bigint("0"_rs),
-                               trQualType(elemQt, destObj->getSourceRange()));
                 return mk_memset(std::move(loc), std::move(elemTy),
-                                 trRValue(ptrArg), std::move(zeroExpr),
+                                 trRValue(ptrArg), std::move(fillExpr),
                                  std::move(countExpr));
               }
             }
           }
-          // The array shape below reads the fill value out of the call, which
-          // an alias does not carry, and a wrapper taking `void *` cannot name
-          // a byte-sized element type anyway. Rejecting it here keeps an
-          // unrecognized alias call from falling through to an uninterpreted
-          // stub.
+          // Keep an unrecognized wrapper call from falling through to an
+          // uninterpreted stub.
           if (isMemsetAlias) {
             reportUnsupported(
                 e->getSourceRange(), loc,
                 "a _memset_zero call is only supported in the form "
                 "f(ptr, sizeof(*ptr)) or f(arr, sizeof(arr)) for a "
-                "fixed-size array of a byte-sized element type; ",
+                "fixed-size array with a supported element type; ",
                 fd->getName().str());
             return mk_rvalue_err(std::move(loc),
                                  trQualType(c->getType(), c->getSourceRange()));
@@ -2020,7 +2017,7 @@ public:
                       trQualType(elemQt, sizeofSide->getSourceRange());
                   auto countExpr = trRValue(countSide);
                   return mk_memset(std::move(loc), std::move(elemTy),
-                                   trRValue(ptrArg), trRValue(valArg),
+                                   trRValue(ptrArg), std::move(fillExpr),
                                    std::move(countExpr));
                 }
                 reportUnsupported(
@@ -2033,6 +2030,15 @@ public:
                     trQualType(c->getType(), c->getSourceRange()));
               }
             }
+          }
+          if (!valIsZero) {
+            reportUnsupported(
+                e->getSourceRange(), loc,
+                "nonzero memset requires a whole fixed-size array or "
+                "a byte array with an explicit element count",
+                std::string());
+            return mk_rvalue_err(std::move(loc),
+                                 trQualType(c->getType(), c->getSourceRange()));
           }
         }
         auto fn = ctx.mk_ident(toStr(fd->getName()),

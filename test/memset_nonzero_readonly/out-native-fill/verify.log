@@ -1,0 +1,58 @@
+* Warning 321:
+  - Did not expect module Pulse to be already checked.
+  - Found it in an unexpected location:
+      /data/nswamy/boss/palow/fstar-9d50a14/stage3/out/lib/fstar/pulse/pulse.checked/Pulse.fst.checked
+    instead of _cache-native-fill/Pulse.fst.checked
+
+* Warning 321:
+  - Did not expect module Pulse.Main to be already checked.
+  - Found it in an unexpected location:
+      /data/nswamy/boss/palow/fstar-9d50a14/stage3/out/lib/fstar/pulse/common.checked/Pulse.Main.fsti.checked
+    instead of _cache-native-fill/Pulse.Main.fsti.checked
+
+* Warning 321:
+  - Did not expect module Pulse.Main to be already checked.
+  - Found it in an unexpected location:
+      /data/nswamy/boss/palow/fstar-9d50a14/stage3/out/lib/fstar/pulse/common.checked/Pulse.Main-model.fst.checked
+    instead of _cache-native-fill/Pulse.Main-model.fst.checked
+
+Verifying ArrayFill.fst
+Verified module: ArrayFill
+All verification conditions discharged successfully
+Verifying Func_paint_readonly.fsti
+Verified i'face (or impl+i'face): Func_paint_readonly
+All verification conditions discharged successfully
+Verifying Func_paint_readonly.fst
+* Error 19 at out-native-fill/Func_paint_readonly.fst(64,2-64,24):
+  - Could not prove equality of:
+  - ‘array_pts_to (maybe_repr uint8_t_repr 1)
+      1
+      (SizeT.v uint8_t_alignof)
+      var_bytes
+      perm_bytes
+      (somes val_bytes)’
+  - ‘array_pts_to (maybe_repr uint8_t_repr 1)
+      1
+      (SizeT.v uint8_t_alignof)
+      var_bytes
+      1.0R
+      (somes val_bytes)’
+  - Assertion failed
+  - The SMT solver could not prove the query.
+  - Failed to prove: perm_bytes == 1.0R
+  - In context:
+      var_bytes: Pulse.Lib.C.Palow.Ptr.ptr
+      perm_bytes: PulseCore.FractionalPermission.perm
+      val_bytes: FStar.Ghost.erased (FStar.Seq.Base.seq FStar.UInt8.t)
+      FStar.Seq.Base.length val_bytes == 4
+      __: Prims.unit
+      FStar.SizeT.fits (Pulse.Lib.C.Palow.Ptr.addr_of var_bytes +
+          1 * FStar.Seq.Base.length val_bytes) /\
+      Pulse.Lib.C.Palow.Ptr.addr_of var_bytes +
+      1 * FStar.Seq.Base.length val_bytes <
+      Prims.pow2 64
+      __: Prims.unit
+  - See also out-native-fill/Func_paint_readonly.fst(64,2-64,59)
+
+1 error was reported (see above)
+make[2]: *** [../verify.mk:42: _cache-native-fill/Func_paint_readonly.fst.checked] Error 1
