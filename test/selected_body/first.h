@@ -1,0 +1,1 @@
+#define SELECTED_BASE 40

@@ -116,11 +116,23 @@ pal [OPTIONS] <FILES>...
 
   -o, --outdir <DIR>     where to write .fst output
   -I <PATH>              extra include search paths
+      --include <FILE>   preinclude a header (repeatable, in order)
+      --only-function <NAME>  select a function body (repeatable)
       --print-ir         print IR and exit
       --time-passes      show per-pass timing
   -q, --quiet            suppress diagnostics on stderr
       --tmpdir <DIR>     directory for intermediates
 ```
+
+Without `--only-function`, all input function bodies are translated. With it,
+every selected name must have a definition; excluded bodies are reported as
+warnings and become external declarations, not verified implementations.
+Selected bodies still undergo the normal strict translation checks. This lets
+a verification build check an actual dependency implementation with an
+annotation header supplied by `--include`, without copying its C body.
+Preincluded headers follow any platform headers in the compilation database.
+A selected definition in an included header remains a proof root even when
+none of the input sources call it.
 
 ---
 

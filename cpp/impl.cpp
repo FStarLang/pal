@@ -3864,9 +3864,16 @@ public:
                               snippets);
         }
       }
-      if (FD->hasBody()) {
+      if (FD->hasBody() && ctx.selects_function_body(toStr(FD->getName()))) {
         return ctx.add_fn_defn(std::move(builder), trStmts(FD->getBody()));
       } else {
+        if (FD->doesThisDeclarationHaveABody()) {
+          std::string message =
+              "--only-function excludes body of `" + FD->getName().str() +
+              "`; only its external declaration is translated";
+          ctx.report_diag(getRange(FD->getSourceRange()), false,
+                          toStr(message));
+        }
         return ctx.add_fn_decl(std::move(builder));
       }
     } else if (auto *TD = dyn_cast<TypedefDecl>(D)) {
@@ -4250,6 +4257,15 @@ static void parse_file(RefMut<Ctx> ctx) {
       ArgumentInsertPosition::END));
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
+
+  // Preserve platform preincludes from the compilation database before
+  // applying the caller's annotation headers, in their requested order.
+  size_t includeFileCount = ctx.get_include_file_count();
+  for (size_t i = 0; i < includeFileCount; ++i) {
+    std::string header = toString(ctx.get_include_file(i));
+    Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
+        {"-include", header.c_str()}, ArgumentInsertPosition::END));
+  }
 
   // Add user-specified include paths and preprocessor definitions.
   //

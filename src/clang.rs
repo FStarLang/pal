@@ -40,7 +40,9 @@ pub struct Ctx<'a> {
     vfs: &'a mut dyn VFS,
     input_file_name: String,
     include_paths: Vec<String>,
+    include_files: Vec<String>,
     defines: Vec<String>,
+    only_functions: HashSet<String>,
     interned_strs: HashSet<Rc<str>>,
     translation_unit: TranslationUnit,
     diagnostics: Diagnostics,
@@ -52,7 +54,9 @@ impl<'a> Ctx<'a> {
     fn new(
         input_file_name: String,
         include_paths: Vec<String>,
+        include_files: Vec<String>,
         defines: Vec<String>,
+        only_functions: HashSet<String>,
         vfs: &'a mut dyn VFS,
     ) -> Ctx<'a> {
         let input_fn: &str = &input_file_name;
@@ -61,7 +65,9 @@ impl<'a> Ctx<'a> {
             vfs,
             input_file_name,
             include_paths,
+            include_files,
             defines,
+            only_functions,
             interned_strs: HashSet::new(),
             translation_unit: TranslationUnit {
                 main_file_names: vec![main_file_name],
@@ -85,6 +91,18 @@ impl<'a> Ctx<'a> {
 
     fn get_include_path(&self, idx: usize) -> &str {
         &self.include_paths[idx]
+    }
+
+    fn get_include_file_count(&self) -> usize {
+        self.include_files.len()
+    }
+
+    fn get_include_file(&self, idx: usize) -> &str {
+        &self.include_files[idx]
+    }
+
+    fn selects_function_body(&self, name: &str) -> bool {
+        self.only_functions.is_empty() || self.only_functions.contains(name)
     }
 
     /// Extra preprocessor defines: a test's own `-D` flags, and how a source
@@ -1105,7 +1123,9 @@ fn mk_label(loc: Rc<SourceInfo>, label: Rc<Ident>, ensures: Exprs) -> Rc<Stmt> {
 pub fn parse_file(
     file_name: &str,
     include_paths: &[String],
+    include_files: &[String],
     defines: &[String],
+    only_functions: &[String],
     identity: &crate::pass::linkage::UnitIdentity,
     vfs: &mut dyn VFS,
 ) -> (
@@ -1116,7 +1136,9 @@ pub fn parse_file(
     let mut ctx = Ctx::new(
         file_name.to_string(),
         include_paths.to_vec(),
+        include_files.to_vec(),
         defines.to_vec(),
+        only_functions.iter().cloned().collect(),
         vfs,
     );
     ctx.symbols.identity = identity.clone();

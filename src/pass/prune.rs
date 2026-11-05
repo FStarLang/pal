@@ -493,9 +493,12 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
     }
 }
 
-pub fn prune(tu: &mut TranslationUnit) {
+pub fn prune(tu: &mut TranslationUnit, required_functions: &[String]) {
     let mut deps = Deps::new();
     scan_translation_unit(&mut deps, tu);
+    for name in required_functions {
+        deps.add_root(DeclName::Fn(Rc::from(name.as_str())));
+    }
     for decl in &tu.decls {
         if in_main_file(&tu.main_file_names, &decl.loc) {
             deps.add_root(decl_name(&decl))

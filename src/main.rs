@@ -60,6 +60,15 @@ struct Cli {
     #[arg(short = 'I', help = "Additional include search paths")]
     include_paths: Vec<String>,
 
+    #[arg(long = "include", help = "Header to include before each source file")]
+    include_files: Vec<String>,
+
+    #[arg(
+        long = "only-function",
+        help = "Translate only these named function bodies; other bodies become external declarations"
+    )]
+    only_functions: Vec<String>,
+
     #[arg(
         short = 'D',
         help = "Preprocessor definitions, e.g. -DFOO or -DFOO=bar"
@@ -205,7 +214,9 @@ fn main() {
         let (tu, file_diags, symbols) = clang::parse_file(
             &file_name,
             &cli.include_paths,
+            &cli.include_files,
             &defines,
+            &cli.only_functions,
             identity,
             &mut *vfs,
         );
@@ -222,6 +233,29 @@ fn main() {
         combined_tu.layouts.extend(tu.layouts);
         combined_tu.pointer_size = tu.pointer_size;
     }
+    for name in &cli.only_functions {
+        if !combined_tu
+            .decls
+            .iter()
+            .any(|d| matches!(&d.val, ir::DeclT::FnDefn(f) if f.decl.name.val.as_ref() == name))
+        {
+            let pos = ir::Position {
+                line: 1,
+                character: 1,
+            };
+            diags.report(Diagnostic {
+                loc: Location {
+                    file_name: combined_tu.main_file_names[0].clone(),
+                    range: ir::Range {
+                        start: pos,
+                        end: pos,
+                    },
+                },
+                level: DiagnosticLevel::Error,
+                msg: format!("--only-function `{name}` has no definition in the input files"),
+            });
+        }
+    }
     if cli.time_passes {
         eprintln!(
             "  parse ({} files, {} decls): {:.3}s",
@@ -235,7 +269,7 @@ fn main() {
     pass::builtins::builtins(&mut combined_tu);
 
     let t = Instant::now();
-    pass::prune::prune(&mut combined_tu);
+    pass::prune::prune(&mut combined_tu, &cli.only_functions);
     if cli.time_passes {
         eprintln!(
             "  prune ({} decls): {:.3}s",

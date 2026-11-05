@@ -28,6 +28,11 @@ EXTRA_OPTS := $(shell cat extra_opts)
 PAL_OPTS += $(EXTRA_OPTS)
 endif
 
+# Translation-only options, such as selecting a named function body.
+ifneq ($(wildcard pal_opts),)
+PAL_OPTS += $(shell cat pal_opts)
+endif
+
 all: verify compile
 
 ifneq ($(wildcard native-check.c),)
@@ -48,7 +53,7 @@ endif
 
 translate: $(OUT_DIR)/.stamp
 
-$(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h
+$(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h $(wildcard extra_opts pal_opts)
 	@mkdir -p $(OUT_DIR)
 	$(C2PULSE) $(PAL_OPTS) --outdir $(OUT_DIR) $(C_FILES)
 	@touch $@

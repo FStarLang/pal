@@ -1,4 +1,4 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, path::PathBuf, rc::Rc};
 
 pub struct VFSEntry {
     pub file_name: String,
@@ -21,7 +21,7 @@ pub trait VFS {
 }
 
 pub struct RealFS {
-    cache: HashMap<String, VFSResult>,
+    cache: HashMap<PathBuf, VFSResult>,
 }
 
 impl RealFS {
@@ -33,7 +33,6 @@ impl RealFS {
 }
 
 fn read_real_vfs_file(file_name: &str) -> VFSResult {
-    // let canon_file_name = std::fs::canonicalize(file_name).map_err(|e| e.to_string())?;
     let contents = std::fs::read(file_name).map_err(|e| e.to_string())?;
     Ok(Rc::new(VFSEntry {
         file_name: file_name.to_string(),
@@ -43,11 +42,14 @@ fn read_real_vfs_file(file_name: &str) -> VFSResult {
 
 impl VFS for RealFS {
     fn read_vfs_file(&mut self, file_name: &str) -> VFSResult {
-        if let Some(result) = self.cache.get(file_name) {
+        // Clang uses entry identity for #pragma once, even when a preinclude
+        // and a source include spell the same physical file differently.
+        let key = std::fs::canonicalize(file_name).map_err(|e| e.to_string())?;
+        if let Some(result) = self.cache.get(&key) {
             return result.clone();
         }
         let result = read_real_vfs_file(file_name);
-        self.cache.insert(file_name.to_string(), result.clone());
+        self.cache.insert(key, result.clone());
         result
     }
 }
