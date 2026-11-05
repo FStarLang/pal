@@ -3468,7 +3468,7 @@ public:
     if (auto *FD = dyn_cast<FunctionDecl>(D)) {
       if (hasFunctionAnnotation(FD, "pal-ignore"))
         return {};
-      bool ignoreBody = hasFunctionAnnotation(FD, "pal-ignore-body");
+      bool admit = hasFunctionAnnotation(FD, "pal-admit");
       // Include block
       if (FD->getName().starts_with("__pal_include_anchor")) {
         std::optional<unsigned> code;
@@ -3662,7 +3662,7 @@ public:
           trQualType(FD->getReturnType(), FD->getReturnTypeSourceRange()),
           FD->getReturnType(), FD->getReturnTypeSourceRange()));
       for (auto attr : FD->getAttrs()) {
-        if (FD->hasBody() && !ignoreBody && attr->isInherited())
+        if (FD->hasBody() && !admit && attr->isInherited())
           continue;
         if (auto req = isUnaryAttrOf(attr, "pal-requires")) {
           builder.requires(std::move(req.value()));
@@ -3692,7 +3692,7 @@ public:
                               snippets);
         }
       }
-      if (FD->hasBody() && !ignoreBody) {
+      if (FD->hasBody() && !admit) {
         return ctx.add_fn_defn(std::move(builder), trStmts(FD->getBody()));
       } else {
         return ctx.add_fn_decl(std::move(builder));

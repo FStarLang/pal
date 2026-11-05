@@ -39,7 +39,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _pure __attribute((annotate("pal-pure")))
 #define _total __attribute((annotate("pal-total")))
 #define _pal_ignore __attribute__((annotate("pal-ignore")))
-#define _pal_ignore_body __attribute__((annotate("pal-ignore-body")))
+#define _pal_admit __attribute__((annotate("pal-admit")))
 #define _pulse_opaque_to_smt __attribute((annotate("pal-opaque-to-smt")))
 #define _rec __attribute((annotate("pal-rec")))
 #define _pulse_eager_unfold_predicate __attribute__((annotate("pal-eager-unfold-predicate")))
@@ -91,7 +91,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _pure
 #define _total
 #define _pal_ignore
-#define _pal_ignore_body
+#define _pal_admit
 #define _pulse_opaque_to_smt
 #define _rec
 #define _pulse_eager_unfold_predicate
