@@ -146,7 +146,17 @@ Inside any of these predicates the following spec-only constructs are available:
 - `_slprop` — type cast that declares a separation-logic predicate (in `_refine`, or on an `_inline_pulse` clause).
 - `$(...)` — antiquotation: splice a C-level entity into an `_inline_pulse` body (see the Antiquotation section under Pulse interop).
 
-Builtins with a Pulse model may be used in specifications too, e.g. `__builtin_bswap64(x)` is `Pulse.Lib.C.UInt64.bswap64 x`.
+Pure builtins with a Pulse model may be used in specifications too, e.g. `__builtin_bswap64(x)` is `Pulse.Lib.C.UInt64.bswap64 x`.
+
+In function bodies, `__builtin_mul_overflow(a, b, result)` supports unsigned
+operands of at most 64 bits and a nonvolatile unsigned 32-bit destination.
+The definition-backed `Pulse.Lib.C.Palow.Checked` operation always writes the
+low 32 bits of the mathematical product and returns true exactly when that
+product does not fit in 32 bits. It requires exclusive destination storage,
+including for a discarded return value; initialized cells and writable field
+loans are supported. Signed operands, wider inputs, other destination widths,
+and volatile destinations are rejected. This stateful builtin cannot appear
+in a specification.
 
 ### Loop invariants
 

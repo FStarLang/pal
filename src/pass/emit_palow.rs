@@ -16759,7 +16759,30 @@ impl<'a> Body<'a> {
                 ExprT::Index(..) if self.global_root(inner) => self.addr(inner),
                 _ => self.addr_only(inner),
             },
-            // A PAL primitive (`prims.rs`) is a definition in the Pulse
+            ExprT::FnCall(name, args) if crate::prims::out_fn(&name.val).is_some() => {
+                let (fstar, output) = crate::prims::out_fn(&name.val).unwrap();
+                let mark = self.seeded.len();
+                let outer_close = std::mem::take(&mut self.pending_close);
+                let outer_own = std::mem::take(&mut self.own_open);
+                let mut call = fstar.to_string();
+                for (i, arg) in args.iter().enumerate() {
+                    let value = if i == output {
+                        self.out_arg(arg)?
+                    } else {
+                        self.rvalue(arg)?
+                    };
+                    call += &format!(" {}", value);
+                }
+                let result = self.fresh(&name.val);
+                self.lines.push(format!("let {} = ({});", result, call));
+                self.drop_seeded(mark);
+                self.lines.append(&mut self.pending_close);
+                self.close_own();
+                self.pending_close = outer_close;
+                self.own_open = outer_own;
+                Ok(result)
+            }
+            // A pure PAL primitive (`prims.rs`) is a definition in the Pulse
             // library, pure and total, so a call to it is an application:
             // there is nothing to sequence and nothing it could fail on.
             ExprT::FnCall(name, args) if crate::prims::fstar_name(&name.val).is_some() => {
@@ -17666,10 +17689,11 @@ impl<'a> Body<'a> {
             // function has nothing left to prove about it on the way out.
             return Ok(at);
         }
-        // A written output can be overwritten. Evaluate the pointer again:
+        // An initialized pointee can be overwritten. Evaluate the pointer again:
         // the C parameter may have been reassigned since the first write.
         if let ExprT::Var(v) = &strip_vattr(a).val
             && (self.outs.iter().any(|o| *o.base == *v.val)
+                || self.owned.iter().any(|o| *o.base == *v.val)
                 || self
                     .slots
                     .iter()
@@ -20428,6 +20452,9 @@ impl<'a> Body<'a> {
                     let v = self.rvalue(e)?;
                     self.lines.push(format!("let _ = {};", v));
                     Ok(())
+                }
+                ExprT::FnCall(name, _) if crate::prims::out_fn(&name.val).is_some() => {
+                    self.rvalue(e).map(|_| ())
                 }
                 ExprT::FnCall(name, args) => {
                     let callee = self.callees.get(&*name.val.to_string());

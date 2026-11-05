@@ -1901,6 +1901,36 @@ public:
       }
     } else if (auto *c = dyn_cast<CallExpr>(e)) {
       if (auto fd = c->getDirectCallee()) {
+        if (fd->getName() == "__builtin_mul_overflow" && c->getNumArgs() == 3) {
+          auto lhsType = c->getArg(0)->getType();
+          auto rhsType = c->getArg(1)->getType();
+          auto outputType = c->getArg(2)->getType()->getPointeeType();
+          if (lhsType->isUnsignedIntegerType() &&
+              rhsType->isUnsignedIntegerType() &&
+              astCtx->getTypeSize(lhsType) <= 64 &&
+              astCtx->getTypeSize(rhsType) <= 64 && !outputType.isNull() &&
+              outputType->isUnsignedIntegerType() &&
+              astCtx->getTypeSize(outputType) == 32 &&
+              !outputType.isVolatileQualified()) {
+            auto prim = ctx.mk_ident(
+                toStr(StringRef("__pal_mul_overflow_u64_u32")), loc.clone());
+            auto primArgs = Vec<Rc<ir::Expr>>::new_();
+            for (unsigned i = 0; i < 2; ++i) {
+              primArgs.push(mk_rvalue_cast(
+                  loc.clone(), trRValue(c->getArg(i)),
+                  trQualType(astCtx->UnsignedLongLongTy, e->getSourceRange())));
+            }
+            primArgs.push(trRValue(c->getArg(2)));
+            return mk_rvalue_fncall(std::move(loc), std::move(prim),
+                                    std::move(primArgs));
+          }
+          reportUnsupported(e->getSourceRange(), loc,
+                            "unsupported __builtin_mul_overflow operand types",
+                            " (requires unsigned operands up to 64 bits and a "
+                            "nonvolatile uint32 destination)");
+          return mk_rvalue_err(std::move(loc),
+                               trQualType(e->getType(), e->getSourceRange()));
+        }
         // Byte-reversal builtins. `Pulse.Lib.C.UInt64.bswap64` is a
         // definition in terms of shifts and masks, not an axiom, so this
         // assumes nothing -- a caller that needs to reason about the result
