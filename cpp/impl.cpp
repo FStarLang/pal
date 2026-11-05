@@ -290,11 +290,20 @@ public:
            d->hasAttr<IFuncAttr>() || d->hasAttr<WeakRefAttr>();
   }
 
+  static bool hasFunctionAnnotation(FunctionDecl *fd, llvm::StringRef name) {
+    for (auto *attr : fd->specific_attrs<AnnotateAttr>())
+      if (attr->getAnnotation() == name && attr->args_size() == 0)
+        return true;
+    return false;
+  }
+
   void collectLinkage(DeclContext *dc) {
     for (auto *d : dc->decls()) {
       if (d->isInvalidDecl())
         continue;
       auto *function = dyn_cast<FunctionDecl>(d);
+      if (function && hasFunctionAnnotation(function, "pal-ignore"))
+        continue;
       auto *object = dyn_cast<VarDecl>(d);
       if ((function || object) && isLinkerAlias(d) &&
           (astCtx->getSourceManager().isWrittenInMainFile(
@@ -3457,6 +3466,9 @@ public:
 
   rust::Unit HandleDecl(Decl *D) {
     if (auto *FD = dyn_cast<FunctionDecl>(D)) {
+      if (hasFunctionAnnotation(FD, "pal-ignore"))
+        return {};
+      bool ignoreBody = hasFunctionAnnotation(FD, "pal-ignore-body");
       // Include block
       if (FD->getName().starts_with("__pal_include_anchor")) {
         std::optional<unsigned> code;
@@ -3650,7 +3662,7 @@ public:
           trQualType(FD->getReturnType(), FD->getReturnTypeSourceRange()),
           FD->getReturnType(), FD->getReturnTypeSourceRange()));
       for (auto attr : FD->getAttrs()) {
-        if (FD->hasBody() && attr->isInherited())
+        if (FD->hasBody() && !ignoreBody && attr->isInherited())
           continue;
         if (auto req = isUnaryAttrOf(attr, "pal-requires")) {
           builder.requires(std::move(req.value()));
@@ -3680,7 +3692,7 @@ public:
                               snippets);
         }
       }
-      if (FD->hasBody()) {
+      if (FD->hasBody() && !ignoreBody) {
         return ctx.add_fn_defn(std::move(builder), trStmts(FD->getBody()));
       } else {
         return ctx.add_fn_decl(std::move(builder));

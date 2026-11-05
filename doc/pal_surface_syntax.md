@@ -282,7 +282,27 @@ Notes:
 
 - `_pure` — function has no effects; callable in spec position.
 - `_rec` — recursive (must be paired with `_decreases`).
+- `_pal_ignore` — omit a function declaration/definition, including its signature
+  and contract. PAL does not translate its body. Mark the first declaration as
+  well if the function has a separate prototype; Clang inherits the marker on
+  later declarations. Calls from translated code still need a translated declaration.
+- `_pal_ignore_body` — translate a function's signature and contract as a
+  declaration, without translating its body. Calls trust that contract; the
+  implementation is not verified. Contracts on an earlier prototype are retained.
+  `_pal_ignore` takes precedence when both markers are present.
 - `_pulse_eager_unfold_predicate` — on a struct/union, emit `[@@pulse_eager_unfold]` on the generated `__pred`.
+
+Both ignore markers are no-ops when compiling ordinary C. They skip PAL's
+translation, not Clang's parsing/type-checking: bodies must still be valid C.
+They are intended for functions such as inline-assembly wrappers:
+
+```c
+_pal_ignore_body
+int platform_identity(int x) _ensures(return == x) {
+    __asm__ volatile ("" : "+r"(x));
+    return x;
+}
+```
 
 ## Global variables
 
