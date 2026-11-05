@@ -20497,6 +20497,9 @@ impl<'a> Body<'a> {
                         maybe,
                         ..
                     } = self.whole_array_place(p)?;
+                    if let Some(slot) = self.slots.iter_mut().find(|slot| slot.addr == arr) {
+                        slot.array_value = None;
+                    }
                     let z = zero_value(self.tds, ty)?;
                     // `Seq.length xs == n` is what says the fill stays inside
                     // the array, and for a parameter that can only come from
