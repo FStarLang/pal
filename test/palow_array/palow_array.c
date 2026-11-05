@@ -93,3 +93,15 @@ uint32_t get_plain_field(_plain _array const struct pair *a, size_t i, size_t n)
 {
   return a[i].x;
 }
+
+uint32_t get_spliced_pre(_plain _array const uint32_t *a, size_t i)
+  _preserves(_inline_pulse(
+    array_pts_to uint32_t_repr 4 (SizeT.v uint32_t_alignof) $(a) 0.5R $`values **
+    pure (SizeT.v $(i) < Seq.length $`values)))
+  _ensures(_inline_pulse(pure (SizeT.v $(i) < Seq.length $`values
+    /\ $(return) == Seq.index $`values (SizeT.v $(i)))))
+{
+  _array const uint32_t *alias;
+  alias = a;
+  return alias[i];
+}

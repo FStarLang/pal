@@ -2344,8 +2344,8 @@ struct FnSurface {
     /// grants a block. The grant is the emitter's reading of an annotation, so
     /// it stands whether or not the author's own clauses translated.
     ret_block: Option<RetBlock>,
-    /// Whether the emitted `requires` carries pure facts about the arguments,
-    /// from any source. See `Body::requires_ok`.
+    /// Whether the emitted `requires` can carry argument facts, directly or
+    /// inside author-supplied separation logic. See `Body::requires_ok`.
     req_props: bool,
     /// Whether the return's ownership is the author's own Pulse rather than
     /// the emitter's. Such a clause may enclose anything, including a function
@@ -5948,11 +5948,10 @@ fn emit_fn(
         out += &format!("  preserves {}\n", slprop);
     }
     let mut req = req;
-    // Whether the precondition says anything at all beyond ownership. A bounds
-    // or overflow obligation in the body is discharged by these, and it does
-    // not matter whether the author wrote them as a `_requires` or the
-    // emitter read them off a `_refine` on a parameter's type.
-    let req_props = !pre_props.is_empty();
+    // A spliced precondition may hide bounds inside its ownership predicate.
+    // F* still checks those obligations; only successfully translated clauses
+    // qualify, not clauses dropped with an unsupported contract.
+    let req_props = !pre_props.is_empty() || (contract_ok && !req_slprops.is_empty());
     req.extend(pre_props.iter().map(|p| format!("pure ({})", p)));
     if req.is_empty() {
         out += "  requires emp\n";
@@ -11889,10 +11888,9 @@ struct Body<'a> {
     /// The function's parameters, by C name. Ownership of what a pointer points
     /// to is granted by the contract, and the contract only names parameters.
     params: HashSet<String>,
-    /// Whether the emitted precondition carries any pure fact. Bounds and
-    /// overflow obligations are discharged by those, so without one there is
-    /// nothing to discharge them with. A `_refine` on a parameter's type
-    /// counts: the fact reaches the body the same way whoever wrote it down.
+    /// Whether the emitted precondition can supply bounds and overflow facts.
+    /// These may be explicit pure clauses, type refinements, or facts hidden
+    /// inside a successfully translated separation-logic precondition.
     requires_ok: bool,
     /// The ownership the contract grants over the parameters' pointees, which
     /// a loop invariant has to restate.
