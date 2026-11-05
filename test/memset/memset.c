@@ -141,6 +141,13 @@ struct fill_record {
     uint32_t count;
 };
 
+uint32_t last_count(const struct fill_record records[])
+    _requires(records._length == 2)
+    _ensures(return == records[1].count)
+{
+    return records[1].count;
+}
+
 uint32_t paint_records(void)
     _ensures(return == UINT32_MAX)
 {
@@ -150,7 +157,7 @@ uint32_t paint_records(void)
     _assert(records[0].state == UINT8_MAX);
     _assert(records[0].flags.enabled == 1);
     _assert(records[1].flags.reserved == 127);
-    return records[1].count;
+    return last_count(records);
 }
 
 uint32_t paint_uninitialized_words(void)
@@ -185,4 +192,19 @@ void paint_empty(uint8_t bytes[])
     _preserves_value(bytes._length)
 {
     memset(bytes, 0xFF, sizeof(uint8_t) * 0);
+}
+
+uint8_t first_byte(const uint8_t bytes[])
+    _requires(bytes._length == 4)
+    _ensures(return == bytes[0])
+{
+    return bytes[0];
+}
+
+uint8_t zero_initialized_bytes(void)
+    _ensures(return == 0)
+{
+    uint8_t bytes[4] = {1, 2, 3, 4};
+    memset(bytes, 0, sizeof(bytes));
+    return first_byte(bytes);
 }
