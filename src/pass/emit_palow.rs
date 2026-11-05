@@ -9590,7 +9590,14 @@ fn collect_array_fill_expr(tds: &Typedefs, e: &Expr, out: &mut BTreeMap<String, 
         | ExprT::PostIncr(x)
         | ExprT::PreDecr(x)
         | ExprT::PostDecr(x) => collect_array_fill_expr(tds, x, out),
-        ExprT::Memset(_, a, b, c) => {
+        ExprT::Memset(ty, a, b, c) => {
+            if (!is_zero(b) || palow_sizeof(tds, ty) != Some(1))
+                && let Some(len) = int_lit(c)
+                && let Some((pn, _, esize, len)) = array_fill_shape(tds, ty, len)
+            {
+                out.entry(fill_name(&pn, esize, len))
+                    .or_insert_with(|| emit_fill(tds, ty, &pn, esize, len));
+            }
             collect_array_fill_expr(tds, a, out);
             collect_array_fill_expr(tds, b, out);
             collect_array_fill_expr(tds, c, out);
@@ -20465,15 +20472,23 @@ impl<'a> Body<'a> {
                 // `encode_zero`, and the rest is the machine layer making the
                 // range all-zero.
                 //
-                // Only a fill of zero is covered, which is the fill C code
-                // reliably means -- `memset` with any other value is well
-                // defined only for byte-sized types.
+                // Constant fills of unsigned elements use the proved typed
+                // array writer. Padding stays owned but unspecified, just as
+                // for the whole-object zero write below.
                 ExprT::Memset(ty, p, value, count) => {
-                    if !is_zero(value) {
-                        return Err("a `memset` with a fill other than zero".to_string());
-                    }
                     let Some(esize) = palow_sizeof(self.tds, ty) else {
                         return Err(format!("a `memset` of {}", describe(self.tds.resolve(ty))));
+                    };
+                    let typed_fill = !is_zero(value) || esize != 1;
+                    let fill = if typed_fill {
+                        let byte = int_lit(value)
+                            .and_then(|v| u8::try_from(v).ok())
+                            .ok_or("a `memset` without a constant byte fill")?;
+                        let n = int_lit(count)
+                            .ok_or("a nonzero or non-byte `memset` without a constant count")?;
+                        Some((byte_fill_value(self.tds, ty, byte)?, n))
+                    } else {
+                        None
                     };
                     let ArrayPlace {
                         addr: arr,
@@ -20492,6 +20507,24 @@ impl<'a> Body<'a> {
                              translated"
                                 .to_string(),
                         );
+                    }
+                    if let Some((value, n)) = fill {
+                        if !maybe {
+                            self.lines.push(format!(
+                                "array_unsomes {pn}_repr {arr} {esize}sz {pn}_alignof;"
+                            ));
+                        }
+                        self.lines.push(format!(
+                            "{}_from {arr} (Seq.create {n} {value}) 0sz;",
+                            fill_name(&pn, esize, n)
+                        ));
+                        if maybe {
+                            self.lines.push(format!(
+                                "array_unsomes {pn}_repr {arr} {esize}sz {pn}_alignof;"
+                            ));
+                        }
+                        self.lines.extend(close);
+                        return Ok(());
                     }
                     let (n, nbytes) = match int_lit(count) {
                         Some(k) => (format!("{}sz", k), format!("{}sz", esize * k)),
@@ -21914,6 +21947,46 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
             Ok(format!("({{ {} }})", record_fields(vals, false)))
         }
         _ => Err(format!("a zeroed {}", describe(t))),
+    }
+}
+
+/// Unsigned integers have no trap representations. Other scalar types and
+/// unions deliberately stay unsupported: a byte pattern is not a pointer,
+/// a boolean, or evidence that a particular union member is active.
+fn byte_fill_value(tds: &Typedefs, ty: &Type, byte: u8) -> Result<String, String> {
+    let t = peel(tds, ty);
+    match &t.val {
+        TypeT::Int {
+            signed: false,
+            width,
+        } => {
+            let suffix = int_suffix(false, *width)?;
+            let mut value = BigInt::from(0);
+            for _ in 0..(*width / 8) {
+                value = (value << 8) + byte;
+            }
+            Ok(format!("{value}{suffix}"))
+        }
+        TypeT::SizeT => {
+            let value = u64::from_le_bytes([byte; 8]);
+            Ok(format!("{value}sz"))
+        }
+        TypeT::TypeRef(TypeRefKind::Struct(name)) if storable_struct(tds, t) => {
+            let si = &tds.structs[&*name.val];
+            let vals = si
+                .fields
+                .iter()
+                .map(|f| {
+                    Ok(format!(
+                        "fld_{} = {}",
+                        f.name,
+                        byte_fill_value(tds, &f.ty, byte)?
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(format!("({{ {} }})", record_fields(vals, false)))
+        }
+        _ => Err(format!("a byte-filled {}", describe(t))),
     }
 }
 

@@ -128,3 +128,61 @@ int zero_local_via_wrapper(void)
     plat_zero(&t, sizeof(t));
     return t.a;
 }
+
+struct fill_flags {
+    uint8_t enabled : 1;
+    uint8_t reserved : 7;
+};
+
+struct fill_record {
+    uint64_t offset;
+    uint8_t state;
+    struct fill_flags flags;
+    uint32_t count;
+};
+
+uint32_t paint_records(void)
+    _ensures(return == UINT32_MAX)
+{
+    struct fill_record records[2] = {0};
+    memset(records, 0xFF, sizeof(records));
+    _assert(records[0].offset == UINT64_MAX);
+    _assert(records[0].state == UINT8_MAX);
+    _assert(records[0].flags.enabled == 1);
+    _assert(records[1].flags.reserved == 127);
+    return records[1].count;
+}
+
+uint32_t paint_uninitialized_words(void)
+    _ensures(return == 0x01010101)
+{
+    uint32_t words[3];
+    memset(words, 0x101, sizeof(words));
+    _assert(words[0] == 0x01010101);
+    return words[2];
+}
+
+uint16_t repaint_words(void)
+    _ensures(return == 0xA5A5)
+{
+    uint16_t words[2] = {1, 2};
+    memset(words, -1, sizeof(words));
+    _assert(words[1] == UINT16_MAX);
+    memset(words, 0xA5, sizeof(words));
+    return words[0];
+}
+
+void paint_bytes(uint8_t bytes[])
+    _requires(bytes._length == 4)
+    _preserves_value(bytes._length)
+    _ensures(bytes[0] == 0xAB && bytes[3] == 0xAB)
+{
+    memset(bytes, 0xAB, sizeof(uint8_t) * 4);
+}
+
+void paint_empty(uint8_t bytes[])
+    _requires(bytes._length == 0)
+    _preserves_value(bytes._length)
+{
+    memset(bytes, 0xFF, sizeof(uint8_t) * 0);
+}
