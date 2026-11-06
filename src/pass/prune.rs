@@ -499,6 +499,16 @@ pub fn prune(tu: &mut TranslationUnit, required_functions: &[String]) {
     for name in required_functions {
         deps.add_root(DeclName::Fn(Rc::from(name.as_str())));
     }
+    // A selected TU-local function is known by its renamed name.
+    for decl in &tu.decls {
+        if let DeclT::FnDefn(f) = &decl.val
+            && required_functions
+                .iter()
+                .any(|n| n == crate::pass::linkage::source_name(&f.decl.name.val))
+        {
+            deps.add_root(decl_name(decl));
+        }
+    }
     for decl in &tu.decls {
         if in_main_file(&tu.main_file_names, &decl.loc) {
             deps.add_root(decl_name(&decl))

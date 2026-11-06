@@ -124,6 +124,18 @@ fn prefix(path: &str) -> String {
     format!("__pal_tu_{hash:016x}_")
 }
 
+/// The source name of a function, without the prefix `prepare` gives a
+/// TU-local entity when there is more than one translation unit. Source names
+/// cannot carry the prefix themselves: it is reserved.
+pub fn source_name(name: &str) -> &str {
+    name.strip_prefix("__pal_tu_")
+        .and_then(|rest| {
+            rest.get(17..)
+                .filter(|_| rest.as_bytes().get(16) == Some(&b'_'))
+        })
+        .unwrap_or(name)
+}
+
 pub fn identities(files: &[String]) -> Result<Vec<UnitIdentity>, String> {
     if files.len() < 2 {
         return Ok(vec![UnitIdentity::default(); files.len()]);

@@ -237,7 +237,7 @@ fn main() {
         if !combined_tu
             .decls
             .iter()
-            .any(|d| matches!(&d.val, ir::DeclT::FnDefn(f) if f.decl.name.val.as_ref() == name))
+            .any(|d| matches!(&d.val, ir::DeclT::FnDefn(f) if pass::linkage::source_name(&f.decl.name.val) == name))
         {
             let pos = ir::Position {
                 line: 1,
