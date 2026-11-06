@@ -10664,6 +10664,7 @@ pub fn emit_palow(
     tu: &TranslationUnit,
     header_statics: &[super::linkage::HeaderStatic],
     has_errors: bool,
+    portable: bool,
 ) -> Vec<PalowModule> {
     let mut tds = Typedefs::new(tu);
     let mut base = Env::new();
@@ -11252,7 +11253,8 @@ pub fn emit_palow(
         }
     }
 
-    let mut modules = into_modules(chunks, &ifaces);
+    let target = (!portable).then(|| target_assumption(tu));
+    let mut modules = into_modules(chunks, &ifaces, target.as_deref());
     for m in &mut modules {
         m.code = widen_sizet_literals(&m.code);
         if let Some(i) = &m.iface {
@@ -11461,7 +11463,25 @@ fn defined_names(code: &str) -> Vec<String> {
 /// cycle -- which matters, because F* modules may not be mutually recursive
 /// and C declarations, unlike F* ones, routinely refer to each other in an
 /// order the file does not fix.
-fn into_modules(chunks: Vec<Chunk>, ifaces: &HashMap<String, String>) -> Vec<PalowModule> {
+/// The target a module was translated for, as an assumption about the
+/// abstract `Pulse.Lib.C.Palow.Target`. The library is proved for every
+/// target; a generated module is proved for the one clang parsed it for, since
+/// sizes and layouts already are. It goes into the implementation only: a
+/// caller depends on the interface, so the assumption does not reach code
+/// that was not translated with it.
+fn target_assumption(tu: &TranslationUnit) -> String {
+    format!(
+        "(* The target clang parsed this file for. *)\n\
+         assume Palow_target_byte_order : Pulse.Lib.C.Palow.Target.little_endian == {}\n\n",
+        tu.little_endian
+    )
+}
+
+fn into_modules(
+    chunks: Vec<Chunk>,
+    ifaces: &HashMap<String, String>,
+    target: Option<&str>,
+) -> Vec<PalowModule> {
     // A C name can produce more than one chunk -- a `_pure` function that did
     // not become an F* definition leaves a note behind and is then translated
     // again as a Pulse `fn` -- and both belong to the same module.
@@ -11536,6 +11556,7 @@ fn into_modules(chunks: Vec<Chunk>, ifaces: &HashMap<String, String>) -> Vec<Pal
             .get(&ch.module)
             .map(|body| format!("{}{}", preamble, body));
         let mut code = preamble;
+        code += target.unwrap_or_default();
         code += &ch.code;
         for n in defined_names(&ch.code) {
             owner.insert(n, ch.module.clone());

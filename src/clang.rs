@@ -74,6 +74,7 @@ impl<'a> Ctx<'a> {
                 decls: vec![],
                 layouts: LayoutTable::new(),
                 pointer_size: 8,
+                little_endian: true,
             },
             diagnostics: Diagnostics::empty(),
             target_int_widths: TargetIntWidths::default(),
@@ -123,6 +124,10 @@ impl<'a> Ctx<'a> {
 
     fn set_pointer_size(&mut self, size: u64) {
         self.translation_unit.pointer_size = size;
+    }
+
+    fn set_little_endian(&mut self, little_endian: bool) {
+        self.translation_unit.little_endian = little_endian;
     }
 
     /// Record the clang-computed size and alignment (in bytes) of a named C

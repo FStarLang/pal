@@ -54,6 +54,12 @@ struct Cli {
     )]
     palow_permissive: bool,
 
+    #[arg(
+        long = "portable",
+        help = "Do not assume the byte order of the target clang parsed for; the proofs must then hold on every target"
+    )]
+    portable: bool,
+
     #[arg(long = "quiet", short = 'q', help = "Suppress diagnostic output")]
     quiet: bool,
 
@@ -185,6 +191,7 @@ fn main() {
         decls: Vec::new(),
         layouts: ir::LayoutTable::new(),
         pointer_size: 8,
+        little_endian: true,
     };
     let mut diags = Diagnostics::empty();
     let identities = pass::linkage::identities(&cli.files).unwrap_or_else(|message| {
@@ -232,6 +239,7 @@ fn main() {
         combined_tu.decls.extend(tu.decls);
         combined_tu.layouts.extend(tu.layouts);
         combined_tu.pointer_size = tu.pointer_size;
+        combined_tu.little_endian = tu.little_endian;
     }
     for name in &cli.only_functions {
         if !combined_tu
@@ -351,7 +359,12 @@ fn main() {
     }
 
     let t = Instant::now();
-    let modules = pass::emit_palow::emit_palow(&combined_tu, &header_statics, diags.has_errors());
+    let modules = pass::emit_palow::emit_palow(
+        &combined_tu,
+        &header_statics,
+        diags.has_errors(),
+        cli.portable,
+    );
     if cli.time_passes {
         eprintln!(
             "  emit ({} modules): {:.3}s",

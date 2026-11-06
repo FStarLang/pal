@@ -283,6 +283,7 @@ public:
         TargetIntWidths(TI.getCharWidth(), TI.getShortWidth(), TI.getIntWidth(),
                         TI.getLongWidth(), TI.getLongLongWidth()));
     ctx.set_pointer_size(TI.getPointerWidth(LangAS::Default) / 8);
+    ctx.set_little_endian(TI.isLittleEndian());
     ctx.set_linkage_context(toStr(StringRef(TI.getDataLayoutString())));
   }
 

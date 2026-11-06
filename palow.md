@@ -293,6 +293,26 @@ target-dependent — which is already true today (`long` translates to `int64_t`
 on Linux and `int32_t` on Windows), so this is not a new constraint, but it
 should be documented.
 
+**Byte order.** The library itself is not target-dependent in this respect.
+`Pulse.Lib.C.Palow.Target` declares `val little_endian : bool` abstractly, and
+`Encoding.encode`/`decode` put the bytes in that order, so every library proof
+holds for both orders (`Target.fst` gives one witness, to show the interface is
+satisfiable). Each generated `.fst` then fixes the order clang reported for the
+target it parsed for:
+
+```fstar
+assume Palow_target_byte_order : Pulse.Lib.C.Palow.Target.little_endian == true
+```
+
+The assumption is in the implementation only, never the `.fsti`, so it reaches
+the SMT context of that module's own proofs and not those of anything checked
+against its interface. `--portable` leaves it out, and the proofs must then
+hold on every target. The target is chosen the usual clang way, e.g. a
+`compile_flags.txt` with `--target=mips-linux-gnu` (see
+`test/target_big_endian`). Linking translation units for different targets is
+already refused: the linkage context includes clang's data layout string,
+which spells the byte order.
+
 **Implemented.** The clang frontend records the size, alignment and field
 offsets of every named C type (`recordTypeLayout`/`recordFieldOffsets` in
 `cpp/impl.cpp`) into `ir::LayoutTable`; `src/layout.rs` derives the size of
@@ -1243,7 +1263,8 @@ part of `make -C pulse`.
 | `Pulse.Lib.C.Palow.Bytes` | proved | `alloc_id`, `prov`, `byte`, `bytes`, `uninit`/`zeroed`, `strip_prov`, slice/append lemmas |
 | `Pulse.Lib.C.Palow.Ptr` | axiomatized | `ptr`, `addr_of`, `prov_of`, `ptr_ext`, `( +! )`, `disjoint_ranges` |
 | `Pulse.Lib.C.Palow` | axiomatized | `mem_pts_to`, `mem_split`/`mem_join`, disjointness, injectivity, share/gather |
-| `Pulse.Lib.C.Palow.Encoding` | proved | little-endian `encode`/`decode`, round-trip and injectivity |
+| `Pulse.Lib.C.Palow.Target` | abstract | the target's byte order, assumed per generated module |
+| `Pulse.Lib.C.Palow.Encoding` | proved | target-order `encode`/`decode`, round-trip and injectivity |
 | `Pulse.Lib.C.Palow.Scalar` | proved | `uint8_t`/`uint32_t`/stored-pointer `*_repr`, `*_pts_to`, `*_sizeof`, agreement, share/gather, reveal/conceal |
 | `Pulse.Lib.C.Palow.Nullable` | proved | `unless_null` with its intro/elim pair |
 | `Pulse.Lib.C.Palow.Alloc` | axiomatized | `freeable`, `malloc`, `calloc`, `free` |
@@ -1285,7 +1306,7 @@ sunk the design:
   conjoined with an `array_pts_to` at the header's size, with no `MallocFlex`
   special case and no ghost length field pinned inside the record.
 - **`ptr_repr` is a definition, not an axiom.** A stored pointer's object
-  representation is the little-endian bytes of its address, each tagged with
+  representation is the target-order bytes of its address, each tagged with
   the pointer's provenance. Injectivity (a stored pointer is recovered exactly,
   provenance included) and the fact that an integer store destroys it (integer
   representations are provenance-free) are then both consequences of that one
