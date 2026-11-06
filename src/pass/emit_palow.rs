@@ -19896,7 +19896,11 @@ impl<'a> Body<'a> {
                 // before it says nothing about what is live after.
                 self.active.clear();
                 self.union_values.clear();
+                // A body that diverges says nothing about the code after the
+                // loop: the condition may be false on entry.
+                let outer_diverged = self.diverged;
                 self.loop_(cond, inv, requires, ensures, body)?;
+                self.diverged = outer_diverged;
                 self.active.clear();
                 self.union_values.clear();
                 Ok(())
