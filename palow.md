@@ -6608,3 +6608,16 @@ new facts about memory.
     write as for a granted pointer. `test/nullable_deep_own` reads, calls
     through and writes a nullable iterator; `test/nullable_deep_own_bad`
     reads one past the end its invariant allows.
+
+47. **`_old` of a parameter inside a body.** A label's `_ensures` and an
+    `_assert` are checked where they stand, and `_old` in them was refused
+    outright. What BOSS writes there is `p == _old(p)`: the parameters still
+    hold what the call passed. In a body `var_p` is that value throughout,
+    because a parameter the body assigns to is given a slot of its own,
+    so `_old(p)` is `var_p` -- unless a local declared under the same name
+    shadows `p` somewhere in the body, where it is still refused. `_old` of
+    anything else, such as a pointee's entry value, remains refused.
+    `test/label_old_param` uses it at a label and in `_assert`, including
+    after the parameter is walked down by a loop;
+    `test/label_old_param_bad` claims the walked parameter is unchanged;
+    `test/label_old_param_shadowed` is the refusal.

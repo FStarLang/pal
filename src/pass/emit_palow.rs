@@ -10086,6 +10086,8 @@ struct Touched {
     /// The named objects whose own address the body takes. Each of them needs
     /// storage, wherever in the body the `&` happens to appear.
     addressed: HashSet<String>,
+    /// The names the body declares a local under, in any block.
+    declared: HashSet<String>,
 }
 
 /// The variable an lvalue ultimately reaches through, if it is a named object.
@@ -10393,8 +10395,17 @@ fn touch_stmts(ss: &Stmts, t: &mut Touched) {
     for s in ss.iter() {
         match &s.val {
             StmtT::Call(e) | StmtT::Assert(e) | StmtT::Return(Some(e)) => touch_expr(e, t),
-            StmtT::Let(_, _, e) => touch_expr(e, t),
-            StmtT::DeclStackArray { size, .. } => touch_expr(size, t),
+            StmtT::Let(x, _, e) => {
+                t.declared.insert(x.val.to_string());
+                touch_expr(e, t)
+            }
+            StmtT::DeclStackArray { name, size, .. } => {
+                t.declared.insert(name.val.to_string());
+                touch_expr(size, t)
+            }
+            StmtT::Decl(x, _) => {
+                t.declared.insert(x.val.to_string());
+            }
             // The alias assignment itself stores nothing: the pointer is a
             // name, not an object, and the address it takes does not escape.
             StmtT::Assign(a, b)
@@ -10449,8 +10460,7 @@ fn touch_stmts(ss: &Stmts, t: &mut Touched) {
             }
             StmtT::Label { ensures, .. } => touch_exprs(ensures, t),
             StmtT::GhostStmt(code) => spliced_addresses(code, &mut t.addressed),
-            StmtT::Decl(..)
-            | StmtT::Break
+            StmtT::Break
             | StmtT::Continue
             | StmtT::Return(None)
             | StmtT::Goto(_)
@@ -11988,6 +11998,11 @@ struct Body<'a> {
     /// The function's parameters, by C name. Ownership of what a pointer points
     /// to is granted by the contract, and the contract only names parameters.
     params: HashSet<String>,
+    /// The parameters that `_old(p)` can name inside the body: `var_p` is the
+    /// value the call passed in for the whole body, since assigning to `p`
+    /// gives it a slot of its own, unless a local declared under the same name
+    /// shadows it somewhere.
+    old_params: HashSet<String>,
     /// Whether the emitted precondition can supply bounds and overflow facts.
     /// These may be explicit pure clauses, type refinements, or facts hidden
     /// inside a successfully translated separation-logic precondition.
@@ -15503,6 +15518,17 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// `_old(p)` for a parameter `p`, in a body: the value the call passed,
+    /// which `var_p` still is wherever `p` is not shadowed.
+    fn old_param(&self, e: &Expr) -> Option<String> {
+        match &strip_vattr(e).val {
+            ExprT::Var(v) if self.old_params.contains(&*v.val.to_string()) => {
+                Some(format!("var_{}", v.val))
+            }
+            _ => None,
+        }
+    }
+
     /// A statement assertion may mix ownership and pure propositions. Keep
     /// both: `_live` is a checked points-to assertion, never `pure True`.
     fn assertion(&mut self, e: &Expr) -> Result<String, String> {
@@ -15581,7 +15607,9 @@ impl<'a> Body<'a> {
             ExprT::Cast(inner, to) if matches!(self.tds.resolve(to).val, TypeT::SLProp) => {
                 self.prop(inner)
             }
-            ExprT::Old(_) => Err("an assertion about the state on entry".to_string()),
+            ExprT::Old(inner) if self.old_param(inner).is_none() => {
+                Err("`_old` of something other than a parameter no local shadows".to_string())
+            }
             ExprT::InlinePulse(code, _) => flatten_fragment(&self.inline_pulse(code)?),
             ExprT::UnOp(UnOp::Not, inner) => Ok(format!("(~({}))", self.prop(inner)?)),
             // An assertion translates by *emitting* the loads its operands
@@ -16302,6 +16330,9 @@ impl<'a> Body<'a> {
         }
         match &e.val {
             ExprT::VAttr(_, inner) => self.rvalue(inner),
+            ExprT::Old(inner) => self.old_param(inner).ok_or_else(|| {
+                "`_old` of something other than a parameter no local shadows".to_string()
+            }),
             // A string or compound literal used as a value is an object with
             // static storage duration, and what the expression denotes is its
             // address. There is no ownership to produce and no scope to free
@@ -23422,6 +23453,7 @@ fn emit_body(
             .iter()
             .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
             .collect(),
+        old_params: HashSet::new(),
     };
 
     // A parameter whose address the body takes needs storage, and it needs it
@@ -23440,6 +23472,12 @@ fn emit_body(
         touch_stmts(&defn.body, &mut t);
         t
     };
+    b.old_params = b
+        .params
+        .iter()
+        .filter(|p| !touched.declared.contains(*p))
+        .cloned()
+        .collect();
     for a in &defn.decl.args {
         let Some(name) = a.name.as_ref() else {
             continue;
