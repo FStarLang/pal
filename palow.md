@@ -6546,3 +6546,17 @@ new facts about memory.
       while `a` is live.
     The older `punned_field` path still handles same-type leading scalars of
     non-integer type. `test/union_pun_bytes` covers the new cases.
+
+43. **A pointer field to a refined struct.** A field `T *it` whose `T` is a
+    struct with a `_refine` was taken to carry that refinement itself:
+    `refinements` looks through pointers, which is right for a parameter --
+    a `T *` parameter owns the pointee, so its invariant belongs in the
+    contract -- but a struct field of pointer type holds only an address.
+    The clause, about `this.items` and `this.count` of the *pointee*, could
+    not be said of the field, so the outer struct's contract was reported
+    weakened, and every function taking the outer struct asked for the
+    ownership of `.items` it had no way to state. Struct fields now go
+    through `field_refinements`, which stops at a pointer. The pointee's
+    invariant is still stated wherever the pointee is owned.
+    `test/refine_through_pointer` covers a plain and a `_plain` pointer
+    field, and a function that needs the invariant through a pointer.

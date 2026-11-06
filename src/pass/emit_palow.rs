@@ -1847,23 +1847,36 @@ fn always_refines(tds: &Typedefs, ty: &Type) -> Vec<Rc<Expr>> {
 }
 
 fn refinements(tds: &Typedefs, ty: &Type) -> Result<Refinements, String> {
+    refinements_through(tds, ty, true)
+}
+
+/// The refinements of a struct *field*'s value. A field of pointer type holds
+/// an address, so what the pointee's type says -- a `_refine` on the struct a
+/// `T *` field points at, say -- is the pointee's invariant, stated wherever
+/// that object is owned, and not a property of the field.
+fn field_refinements(tds: &Typedefs, ty: &Type) -> Result<Refinements, String> {
+    refinements_through(tds, ty, false)
+}
+
+fn refinements_through(tds: &Typedefs, ty: &Type, ptr: bool) -> Result<Refinements, String> {
     match &tds.resolve(ty).val {
         TypeT::Refine(t, p) | TypeT::RefineAlways(t, p) => {
-            let (mut v, u, b) = refinements(tds, t)?;
+            let (mut v, u, b) = refinements_through(tds, t, ptr)?;
             v.push(p.clone());
             Ok((v, u, b))
         }
         TypeT::RefineUninit(t, p) => {
-            let (v, mut u, b) = refinements(tds, t)?;
+            let (v, mut u, b) = refinements_through(tds, t, ptr)?;
             u.push(p.clone());
             Ok((v, u, b))
         }
         TypeT::RefineValue(t, n, vty, p) => {
-            let (v, u, mut b) = refinements(tds, t)?;
+            let (v, u, mut b) = refinements_through(tds, t, ptr)?;
             b.push((n.clone(), vty.clone(), p.clone()));
             Ok((v, u, b))
         }
-        TypeT::Plain(t) | TypeT::Nullable(t) | TypeT::Pointer(t, _) => refinements(tds, t),
+        TypeT::Plain(t) | TypeT::Nullable(t) => refinements_through(tds, t, ptr),
+        TypeT::Pointer(t, _) if ptr => refinements_through(tds, t, ptr),
         _ => Ok((Vec::new(), Vec::new(), Vec::new())),
     }
 }
@@ -2142,6 +2155,12 @@ fn refined(tds: &Typedefs, ty: &Type) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether a struct field's value is refined; see `field_refinements`.
+fn field_refined(tds: &Typedefs, ty: &Type) -> bool {
+    field_refinements(tds, ty)
+        .is_ok_and(|(ps, us, bs)| !ps.is_empty() || !us.is_empty() || !bs.is_empty())
 }
 
 /// The pointee of a pointer parameter, skipping the wrappers that do not
@@ -4255,7 +4274,7 @@ fn emit_fn(
         };
         let mut out = Vec::new();
         for f in &si.fields {
-            let Ok((mut ps, _, _)) = refinements(tds, &f.ty) else {
+            let Ok((mut ps, _, _)) = field_refinements(tds, &f.ty) else {
                 continue;
             };
             // An embedded struct carries its declaration's invariant just
@@ -6500,7 +6519,7 @@ fn refine_prop(
     this_term: &str,
     siblings: &[(String, Rc<Type>, String)],
 ) -> Option<String> {
-    let (ps, _, _) = refinements(tds, fty).ok()?;
+    let (ps, _, _) = field_refinements(tds, fty).ok()?;
     let ps: Vec<_> = ps
         .into_iter()
         .filter(|p| slprop_refine(tds, p).is_none())
@@ -6585,7 +6604,7 @@ fn struct_invariant(tds: &Typedefs, env: &Env, fields: &[StructField]) -> Option
         .collect();
     let mut out = Vec::new();
     for f in fields {
-        if f.inv.is_some() || !refined(tds, &f.ty) || !has_pure_refine(tds, &f.ty) {
+        if f.inv.is_some() || !field_refined(tds, &f.ty) || !has_pure_refine(tds, &f.ty) {
             continue;
         }
         let seq = extent(tds, &f.ty) == Some(Extent::Array) || flex_elem(tds, &f.ty).is_some();
@@ -7668,7 +7687,7 @@ fn emit_struct_own(tds: &Typedefs, name: &str) -> String {
 /// as opposed to one that is ownership. Only the first kind is something a
 /// generated record type could have carried.
 fn has_pure_refine(tds: &Typedefs, ty: &Type) -> bool {
-    match refinements(tds, ty) {
+    match field_refinements(tds, ty) {
         Ok((ps, us, _)) => !us.is_empty() || ps.iter().any(|p| slprop_refine(tds, p).is_none()),
         Err(_) => true,
     }
@@ -7715,7 +7734,10 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     // that points at one, and a result. That is the same place the old model
     // puts it, in the struct predicate rather than in the struct type.
     for f in &si.fields {
-        if refined(tds, &f.ty) && f.inv.is_none() && si.inv.is_none() && has_pure_refine(tds, &f.ty)
+        if field_refined(tds, &f.ty)
+            && f.inv.is_none()
+            && si.inv.is_none()
+            && has_pure_refine(tds, &f.ty)
         {
             c += &format!(
                 "(* contract dropped: the `_refine` on field `{}` is not a \
