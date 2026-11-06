@@ -25,6 +25,7 @@ open Pulse.Lib.C.Palow.Ptr
 open Pulse.Lib.C.Palow
 
 module SZ = FStar.SizeT
+module T = Pulse.Lib.C.Palow.Target
 module Seq = FStar.Seq
 module M = FStar.Math.Lemmas
 
@@ -59,7 +60,7 @@ let array_repr (#t: Type) (t_repr: t -> bytes -> prop) (esize: nat)
    of these facts at once does not hand Z3 a pile of nonlinear arithmetic. *)
 let array_aligned (esize: nat) (ealign: nat) (a: ptr) : prop =
   esize > 0 /\ ealign > 0 /\ esize % ealign == 0 /\
-  pow2 64 % ealign == 0 /\ divides_addr a ealign
+  pow2 32 % ealign == 0 /\ divides_addr a ealign
 
 let array_aligned_add (esize: nat) (ealign: nat) (a: ptr) (n: SZ.t)
   : Lemma (requires array_aligned esize ealign a /\ SZ.v n % esize == 0)
@@ -486,7 +487,7 @@ ghost fn array_fits (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ
                     (#p: perm) (#xs: Seq.seq t)
   preserves array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
   ensures   pure (SZ.fits (addr_of a + SZ.v esize * Seq.length xs) /\
-                  addr_of a + SZ.v esize * Seq.length xs < pow2 64)
+                  addr_of a + SZ.v esize * Seq.length xs < T.addr_limit)
 {
   unfold array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs;
   with b. assert (mem_pts_to a p b ** pure (array_repr t_repr (SZ.v esize) xs b));
@@ -504,7 +505,7 @@ ghost fn array_offset_fits (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (es
                            (i: SZ.t { SZ.v i < Seq.length xs })
   preserves array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
   ensures   pure (SZ.fits (SZ.v esize * SZ.v i))
-  ensures   pure (addr_of a + SZ.v esize * Seq.length xs < pow2 64)
+  ensures   pure (addr_of a + SZ.v esize * Seq.length xs < T.addr_limit)
 {
   array_fits t_repr a esize ealign;
   elem_fits (SZ.v esize) (Seq.length xs) (SZ.v i);

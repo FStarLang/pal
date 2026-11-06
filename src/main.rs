@@ -192,6 +192,7 @@ fn main() {
         layouts: ir::LayoutTable::new(),
         pointer_size: 8,
         little_endian: true,
+        max_align: 16,
     };
     let mut diags = Diagnostics::empty();
     let identities = pass::linkage::identities(&cli.files).unwrap_or_else(|message| {
@@ -240,6 +241,7 @@ fn main() {
         combined_tu.layouts.extend(tu.layouts);
         combined_tu.pointer_size = tu.pointer_size;
         combined_tu.little_endian = tu.little_endian;
+        combined_tu.max_align = tu.max_align;
     }
     for name in &cli.only_functions {
         if !combined_tu

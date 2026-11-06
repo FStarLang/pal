@@ -15,6 +15,7 @@ module Pulse.Lib.C.Palow.Ptr
 
 open Pulse.Lib.C.Palow.Bytes
 module SZ = FStar.SizeT
+module T = Pulse.Lib.C.Palow.Target
 
 val ptr : Type0
 
@@ -43,9 +44,9 @@ val null_addr : squash (addr_of null == 0 /\ prov_of null == None)
 (* Every address fits in a pointer-sized word. Stated as an explicit bound
    rather than as `SizeT.fits`, which is abstract, because the byte encoding of
    a *stored* pointer needs its address to round-trip through `ptr_sizeof`
-   bytes. Like the rest of Palow this fixes an LP64 target; see `palow.md`. *)
+   bytes, which is as wide as the target says (`Target.addr_limit`). *)
 val addr_bound (a: ptr)
-  : Lemma (addr_of a < pow2 64)
+  : Lemma (addr_of a < T.addr_limit)
           [SMTPat (addr_of a)]
 
 (* Byte offset. Provenance-preserving, as required for interior pointers of an
@@ -61,14 +62,14 @@ val addr_bound (a: ptr)
 val ( +! ) (a: ptr) (n: SZ.t) : ptr
 
 val addr_of_add (a: ptr) (n: SZ.t)
-  : Lemma (addr_of (a +! n) == (addr_of a + SZ.v n) % pow2 64 /\
+  : Lemma (addr_of (a +! n) == (addr_of a + SZ.v n) % T.addr_limit /\
            prov_of (a +! n) == prov_of a)
           [SMTPat (addr_of (a +! n))]
 
 let addr_of_add_nowrap (a: ptr) (n: SZ.t)
-  : Lemma (requires addr_of a + SZ.v n < pow2 64)
+  : Lemma (requires addr_of a + SZ.v n < T.addr_limit)
           (ensures addr_of (a +! n) == addr_of a + SZ.v n)
-  = FStar.Math.Lemmas.modulo_lemma (addr_of a + SZ.v n) (pow2 64)
+  = FStar.Math.Lemmas.modulo_lemma (addr_of a + SZ.v n) T.addr_limit
 
 val prov_of_add (a: ptr) (n: SZ.t)
   : Lemma (prov_of (a +! n) == prov_of a)
@@ -125,18 +126,21 @@ let aligned_null (n: SZ.t { SZ.v n > 0 }) : Lemma (aligned null n) =
 
 (* C alignments are powers of two, so reducing an address modulo the pointer
    word preserves divisibility by the alignment. An arbitrary divisor need
-   not survive wrapping: `2^64` is not divisible by 3, for example. *)
+   not survive wrapping: `2^32` is not divisible by 3, for example. The side
+   condition is on `pow2 32`, which divides the pointer word on every target
+   (`Target.addr_limit_divisible`). *)
 let divides_addr_add (a: ptr) (m: pos) (n: SZ.t)
-  : Lemma (requires divides_addr a m /\ SZ.v n % m == 0 /\ pow2 64 % m == 0)
+  : Lemma (requires divides_addr a m /\ SZ.v n % m == 0 /\ pow2 32 % m == 0)
           (ensures divides_addr (a +! n) m)
   = reveal_opaque (`%divides_addr) divides_addr;
-    FStar.Math.Lemmas.lemma_div_exact (pow2 64) m;
+    T.addr_limit_divisible m;
+    FStar.Math.Lemmas.lemma_div_exact T.addr_limit m;
     FStar.Math.Lemmas.modulo_distributivity (addr_of a) (SZ.v n) m;
-    FStar.Math.Lemmas.modulo_modulo_lemma (addr_of a + SZ.v n) m (pow2 64 / m)
+    FStar.Math.Lemmas.modulo_modulo_lemma (addr_of a + SZ.v n) m (T.addr_limit / m)
 
 let aligned_add (a: ptr) (m n: SZ.t)
   : Lemma (requires aligned a m /\ SZ.v n % SZ.v m == 0
-                    /\ pow2 64 % SZ.v m == 0)
+                    /\ pow2 32 % SZ.v m == 0)
           (ensures  aligned (a +! n) m)
   = divides_addr_add a (SZ.v m) n
 
@@ -161,15 +165,14 @@ let aligned_divides (a: ptr) (m n: SZ.t)
    `struct_S_field_aligned` is a list of calls to this and nothing else. *)
 let aligned_field (a: ptr) (m: SZ.t) (off: SZ.t) (n: SZ.t)
   : Lemma (requires aligned a m /\ SZ.v n > 0 /\ SZ.v m % SZ.v n == 0
-                    /\ SZ.v off % SZ.v n == 0 /\ pow2 64 % SZ.v n == 0)
+                    /\ SZ.v off % SZ.v n == 0 /\ pow2 32 % SZ.v n == 0)
           (ensures  aligned (a +! off) n)
   = aligned_divides a m n;
     aligned_add a n off
 
 (* The alignment of `max_align_t`: the strictest fundamental alignment on the
-   target, and by C11 7.22.3p1 what `malloc` and `calloc` guarantee. Like the
-   scalar sizes this fixes an LP64 target; see `palow.md`. *)
-let max_align : SZ.t = 16sz
+   target, and by C11 7.22.3p1 what `malloc` and `calloc` guarantee. *)
+let max_align : SZ.t = T.max_align
 
 (* Comparison, difference, and negative offset.
 
@@ -186,6 +189,10 @@ val ptr_le (a1 a2: ptr) : (b:bool { b <==> addr_of a1 <= addr_of a2 })
    C too (C11 6.5.6p9). *)
 val ptr_diff (a1: ptr) (a2: ptr { FStar.Int.size (addr_of a1 - addr_of a2) 64 })
   : (d: FStar.Int64.t { FStar.Int64.v d == addr_of a1 - addr_of a2 })
+
+(* The same on a target whose `ptrdiff_t` is thirty-two bits wide. *)
+val ptr_diff32 (a1: ptr) (a2: ptr { FStar.Int.size (addr_of a1 - addr_of a2) 32 })
+  : (d: FStar.Int32.t { FStar.Int32.v d == addr_of a1 - addr_of a2 })
 
 (* Total on the offsets that name an address at all: there is nothing below
    zero to point at. *)

@@ -57,7 +57,8 @@ let scalar_size (s: scalar) : nat =
   | SChar | SBool | SInt8 -> 1
   | SInt16 | SUInt16 -> 2
   | SInt32 | SUInt32 | SFloat32 -> 4
-  | SInt64 | SUInt64 | SFloat64 | SPtr -> 8
+  | SInt64 | SUInt64 | SFloat64 -> 8
+  | SPtr -> Pulse.Lib.C.Palow.Target.ptr_bytes
 
 (* An aggregate carries its tag name as well as its layout, because C's notion
    of compatible type is by tag, not by shape: two structs with identical
@@ -322,7 +323,8 @@ let struct_not_union ()
    integer cannot then be read as a pointer. Under a model without effective
    types this program verifies; clang is entitled to miscompile it. *)
 let no_int_to_ptr_pun ()
-  : Lemma (~(read_ok (Seq.append (store_etypes (etypes_none 4) ct_u32)
+  : Lemma (requires Pulse.Lib.C.Palow.Target.ptr_64)
+          (ensures ~(read_ok (Seq.append (store_etypes (etypes_none 4) ct_u32)
                                  (store_etypes (etypes_none 4) ct_u32))
                      ct_ptr))
   = assert (eget (Seq.append (store_etypes (etypes_none 4) ct_u32)
@@ -333,7 +335,7 @@ let no_int_to_ptr_pun ()
    stored into it, which is what keeps `Pulse.Lib.C.Palow.Provenance` alive
    once the rules are switched on. *)
 let ptr_store_read_ok ()
-  : Lemma (read_ok (store_etypes (etypes_none 8) ct_ptr) ct_ptr)
+  : Lemma (read_ok (store_etypes (etypes_none Pulse.Lib.C.Palow.Target.ptr_bytes) ct_ptr) ct_ptr)
   = ()
 
 (* An array of `uint32_t` is readable element by element, at every element. *)

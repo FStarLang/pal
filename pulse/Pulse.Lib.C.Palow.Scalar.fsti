@@ -33,6 +33,7 @@ open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Array
 
 module SZ = FStar.SizeT
+module T = Pulse.Lib.C.Palow.Target
 module ET = Pulse.Lib.C.Palow.Etype
 module U8 = FStar.UInt8
 module U32 = FStar.UInt32
@@ -219,8 +220,8 @@ ghost fn uint32_t_reveal_uninit (a: ptr)
    should hold.
    --------------------------------------------------------------------------- *)
 
-let ptr_sizeof : SZ.t = 8sz
-let ptr_alignof : SZ.t = 8sz
+let ptr_sizeof : n:SZ.t{SZ.v n == T.ptr_bytes} = if T.ptr_64 then 8sz else 4sz
+let ptr_alignof : n:SZ.t{SZ.v n == T.ptr_bytes} = ptr_sizeof
 let ptr_ctype : ET.ctype = ET.TScalar ET.SPtr
 
 let ptr_repr (a: ptr) (b: bytes) : prop =

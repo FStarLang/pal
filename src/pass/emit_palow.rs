@@ -1254,6 +1254,9 @@ struct Typedefs<'a> {
     /// to one in a contract still denotes something: the ghost value a
     /// `_refine_value` on the argument binds. See `Spec::value`.
     impure_lets: HashMap<String, String>,
+    /// The width of a pointer -- and so of `size_t` and `ptrdiff_t` -- in
+    /// bytes, as clang reports it for the target.
+    ptr_bytes: u64,
 }
 
 impl<'a> Typedefs<'a> {
@@ -1271,6 +1274,7 @@ impl<'a> Typedefs<'a> {
             }
         }
         Typedefs {
+            ptr_bytes: tu.pointer_size,
             typedefs: m,
             structs: HashMap::new(),
             unions: HashMap::new(),
@@ -1578,9 +1582,9 @@ fn palow_name(tds: &Typedefs, ty: &Type) -> Option<String> {
         TypeT::Float {
             width: w @ (32 | 64),
         } => Some(format!("float{}_t", w)),
-        // On the LP64 target Palow fixes, `ptrdiff_t` *is* `int64_t`, so it
-        // shares its storage rather than getting a layer of its own.
-        TypeT::PtrdiffT => Some("int64_t".to_string()),
+        // `ptrdiff_t` *is* the signed integer type of a pointer's width, so
+        // it shares that type's storage rather than getting a layer of its own.
+        TypeT::PtrdiffT => Some(format!("int{}_t", 8 * tds.ptr_bytes)),
         // Every pointer kind is the same type here; that is the point, and it
         // extends to function pointers: a code address is an address, and
         // making it one reuses the whole storage layer rather than needing a
@@ -1616,7 +1620,7 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
             Some(format!("{}Int{}.t", if *signed { "" } else { "U" }, width))
         }
         TypeT::SizeT => Some("SizeT.t".to_string()),
-        TypeT::PtrdiffT => Some("Int64.t".to_string()),
+        TypeT::PtrdiffT => Some(format!("Int{}.t", 8 * tds.ptr_bytes)),
         TypeT::Float {
             width: w @ (32 | 64),
         } => Some(format!("float{}", w)),
@@ -1715,13 +1719,15 @@ fn extent(tds: &Typedefs, ty: &Type) -> Option<Extent> {
     }
 }
 
-/// The size in bytes of a type the model covers. These are clang's LP64 sizes,
-/// which the rest of the model already assumes.
+/// The size in bytes of a type the model covers, on the target clang parsed
+/// for.
 fn palow_sizeof(tds: &Typedefs, ty: &Type) -> Option<u64> {
     match &tds.resolve(ty).val {
         TypeT::Bool => Some(1),
         TypeT::Int { width, .. } => Some((*width / 8) as u64),
-        TypeT::SizeT | TypeT::PtrdiffT | TypeT::Pointer(..) | TypeT::FnPtr { .. } => Some(8),
+        TypeT::SizeT | TypeT::PtrdiffT | TypeT::Pointer(..) | TypeT::FnPtr { .. } => {
+            Some(tds.ptr_bytes)
+        }
         // A size is a number from clang's ABI and needs no representation in
         // the model: `sizeof(double)` is answerable even though Palow cannot
         // say what a `double` holds.
@@ -3484,7 +3490,13 @@ impl<'a> Spec<'a> {
                         // constrains, and using one function for both is what
                         // keeps the two provably about the same value.
                         let v = self.value(inner, w)?;
-                        convert(peel(self.tds, &from), peel(self.tds, to), &v).map_err(|_| {
+                        convert(
+                            peel(self.tds, &from),
+                            peel(self.tds, to),
+                            &v,
+                            self.tds.ptr_bytes,
+                        )
+                        .map_err(|_| {
                             format!(
                                 "a contract converting {} to {}",
                                 describe(self.tds.resolve(&from)),
@@ -8658,7 +8670,7 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
     // surrounding `requires` in scope, so there is nowhere to put the
     // obligation that the arithmetic fits.
     c += &format!(
-        "let {sn}_flex_sizeof (x: {sn}) : SizeT.t =\n  let n = SizeT.v {sn}_sizeof + {es} * Seq.length x.fld_{f} in\n  if n < pow2 64 then SizeT.uint_to_t n else 0sz\n\n",
+        "let {sn}_flex_sizeof (x: {sn}) : SizeT.t =\n  let n = SizeT.v {sn}_sizeof + {es} * Seq.length x.fld_{f} in\n  if n < Pulse.Lib.C.Palow.Target.addr_limit then SizeT.uint_to_t n else 0sz\n\n",
         sn = sn,
         es = fes,
         f = flex.name
@@ -11458,11 +11470,6 @@ fn defined_names(code: &str) -> Vec<String> {
     out
 }
 
-/// Wrap each chunk in a module that opens exactly the earlier modules it
-/// names. The edges only ever point backwards, so the result cannot have a
-/// cycle -- which matters, because F* modules may not be mutually recursive
-/// and C declarations, unlike F* ones, routinely refer to each other in an
-/// order the file does not fix.
 /// The target a module was translated for, as an assumption about the
 /// abstract `Pulse.Lib.C.Palow.Target`. The library is proved for every
 /// target; a generated module is proved for the one clang parsed it for, since
@@ -11471,12 +11478,23 @@ fn defined_names(code: &str) -> Vec<String> {
 /// that was not translated with it.
 fn target_assumption(tu: &TranslationUnit) -> String {
     format!(
-        "(* The target clang parsed this file for. *)\n\
-         assume Palow_target_byte_order : Pulse.Lib.C.Palow.Target.little_endian == {}\n\n",
-        tu.little_endian
+        "(* The target clang parsed this file for. One fact per `assume`: F*
+   prunes the SMT context to the facts whose every symbol a query mentions,
+   so a conjunction would only be seen by queries that name all of it. *)\n\
+         assume Palow_little_endian : Pulse.Lib.C.Palow.Target.little_endian == {}\n\
+         assume Palow_ptr_64 : Pulse.Lib.C.Palow.Target.ptr_64 == {}\n\
+         assume Palow_max_align : FStar.SizeT.v Pulse.Lib.C.Palow.Target.max_align == {}\n\n",
+        tu.little_endian,
+        tu.pointer_size == 8,
+        tu.max_align
     )
 }
 
+/// Wrap each chunk in a module that opens exactly the earlier modules it
+/// names. The edges only ever point backwards, so the result cannot have a
+/// cycle -- which matters, because F* modules may not be mutually recursive
+/// and C declarations, unlike F* ones, routinely refer to each other in an
+/// order the file does not fix.
 fn into_modules(
     chunks: Vec<Chunk>,
     ifaces: &HashMap<String, String>,
@@ -13563,16 +13581,19 @@ impl<'a> Body<'a> {
                 signed: false,
                 width,
             } if *width != 8 => Ok(format!("(sizet_of_uint{} {})", width, v)),
-            // A `ptrdiff_t` is an `int64_t` on this target, and a negative one
-            // wraps to the `size_t` whose *addition* is the subtraction C
-            // means: `( +! )` is modular, so the address that comes out is the
-            // right one either way. Where the index is a subscript rather than
-            // an offset it is the array's own bound that rules a negative one
-            // out, which is where that obligation belongs.
-            TypeT::PtrdiffT => Ok(format!(
-                "(sizet_of_uint64 (FStar.Int.Cast.int64_to_uint64 {}))",
-                v
-            )),
+            // A `ptrdiff_t` is the signed type of a pointer's width, and a
+            // negative one wraps to the `size_t` whose *addition* is the
+            // subtraction C means: `( +! )` is modular, so the address that
+            // comes out is the right one either way. Where the index is a
+            // subscript rather than an offset it is the array's own bound that
+            // rules a negative one out, which is where that obligation belongs.
+            TypeT::PtrdiffT => {
+                let w = 8 * self.tds.ptr_bytes;
+                Ok(format!(
+                    "(sizet_of_uint{w} (FStar.Int.Cast.int{w}_to_uint{w} {}))",
+                    v
+                ))
+            }
             _ => Err(format!("a subscript indexed by {}", describe(&ty))),
         }
     }
@@ -16184,10 +16205,11 @@ impl<'a> Body<'a> {
             (BinOp::Sub, Some(n), Some(_)) => {
                 let a = self.ptr_val(l)?;
                 let b = self.ptr_val(r)?;
-                Ok(Some(format!(
-                    "(FStar.Int64.div (ptr_diff {} {}) {}L)",
-                    a, b, n
-                )))
+                Ok(Some(if self.tds.ptr_bytes == 8 {
+                    format!("(FStar.Int64.div (ptr_diff {} {}) {}L)", a, b, n)
+                } else {
+                    format!("(FStar.Int32.div (ptr_diff32 {} {}) {}l)", a, b, n)
+                }))
             }
             (BinOp::Lt, Some(_), Some(_)) => {
                 let a = self.ptr_val(l)?;
@@ -16691,12 +16713,17 @@ impl<'a> Body<'a> {
                     self.lines
                         .push(format!("let {} = ptr_to_uintptr {};", t, v));
                     let sz: Rc<Type> = TypeT::SizeT.with_loc(e.loc.clone());
-                    return convert(&sz, peel(self.tds, to), &t);
+                    return convert(&sz, peel(self.tds, to), &t, self.tds.ptr_bytes);
                 }
                 // `peel`, not `resolve`: a `_plain int32_t *` is a pointer as
                 // far as a conversion is concerned, and the annotation
                 // wrappers would otherwise hide that.
-                convert(peel(self.tds, &from), peel(self.tds, to), &v)
+                convert(
+                    peel(self.tds, &from),
+                    peel(self.tds, to),
+                    &v,
+                    self.tds.ptr_bytes,
+                )
             }
             // C evaluates exactly one arm of `c ? a : b`. When neither arm
             // needs a statement of its own the two are just values and F*'s
@@ -21863,23 +21890,24 @@ fn int_literal(tds: &Typedefs, n: &BigInt, ty: &Type) -> Result<String, String> 
 /// A C scalar conversion. The integer cases go through `FStar.Int.Cast`,
 /// which is total and reduces modulo the target width -- what C says for an
 /// unsigned target, and what PAL already emits for every narrowing cast.
-/// On the LP64 target Palow fixes, `ptrdiff_t` *is* `int64_t`: it shares that
-/// type's storage, so it shares its conversions too.
-fn convert(from: &Type, to: &Type, v: &str) -> Result<String, String> {
-    let lp64 = |t: &Type| match &t.val {
+/// `ptrdiff_t` *is* the signed integer type of a pointer's width: it shares
+/// that type's storage, so it shares its conversions too. `ptr_bytes` is the
+/// target's pointer width, which is also `size_t`'s.
+fn convert(from: &Type, to: &Type, v: &str, ptr_bytes: u64) -> Result<String, String> {
+    let ptrdiff = |t: &Type| match &t.val {
         TypeT::PtrdiffT => Ast {
             val: TypeT::Int {
                 signed: true,
-                width: 64,
+                width: (8 * ptr_bytes) as u32,
             },
             loc: t.loc.clone(),
         },
         _ => t.clone(),
     };
-    convert_scalar(&lp64(from), &lp64(to), v)
+    convert_scalar(&ptrdiff(from), &ptrdiff(to), v, ptr_bytes)
 }
 
-fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
+fn convert_scalar(from: &Type, to: &Type, v: &str, ptr_bytes: u64) -> Result<String, String> {
     let name = |signed: bool, width: u32| format!("{}int{}", if signed { "" } else { "u" }, width);
     match (&from.val, &to.val) {
         (
@@ -21920,6 +21948,11 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             // which is exact and is what C's own integer promotions do
             // before the conversion anyway.
             8 => format!("(sizet_of_uint32 (FStar.Int.Cast.uint8_to_uint32 {}))", v),
+            // A `size_t` narrower than the source keeps the low bits, as C
+            // says an unsigned conversion does.
+            64 if ptr_bytes == 4 => {
+                format!("(sizet_of_uint32 (FStar.Int.Cast.uint64_to_uint32 {}))", v)
+            }
             _ => format!("(sizet_of_uint{} {})", width, v),
         }),
         (
@@ -21961,8 +21994,10 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
             },
             TypeT::SizeT,
         ) => Ok(format!(
-            "(sizet_of_uint64 (FStar.Int.Cast.int{}_to_uint64 {}))",
-            width, v
+            "(sizet_of_uint{w} (FStar.Int.Cast.int{}_to_uint{w} {}))",
+            width,
+            v,
+            w = 8 * ptr_bytes
         )),
         (TypeT::Bool, TypeT::SizeT) => Ok(format!("(if {} then 1sz else 0sz)", v)),
         (TypeT::SizeT, TypeT::Bool) => Ok(format!("(not ({} `SizeT.eq` 0sz))", v)),
@@ -21982,13 +22017,22 @@ fn convert_scalar(from: &Type, to: &Type, v: &str) -> Result<String, String> {
         // A program that does mean the round trip writes it through
         // `uintptr_to_ptr`, which charges for a usable pointer with `exposed`
         // and `in_footprint`. That cannot be reached from a cast alone.
-        (TypeT::Int { width: 64, .. } | TypeT::SizeT, TypeT::Pointer(..)) => {
+        (TypeT::Int { .. } | TypeT::SizeT, TypeT::Pointer(..))
+            if match &from.val {
+                TypeT::Int { width, .. } => u64::from(*width) == 8 * ptr_bytes,
+                _ => true,
+            } =>
+        {
+            let w = 8 * ptr_bytes;
             let n = match &from.val {
                 TypeT::SizeT => v.to_string(),
                 TypeT::Int { signed: true, .. } => {
-                    format!("(sizet_of_uint64 (FStar.Int.Cast.int64_to_uint64 {}))", v)
+                    format!(
+                        "(sizet_of_uint{w} (FStar.Int.Cast.int{w}_to_uint{w} {}))",
+                        v
+                    )
                 }
-                _ => format!("(sizet_of_uint64 {})", v),
+                _ => format!("(sizet_of_uint{w} {})", v),
             };
             Ok(format!("(uintptr_to_invalid_ptr {})", n))
         }
@@ -22337,7 +22381,7 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
             format!("{}Int{}", if *signed { "" } else { "U" }, width)
         }
         TypeT::SizeT => "SizeT".to_string(),
-        TypeT::PtrdiffT => "Int64".to_string(),
+        TypeT::PtrdiffT => format!("Int{}", 8 * tds.ptr_bytes),
         TypeT::Bool => {
             return match op {
                 BinOp::Eq => Ok("=".to_string()),
