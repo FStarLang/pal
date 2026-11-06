@@ -6560,3 +6560,16 @@ new facts about memory.
     invariant is still stated wherever the pointee is owned.
     `test/refine_through_pointer` covers a plain and a `_plain` pointer
     field, and a function that needs the invariant through a pointer.
+
+44. **`memset` of a struct with a union field.** `memset(p, 0, sizeof *p)`
+    on a struct is a store of the type's zero value, and `zero_value` had no
+    case for a union, so the store was refused. All-zero bytes represent
+    every member at once, but a union value has exactly one live member, so
+    the zero value now makes the first named member live, at its own zero
+    value -- what implicit initialization (C11 6.7.9p10) chooses, and what
+    `zero_initializer` already did. Reading another member afterwards goes
+    through the ordinary punning rules and is not made true by the zeros.
+    `calloc` of such a type is unchanged: it needs a byte-level `_repr_zero`
+    lemma, which unions do not have. `test/memset_union_field` zeroes a
+    struct with a union, bit-fields and an array, directly and as a union
+    arm; `test/memset_union_field_bad` claims the second member is live.

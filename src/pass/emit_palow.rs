@@ -21998,6 +21998,25 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
             }
             Ok(format!("({{ {} }})", record_fields(vals, false)))
         }
+        // All-zero bytes are a valid representation of every member at once,
+        // but a union value has exactly one live member. The first named one
+        // is the member implicit initialization makes live (C11 6.7.9p10), so
+        // that is the one chosen; a read of another member then goes through
+        // the usual punning rules, which know nothing of the zeros.
+        TypeT::TypeRef(TypeRefKind::Union(name)) => {
+            let first = tds
+                .unions
+                .get(&*name.val)
+                .and_then(|ui| ui.members.first())
+                .ok_or_else(|| format!("a zeroed union {}", name.val))?;
+            Ok(format!(
+                "(Union_{}.Union_{}_{} {})",
+                name.val,
+                name.val,
+                first.name,
+                zero_value(tds, &first.ty)?
+            ))
+        }
         _ => Err(format!("a zeroed {}", describe(t))),
     }
 }
