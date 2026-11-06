@@ -310,6 +310,7 @@ Notes:
 - **Context sensitivity.** A parameter is a value (`var_p`), and a local lives at an address (`loc_x`). `$(x)` of a local in body position (a block / `if` `_ensures`, a `_ghost_stmt`) reads it first and substitutes the result; in a loop invariant it is the invariant's existential (`inv_x`). Use `$&(x)` to talk about a local's storage.
 - **Special names.** `this` (inside `_refine*`, the value being refined; reach fields with `this.f`) and `return` (inside `_ensures`, the returned value).
 - **Field accesses are automatic.** PAL focuses a field before reading or writing it and unfocuses afterwards, and scatters / gathers a struct being initialised field by field; `$unfold` / `$fold` are only needed when your own ghost code wants the pieces.
+- **Explicit field loans.** An `_assert(_inline_pulse(...))` naming a generated `struct_T_hole_field` selects direct field access for that object. After returning the loan, assert its `struct_T_pts_to` to resume automatic focusing. Both assertions are proof obligations; asserting the whole cannot recover a missing field.
 
 `test/antiquot/antiquot.c` exercises every form.
 

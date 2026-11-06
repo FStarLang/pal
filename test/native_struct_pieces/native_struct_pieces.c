@@ -223,3 +223,33 @@ int read_message_holes(_plain struct message message, const struct envelope *who
     $&(message.owner->core) 0.5R $(saved.core)));
   return result ^ other;
 }
+
+int write_then_read_whole(struct trailer value, int x)
+  _ensures(return == x)
+{
+  _ghost_stmt(Struct_trailer.struct_trailer_focus_counter $&(value));
+  _assert(_inline_pulse(
+    Struct_trailer.struct_trailer_hole_counter $&(value) 1.0R _));
+  value.counter = x;
+  _ghost_stmt(Struct_trailer.struct_trailer_unfocus_counter $&(value));
+  _assert(_inline_pulse(
+    Struct_trailer.struct_trailer_pts_to $&(value) 1.0R _));
+  return value.counter;
+}
+
+int read_message_after_handback(_plain struct message message)
+  _ghost_arg(struct envelope saved)
+  _requires(_inline_pulse(
+    Struct_envelope.struct_envelope_pts_to $(message.owner) 0.5R $(saved)))
+  _ensures(_inline_pulse(
+    Struct_envelope.struct_envelope_pts_to $(message.owner) 0.5R $(saved)))
+  _ensures(return == saved.tag)
+{
+  _ghost_stmt(Struct_envelope.struct_envelope_focus_core $(message.owner));
+  _assert(_inline_pulse(
+    Struct_envelope.struct_envelope_hole_core $(message.owner) 0.5R $(saved)));
+  _ghost_stmt(Struct_envelope.struct_envelope_unfocus_core $(message.owner));
+  _assert(_inline_pulse(
+    Struct_envelope.struct_envelope_pts_to $(message.owner) 0.5R $(saved)));
+  return message.owner->tag;
+}
