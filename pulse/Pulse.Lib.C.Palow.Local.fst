@@ -22,16 +22,17 @@ open Pulse.Lib.C.Palow.Array
 open Pulse.Lib.C.Palow.Machine
 
 module SZ = FStar.SizeT
+module T = Pulse.Lib.C.Palow.Target
 module Seq = FStar.Seq
 
 fn array_stack_alloc (#t: Type0) (t_repr: t -> bytes -> prop) (esize: SZ.t) (ealign: SZ.t { SZ.v ealign > 0 }) (n: SZ.t)
                      (nbytes: SZ.t { SZ.v nbytes == SZ.v esize * SZ.v n })
-  requires pure (SZ.v esize % SZ.v ealign == 0 /\ pow2 64 % SZ.v ealign == 0
+  requires pure (SZ.v esize % SZ.v ealign == 0 /\ pow2 32 % SZ.v ealign == 0
                  /\ SZ.v esize > 0)
   returns a : ptr
   ensures array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) (SZ.v ealign) a 1.0R
                        (Seq.create (SZ.v n) (None #t))
-  ensures pure (addr_of a + SZ.v nbytes < pow2 64)
+  ensures pure (addr_of a + SZ.v nbytes < T.addr_limit)
 {
   let a = mem_stack_alloc nbytes ealign;
   mem_pts_to_fits a;

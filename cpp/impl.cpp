@@ -283,6 +283,15 @@ public:
         TargetIntWidths(TI.getCharWidth(), TI.getShortWidth(), TI.getIntWidth(),
                         TI.getLongWidth(), TI.getLongLongWidth()));
     ctx.set_pointer_size(TI.getPointerWidth(LangAS::Default) / 8);
+    ctx.set_little_endian(TI.isLittleEndian());
+    // `max_align_t` is clang's `struct { long long; long double; }` (or
+    // `double` where `long double` is `double`), each member at its preferred
+    // alignment.
+    ctx.set_max_align(
+        std::max(
+            Context.getPreferredTypeAlign(Context.LongLongTy.getTypePtr()),
+            Context.getPreferredTypeAlign(Context.LongDoubleTy.getTypePtr())) /
+        TI.getCharWidth());
     ctx.set_linkage_context(toStr(StringRef(TI.getDataLayoutString())));
   }
 

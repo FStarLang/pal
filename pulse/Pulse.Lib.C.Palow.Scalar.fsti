@@ -33,21 +33,23 @@ open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Array
 
 module SZ = FStar.SizeT
+module T = Pulse.Lib.C.Palow.Target
 module ET = Pulse.Lib.C.Palow.Etype
 module U8 = FStar.UInt8
 module U32 = FStar.UInt32
 module M = FStar.Math.Lemmas
 
-(* An all-zero range is the encoding of the value zero, at any width. This is
-   what makes `calloc` different from `malloc`: the storage arrives already
-   representing a value, so it may be read before it is written.
+(* An all-zero range is the encoding of the value zero, at any width and in
+   either byte order. This is what makes `calloc` different from `malloc`: the
+   storage arrives already representing a value, so it may be read before it
+   is written.
 
    It carries no `SMTPat`. The fact is wanted at `encode n None (I32.v 0l)` and
    the like, which is not syntactically `encode n None 0`, so a pattern would
    not fire where it matters; the caller names it instead. *)
 let encode_zero (n: nat)
   : Lemma (encode n None 0 == zeroed n)
-  = Seq.lemma_eq_elim (encode n None 0) (zeroed n)
+  = Pulse.Lib.C.Palow.Encoding.encode_zero n
 
 (* ---------------------------------------------------------------------------
    uint8_t
@@ -218,8 +220,8 @@ ghost fn uint32_t_reveal_uninit (a: ptr)
    should hold.
    --------------------------------------------------------------------------- *)
 
-let ptr_sizeof : SZ.t = 8sz
-let ptr_alignof : SZ.t = 8sz
+let ptr_sizeof : n:SZ.t{SZ.v n == T.ptr_bytes} = if T.ptr_64 then 8sz else 4sz
+let ptr_alignof : n:SZ.t{SZ.v n == T.ptr_bytes} = ptr_sizeof
 let ptr_ctype : ET.ctype = ET.TScalar ET.SPtr
 
 let ptr_repr (a: ptr) (b: bytes) : prop =

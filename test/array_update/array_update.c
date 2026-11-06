@@ -98,16 +98,22 @@ void read_union_array(_array struct point *a)
   u.points[0].x = 42;
 }
 
+/* The byte offset of element `i`, reduced the way pointer addition reduces it.
+   `4sz `SizeT.mul` i` would only be well-typed where 4 * 2^32 fits in a
+   `size_t`, and an interface is checked for every target. */
+#define _byte_offset(es, i) \
+  (SizeT.uint_to_t ((es * UInt32.v i) % Pulse.Lib.C.Palow.Target.addr_limit))
+
 _plain uint32_t *array_address(_plain _array uint32_t *a, uint32_t i)
   _ensures(_inline_pulse(
-    pure ($(return) == $(a) +! (4sz `SizeT.mul` (sizet_of_uint32 $(i))))))
+    pure ($(return) == $(a) +! _byte_offset(4, $(i)))))
 {
   return &a[i];
 }
 
 _plain struct point *union_array_address(_plain _array struct point *a, uint32_t i)
   _ensures(_inline_pulse(
-    pure ($(return) == $(a) +! (8sz `SizeT.mul` (sizet_of_uint32 $(i))))))
+    pure ($(return) == $(a) +! _byte_offset(8, $(i)))))
 {
   union point_array u;
   u.points = a;

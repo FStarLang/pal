@@ -197,6 +197,8 @@ mod crate::clang {
 
         fn set_target_int_widths(&mut self, TargetIntWidths);
         fn set_pointer_size(&mut self, u64);
+        fn set_little_endian(&mut self, bool);
+        fn set_max_align(&mut self, u64);
 
         fn set_type_layout(&mut self, u32, &str, u64, u64);
         fn set_field_offset(&mut self, u32, &str, &str, u64);

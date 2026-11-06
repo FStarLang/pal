@@ -34,6 +34,7 @@ open Pulse.Lib.C.Palow.Scalar
 open Pulse.Lib.C.Palow.Float
 
 module SZ = FStar.SizeT
+module T = Pulse.Lib.C.Palow.Target
 module U8 = FStar.UInt8
 module U16 = FStar.UInt16
 module U32 = FStar.UInt32
@@ -931,36 +932,42 @@ ghost fn uint64_t_reveal_uninit (a: ptr)
 
 (* -------------------------------- size_t --------------------------------
 
-   `size_t` is not a fixed-width type in C, but PAL already commits to a
-   concrete target (LP64) everywhere else, so it is eight bytes here. F*'s
-   `FStar.SizeT.fits` is abstract, so the bound that `encode` needs is not
-   derivable and has to be assumed -- exactly as for `Ptr.addr_bound`, and
-   recorded alongside it under "Known deviations". *)
+   `size_t` is pointer-sized; see the interface. *)
 
-let size_t_bound (x: SZ.t) : Lemma (SZ.v x < pow2 64) [SMTPat (SZ.v x)] =
-  assume (SZ.v x < pow2 64)
+let size_t_bound (x: SZ.t) : Lemma (SZ.v x < T.addr_limit) [SMTPat (SZ.v x)] =
+  assume (SZ.v x < T.addr_limit)
 
-(* LP64 again: `size_t` is sixty-four bits wide, so `FStar.SizeT.fits_u64`
-   holds. F* keeps it abstract, so the conversions out of the fixed-width
-   unsigned types are unavailable without assuming it -- the same assumption as
-   `size_t_bound`, stated where the casts need it. *)
+(* The width assumptions behind the conversions, in the form F* states them. *)
+let size_t_fits_u32 () : Lemma SZ.fits_u32 = assume SZ.fits_u32
+
+let size_t_fits_u64 () : Lemma (requires T.ptr_64) (ensures SZ.fits_u64) = assume SZ.fits_u64
 
 let sizet_of_uint16 (x: U16.t) : Pure SZ.t (requires True) (ensures fun y -> SZ.v y == U16.v x) =
   SZ.uint16_to_sizet x
 
 let sizet_of_uint32 (x: U32.t) : Pure SZ.t (requires True) (ensures fun y -> SZ.v y == U32.v x) =
-  assume SZ.fits_u64;
-  SZ.fits_u64_implies_fits_32 ();
+  size_t_fits_u32 ();
   SZ.uint32_to_sizet x
 
-let sizet_of_uint64 (x: U64.t) : Pure SZ.t (requires True) (ensures fun y -> SZ.v y == U64.v x) =
-  assume SZ.fits_u64;
-  SZ.uint64_to_sizet x
+let sizet_of_uint64 (x: U64.t) : Pure SZ.t (requires U64.v x < T.addr_limit) (ensures fun y -> SZ.v y == U64.v x) =
+  if T.ptr_64 then begin
+    size_t_fits_u64 ();
+    SZ.uint64_to_sizet x
+  end else begin
+    size_t_fits_u32 ();
+    SZ.fits_u32_implies_fits (U64.v x);
+    SZ.uint_to_t (U64.v x)
+  end
 
-let size_t_fits (x: int) : Lemma (requires 0 <= x /\ x < pow2 64) (ensures SZ.fits x)
+let size_t_fits (x: int) : Lemma (requires 0 <= x /\ x < T.addr_limit) (ensures SZ.fits x)
   [SMTPat (SZ.fits x)] =
-  assume SZ.fits_u64;
-  SZ.fits_u64_implies_fits x
+  if T.ptr_64 then begin
+    size_t_fits_u64 ();
+    SZ.fits_u64_implies_fits x
+  end else begin
+    size_t_fits_u32 ();
+    SZ.fits_u32_implies_fits x
+  end
 
 
 
@@ -981,7 +988,7 @@ let size_t_repr_no_prov (x: SZ.t) (b: bytes)
 let size_t_repr_injective (x y: SZ.t) (b: bytes)
   : Lemma (requires size_t_repr x b /\ size_t_repr y b)
           (ensures  x == y)
-  = assert_norm (pow2 (8 * 8) == pow2 64);
+  = T.addr_limit_pow2 ();
     encode_injective (SZ.v size_t_sizeof) None (SZ.v x) (SZ.v y)
 
 ghost fn size_t_pts_to_not_null (a: ptr) (#p: perm) (#x: SZ.t)

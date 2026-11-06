@@ -865,4 +865,8 @@ pub struct TranslationUnit {
     pub layouts: LayoutTable,
     /// Size of a data pointer in bytes, as reported by clang.
     pub pointer_size: u64,
+    /// Byte order of the target, as reported by clang.
+    pub little_endian: bool,
+    /// `_Alignof(max_align_t)` on the target, in bytes.
+    pub max_align: u64,
 }

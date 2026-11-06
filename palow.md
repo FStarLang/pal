@@ -79,20 +79,23 @@ stored to memory and read back has to keep its allocation identity, so
 provenance necessarily leaks through `bytes`. It is therefore part of the
 design from the start rather than something to retrofit.
 
-Addresses are bounded LP64 words. Consequently, total pointer addition must
-wrap: `addr_of (a +! n) == (addr_of a + SizeT.v n) % pow2 64`.
+Addresses are bounded pointer-sized words, below `Target.addr_limit` (`pow2 64`
+or `pow2 32`, see *Target* below). Consequently, total pointer addition must
+wrap: `addr_of (a +! n) == (addr_of a + SizeT.v n) % Target.addr_limit`.
 An unbounded addition law together with `addr_bound` would prove `False` by
 repeatedly adding one, without owning or accessing any memory.
 `test/pointer_overflow_bad` rejects that derivation.
 
 The nonwrapping law is a proved lemma, `addr_of_add_nowrap`, with the explicit
-premise `addr_of a + SizeT.v n < pow2 64`. Owned byte ranges provide this
+premise `addr_of a + SizeT.v n < Target.addr_limit`. Owned byte ranges provide this
 premise through `mem_pts_to_fits`; its pointer-word bound is explicit because
 `SizeT.fits` is abstract. Forming an out-of-bounds pointer is still permitted
 by this model, unlike ISO C, but it provides no ownership or right to access
 that address. Alignment transport also accounts for wrapping: C's
-power-of-two alignments divide `2^64`, while an arbitrary alignment such as
-3 need not survive a wrap.
+power-of-two alignments divide the address space, while an arbitrary
+alignment such as 3 need not survive a wrap. The side condition is stated as
+`pow2 32 % m == 0`, a closed numeral that does not mention the target, and
+`Target.addr_limit_divisible` carries it to either width.
 
 `array_fits` derives the same extent from typed array ownership. Generated
 bodies call it for automatically owned, unguarded array parameters; plain
@@ -109,7 +112,7 @@ Core lemmas that everything else is built on:
 // object never overflow.
 ghost fn mem_pts_to_fits (a: ptr) (#p: perm) (#b: bytes)
   preserves mem_pts_to a p b
-  ensures   pure (SZ.fits (addr_of a + len b) /\ addr_of a + len b < pow2 64)
+  ensures   pure (SZ.fits (addr_of a + len b) /\ addr_of a + len b < T.addr_limit)
 
 ghost fn mem_split (a: ptr) (#p: perm) (#b: bytes) (n: SZ.t { SZ.v n <= len b })
   requires mem_pts_to a p b
@@ -293,6 +296,46 @@ target-dependent — which is already true today (`long` translates to `int64_t`
 on Linux and `int32_t` on Windows), so this is not a new constraint, but it
 should be documented.
 
+**Target.** The library itself is not target-dependent.
+`Pulse.Lib.C.Palow.Target` declares what it depends on abstractly:
+
+- `little_endian : bool` — `Encoding.encode`/`decode` put the bytes of a
+  scalar in that order;
+- `ptr_64 : bool` — pointers, `size_t` and `ptrdiff_t` are eight bytes wide
+  (LP64/LLP64) or four (ILP32). `ptr_bytes`, `addr_limit` (`pow2 64` or
+  `pow2 32`, as a case split so that a fixed target makes it literally the
+  bound the machine integer types use), `ptr_sizeof` and `size_t_sizeof` are
+  defined from it;
+- `max_align : SizeT.t` — `_Alignof(max_align_t)`, one of 8, 16 or 32.
+
+Every library proof holds for all of them (`Target.fst` gives one witness, to
+show the interface is satisfiable). Each generated `.fst` then fixes the
+target clang reported for the file it parsed:
+
+```fstar
+assume Palow_little_endian : Pulse.Lib.C.Palow.Target.little_endian == true
+assume Palow_ptr_64 : Pulse.Lib.C.Palow.Target.ptr_64 == true
+assume Palow_max_align : FStar.SizeT.v Pulse.Lib.C.Palow.Target.max_align == 16
+```
+
+One fact per `assume`, not a conjunction: F* prunes the SMT context to the
+facts all of whose symbols a query mentions, so a conjunction would be
+invisible to a query about only one of them.
+
+The assumptions are in the implementation only, never the `.fsti`, so they
+reach the SMT context of that module's own proofs and not those of anything
+checked against its interface. `--portable` leaves them out, and the proofs
+must then hold on every target; a layout that involves a pointer-sized field
+is then simply not provable, which is the safe failure. The target is chosen
+the usual clang way, e.g. a `compile_flags.txt` with `--target=mips-linux-gnu`
+(`test/target_big_endian`, 32-bit big-endian) or `--target=i386-linux-gnu`
+(`test/target_ilp32`). Linking translation units for different targets is
+already refused: the linkage context includes clang's data layout string,
+which spells the byte order and the pointer width.
+
+On a 32-bit target, `ptrdiff_t` is `int32_t` and pointer subtraction goes
+through `ptr_diff32`; a `uint64_t` converts to `size_t` modulo `pow2 32`.
+
 **Implemented.** The clang frontend records the size, alignment and field
 offsets of every named C type (`recordTypeLayout`/`recordFieldOffsets` in
 `cpp/impl.cpp`) into `ir::LayoutTable`; `src/layout.rs` derives the size of
@@ -370,10 +413,12 @@ every way into typed ownership has to establish it:
 | `T_stack_alloc` | **ensures** it, by construction |
 | `malloc`, `calloc` | **ensures** `aligned a max_align` |
 
-`max_align` is `_Alignof(max_align_t)` for the target — 16 on LP64 — which is
+`max_align` is `_Alignof(max_align_t)` for the target — 16 on x86-64 and
+AArch64, 8 on 32-bit MIPS and i386 — which is
 exactly C11 7.22.3p1: storage from `malloc` is suitably aligned for any object
 type with a fundamental alignment. A `T_claim` on a fresh block then needs
-`aligned_divides a 16sz T_alignof`, and `16 % 4 == 0` is a literal computation.
+`aligned_divides a max_align T_alignof`, and once the module's target
+assumption fixes `max_align`, `16 % 4 == 0` is a literal computation.
 
 Crucially, `mem_pts_to` is **not** touched. Bytes have alignment 1; the
 constraint belongs to the typed layer, and keeping the byte layer free of it is
@@ -1243,7 +1288,8 @@ part of `make -C pulse`.
 | `Pulse.Lib.C.Palow.Bytes` | proved | `alloc_id`, `prov`, `byte`, `bytes`, `uninit`/`zeroed`, `strip_prov`, slice/append lemmas |
 | `Pulse.Lib.C.Palow.Ptr` | axiomatized | `ptr`, `addr_of`, `prov_of`, `ptr_ext`, `( +! )`, `disjoint_ranges` |
 | `Pulse.Lib.C.Palow` | axiomatized | `mem_pts_to`, `mem_split`/`mem_join`, disjointness, injectivity, share/gather |
-| `Pulse.Lib.C.Palow.Encoding` | proved | little-endian `encode`/`decode`, round-trip and injectivity |
+| `Pulse.Lib.C.Palow.Target` | abstract | the target's byte order, assumed per generated module |
+| `Pulse.Lib.C.Palow.Encoding` | proved | target-order `encode`/`decode`, round-trip and injectivity |
 | `Pulse.Lib.C.Palow.Scalar` | proved | `uint8_t`/`uint32_t`/stored-pointer `*_repr`, `*_pts_to`, `*_sizeof`, agreement, share/gather, reveal/conceal |
 | `Pulse.Lib.C.Palow.Nullable` | proved | `unless_null` with its intro/elim pair |
 | `Pulse.Lib.C.Palow.Alloc` | axiomatized | `freeable`, `malloc`, `calloc`, `free` |
@@ -1285,7 +1331,7 @@ sunk the design:
   conjoined with an `array_pts_to` at the header's size, with no `MallocFlex`
   special case and no ghost length field pinned inside the record.
 - **`ptr_repr` is a definition, not an axiom.** A stored pointer's object
-  representation is the little-endian bytes of its address, each tagged with
+  representation is the target-order bytes of its address, each tagged with
   the pointer's provenance. Injectivity (a stored pointer is recovered exactly,
   provenance included) and the fact that an integer store destroys it (integer
   representations are provenance-free) are then both consequences of that one
@@ -1352,9 +1398,10 @@ new facts about memory.
   have to be non-empty, which is not a weakening but a fact: two zero-length
   ranges at the same address are not disjoint, and a zero-length range carries
   no ownership to separate them with.
-- Addresses are assumed to fit in 64 bits (`Ptr.addr_bound`), so that a stored
-  pointer's address round-trips through `ptr_sizeof` bytes. This is a target
-  property, and is the same LP64 assumption the scalar sizes already make.
+- Addresses are assumed to fit in a pointer word (`Ptr.addr_bound`, below
+  `Target.addr_limit`), so that a stored pointer's address round-trips through
+  `ptr_sizeof` bytes. This is a target property, the same one the scalar sizes
+  already depend on.
   It cannot be derived from `SizeT.fits`, which is abstract.
 - `uint8_t_pts_to` requires provenance-free bytes, so a pointer's
   representation bytes cannot be read one at a time as `unsigned char`. Real C
@@ -1371,7 +1418,9 @@ new facts about memory.
   so the index is a fact about the bytes that nothing yet has to respect.
   Until stage 3 lands we are strictly more permissive than ISO C, in the
   direction of accepting programs clang may miscompile.
-- `size_t` is eight bytes and `SizeT.v` is assumed to be below `pow2 64`, for
+- `size_t` is pointer-sized and `SizeT.v` is assumed to be below
+  `Target.addr_limit` (with `SizeT.fits_u32` always, and `fits_u64` on 64-bit
+  targets), for
   the same reason and with the same justification as `Ptr.addr_bound`.
 - Palow has no *total* function pointers. Divergence is inferred per body,
   after the wrapper text is built, so every `__fp` wrapper is `divergent` and
@@ -2083,8 +2132,8 @@ new facts about memory.
    otherwise fail, so removing one can only cause a failure. Every other ghost
    statement is still refused rather than silently discarded.
 
-   `ptrdiff_t` gets no layer of its own: on the LP64 target Palow fixes, it
-   *is* `int64_t`, so it shares its storage.
+   `ptrdiff_t` gets no layer of its own: it *is* `int64_t` (or `int32_t` on a
+   32-bit target), so it shares its storage.
 
    Reading a global through its address is the case that makes the alias pay
    for itself. `const uint32_t *p = &g; return *p;` is what most of the corpus
@@ -6091,7 +6140,7 @@ new facts about memory.
     about an address — `mem_pts_to_not_null`, `mem_pts_to_perm_bound`,
     `mem_pts_to_disjoint` — is already guarded by `len b > 0`, and the one that
     is not, `mem_pts_to_fits`, says nothing new at length zero because
-    `Ptr.addr_bound` already puts every address below `pow2 64`. In other
+    `Ptr.addr_bound` already puts every address below `Target.addr_limit`. In other
     words, the guards that were written to let `malloc(0)` return a
     non-dereferenceable pointer are exactly the guards that make a zero-length
     range the unit of the heap. `Pulse.Lib.C.Palow.Empty` packages the two

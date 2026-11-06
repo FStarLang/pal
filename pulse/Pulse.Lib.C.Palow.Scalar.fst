@@ -33,6 +33,7 @@ open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Array
 
 module SZ = FStar.SizeT
+module T = Pulse.Lib.C.Palow.Target
 module U8 = FStar.UInt8
 module U32 = FStar.UInt32
 module M = FStar.Math.Lemmas
@@ -251,9 +252,9 @@ let ptr_repr_len (a: ptr) (b: bytes)
 let ptr_repr_injective (a1 a2: ptr) (b: bytes)
   : Lemma (requires ptr_repr a1 b /\ ptr_repr a2 b)
           (ensures  a1 == a2)
-  = assert_norm (pow2 (8 * 8) == pow2 64);
-    assert (get b 0 == byte_at (prov_of a1) (addr_of a1) 0);
-    assert (get b 0 == byte_at (prov_of a2) (addr_of a2) 0);
+  = T.addr_limit_pow2 ();
+    assert ((get b 0).prov == prov_of a1);
+    assert ((get b 0).prov == prov_of a2);
     addr_bound a1;
     addr_bound a2;
     encode_injective (SZ.v ptr_sizeof) (prov_of a1) (addr_of a1) (addr_of a2);

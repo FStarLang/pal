@@ -34,6 +34,7 @@ open Pulse.Lib.C.Palow.Scalar
 open Pulse.Lib.C.Palow.Float
 
 module SZ = FStar.SizeT
+module T = Pulse.Lib.C.Palow.Target
 module ET = Pulse.Lib.C.Palow.Etype
 module U8 = FStar.UInt8
 module U16 = FStar.UInt16
@@ -698,40 +699,41 @@ ghost fn uint64_t_reveal_uninit (a: ptr)
 
 (* -------------------------------- size_t --------------------------------
 
-   `size_t` is not a fixed-width type in C, but PAL already commits to a
-   concrete target (LP64) everywhere else, so it is eight bytes here. F*'s
-   `FStar.SizeT.fits` is abstract, so the bound that `encode` needs is not
-   derivable and has to be assumed -- exactly as for `Ptr.addr_bound`, and
-   recorded alongside it under "Known deviations". *)
+   `size_t` is pointer-sized: `Target.ptr_bytes` wide. F*'s `FStar.SizeT.fits`
+   is abstract, so the bound that `encode` needs is not derivable and has to
+   be assumed -- exactly as for `Ptr.addr_bound`, and recorded alongside it
+   under "Known deviations". *)
 
-val size_t_bound (x: SZ.t) : Lemma (SZ.v x < pow2 64) [SMTPat (SZ.v x)]
+val size_t_bound (x: SZ.t) : Lemma (SZ.v x < T.addr_limit) [SMTPat (SZ.v x)]
 
-(* LP64 again: `size_t` is sixty-four bits wide, so `FStar.SizeT.fits_u64`
-   holds. F* keeps it abstract, so the conversions out of the fixed-width
-   unsigned types are unavailable without assuming it -- the same assumption as
-   `size_t_bound`, stated where the casts need it. *)
+(* `size_t` is at least thirty-two bits wide, and sixty-four on a 64-bit
+   target, so `FStar.SizeT.fits_u32` holds, and `fits_u64` does where
+   `Target.ptr_64` does. F* keeps both abstract, so the conversions out of the
+   fixed-width unsigned types are unavailable without assuming them -- the same
+   assumption as `size_t_bound`, stated where the casts need it. A `uint64_t`
+   converts only where it fits, which on a 64-bit target is everywhere. *)
 
 val sizet_of_uint16 (x: U16.t) : Pure SZ.t (requires True) (ensures fun y -> SZ.v y == U16.v x)
 
 val sizet_of_uint32 (x: U32.t) : Pure SZ.t (requires True) (ensures fun y -> SZ.v y == U32.v x)
 
-val sizet_of_uint64 (x: U64.t) : Pure SZ.t (requires True) (ensures fun y -> SZ.v y == U64.v x)
+val sizet_of_uint64 (x: U64.t) : Pure SZ.t (requires U64.v x < T.addr_limit) (ensures fun y -> SZ.v y == U64.v x)
 
 (* The same assumption once more, in the form arithmetic needs it.  `SZ.add`
-   and friends carry a `fits` precondition, and on an LP64 target every value
-   that fits in sixty-four bits satisfies it.  Stated with an `SMTPat` so a
+   and friends carry a `fits` precondition, and every value below
+   `Target.addr_limit` satisfies it.  Stated with an `SMTPat` so a
    `size_t` addition whose bound the source has already established does not
    need a hint at every use. *)
 
-val size_t_fits (x: int) : Lemma (requires 0 <= x /\ x < pow2 64) (ensures SZ.fits x)
+val size_t_fits (x: int) : Lemma (requires 0 <= x /\ x < T.addr_limit) (ensures SZ.fits x)
   [SMTPat (SZ.fits x)]
 
 
-let size_t_sizeof : SZ.t = 8sz
-let size_t_alignof : SZ.t = 8sz
-  (* `size_t` is a typedef for `unsigned long`, the same type as `uint64_t`
-     on this target, so it shares a descriptor. *)
-let size_t_ctype : ET.ctype = ET.TScalar ET.SUInt64
+let size_t_sizeof : n:SZ.t{SZ.v n == T.ptr_bytes} = if T.ptr_64 then 8sz else 4sz
+let size_t_alignof : n:SZ.t{SZ.v n == T.ptr_bytes} = size_t_sizeof
+  (* `size_t` is the unsigned integer type of its width, so it shares that
+     type's descriptor. *)
+let size_t_ctype : ET.ctype = ET.TScalar (if T.ptr_64 then ET.SUInt64 else ET.SUInt32)
 
 let size_t_repr (x: SZ.t) (b: bytes) : prop =
   b == encode (SZ.v size_t_sizeof) None (SZ.v x)

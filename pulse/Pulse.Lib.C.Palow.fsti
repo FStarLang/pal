@@ -22,6 +22,7 @@ open Pulse
 open Pulse.Lib.C.Palow.Bytes
 open Pulse.Lib.C.Palow.Ptr
 module SZ = FStar.SizeT
+module T = Pulse.Lib.C.Palow.Target
 module Seq = FStar.Seq
 module Etype = Pulse.Lib.C.Palow.Etype
 
@@ -76,7 +77,7 @@ val mem_pts_to_timeless (a: ptr) (p: perm) (b: bytes)
    axiom in this file that says something about an address is guarded by
    `len b > 0` for exactly this reason, and `mem_pts_to_fits` -- which is not --
    says nothing new at length zero, because `addr_of_bound` already puts every
-   address below `pow2 64`.
+   address below `Target.addr_limit`.
 
    This matters because C has objects of size zero: GCC and Clang both accept
    a struct with no members, and real code uses them. Without this equation the
@@ -98,7 +99,7 @@ ghost fn mem_pts_to_not_null (a: ptr) (#p: perm) (#b: bytes)
    bound also ensures byte offsets within this range do not wrap. *)
 ghost fn mem_pts_to_fits (a: ptr) (#p: perm) (#b: bytes)
   preserves mem_pts_to a p b
-  ensures   pure (SZ.fits (addr_of a + len b) /\ addr_of a + len b < pow2 64)
+  ensures   pure (SZ.fits (addr_of a + len b) /\ addr_of a + len b < T.addr_limit)
 
 ghost fn mem_pts_to_perm_bound (a: ptr) (#p: perm) (#b: bytes)
   preserves mem_pts_to a p b

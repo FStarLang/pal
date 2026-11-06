@@ -150,7 +150,7 @@ fn ptr_stack_free (a: ptr)
    from `mem_split` rather than another axiom. The alignment is that of the
    declared automatic object, including supported extended alignments; unlike
    malloc, automatic storage is not limited to max_align_t. *)
-fn mem_stack_alloc (n: SZ.t) (al: SZ.t { SZ.v al > 0 /\ pow2 64 % SZ.v al == 0 })
+fn mem_stack_alloc (n: SZ.t) (al: SZ.t { SZ.v al > 0 /\ pow2 32 % SZ.v al == 0 })
   returns  a : ptr
   ensures  exists* b. mem_pts_to a 1.0R b
                       ** pure (len b == SZ.v n /\ aligned a al)

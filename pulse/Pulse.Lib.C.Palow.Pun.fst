@@ -33,6 +33,7 @@ open Pulse.Lib.C.Palow.Scalar
 open Pulse.Lib.C.Palow.CTypes
 
 module SZ = FStar.SizeT
+module T = Pulse.Lib.C.Palow.Target
 module Seq = FStar.Seq
 module U8 = FStar.UInt8
 module U16 = FStar.UInt16
@@ -61,73 +62,6 @@ let plain_encode (n: nat) (x: nat)
   : Lemma (plain (encode n None x))
           [SMTPat (plain (encode n None x))]
   = ()
-
-(* The value a plain range encodes. `decode` is partial only on uninitialised
-   bytes, so on a plain range the default is never taken. *)
-let bytes_nat (b: bytes) : nat =
-  match decode b with Some x -> x | None -> 0
-
-let decode_cons (b: bytes)
-  : Lemma (requires len b > 0)
-          (ensures  decode b ==
-                    (match (get b 0).value with
-                     | None -> None
-                     | Some v ->
-                       (match decode (slice b 1 (len b)) with
-                        | None -> None
-                        | Some r -> Some (U8.v v + 256 * r))))
-  = assert_norm (decode b ==
-                    (if len b = 0 then Some 0 else
-                     match (get b 0).value with
-                     | None -> None
-                     | Some v ->
-                       (match decode (slice b 1 (len b)) with
-                        | None -> None
-                        | Some r -> Some (U8.v v + 256 * r))))
-
-#push-options "--z3rlimit 40 --fuel 1 --ifuel 1"
-let rec encode_decode (b: bytes)
-  : Lemma (requires plain b)
-          (ensures  bytes_nat b < pow2 (8 * len b) /\
-                    b == encode (len b) None (bytes_nat b))
-          (decreases (len b))
-  = if len b = 0 then begin
-      assert_norm (pow2 (8 * 0) == 1);
-      Seq.lemma_eq_intro b (encode 0 None 0)
-    end else begin
-      let n = len b in
-      let tl = slice b 1 n in
-      encode_decode tl;
-      let r = bytes_nat tl in
-      decode_encode_exact (n - 1) None r;
-      assert (decode tl == Some r);
-      assert (Some? (get b 0).value);
-      let v0 = Some?.v (get b 0).value in
-      decode_cons b;
-      assert (decode b == Some (U8.v v0 + 256 * r));
-      let x = U8.v v0 + 256 * r in
-      pow2_step n;
-      assert (x < pow2 (8 * n));
-      encode_head n None x;
-      encode_tail n None x;
-      M.lemma_mod_plus (U8.v v0) r 256;
-      M.small_mod (U8.v v0) 256;
-      M.lemma_div_plus (U8.v v0) r 256;
-      M.small_div (U8.v v0) 256;
-      let e = encode n None x in
-      assert (slice e 1 n == encode (n - 1) None r);
-      let aux (i: nat { i < n }) : Lemma (get b i == get e i) =
-        if i = 0 then ()
-        else begin
-          let j : nat = i - 1 in
-          assert (get b i == get tl j);
-          assert (get e i == get (slice e 1 n) j)
-        end
-      in
-      Classical.forall_intro aux;
-      Seq.lemma_eq_intro b e
-    end
-#pop-options
 
 (* A signed value from its two's-complement residue: `to_bits` backwards. *)
 let from_bits (w: pos) (x: nat { x < pow2 w })
@@ -499,7 +433,7 @@ let int32_t_of_bytes (b: bytes) : I32.t = I32.int_to_t (from_bits 32 (bytes_nat 
 let int32_t_bytes_repr (x: I32.t)
   : Lemma (int32_t_repr x (int32_t_bytes x) /\ len (int32_t_bytes x) == 4 /\ plain (int32_t_bytes x))
           [SMTPat (int32_t_bytes x)]
-  = ()
+  = plain_encode 4 (to_bits 32 (I32.v x))
 
 let int32_t_of_bytes_bytes (x: I32.t)
   : Lemma (int32_t_of_bytes (int32_t_bytes x) == x)
@@ -541,7 +475,7 @@ let int64_t_of_bytes (b: bytes) : I64.t = I64.int_to_t (from_bits 64 (bytes_nat 
 let int64_t_bytes_repr (x: I64.t)
   : Lemma (int64_t_repr x (int64_t_bytes x) /\ len (int64_t_bytes x) == 8 /\ plain (int64_t_bytes x))
           [SMTPat (int64_t_bytes x)]
-  = ()
+  = plain_encode 8 (to_bits 64 (I64.v x))
 
 let int64_t_of_bytes_bytes (x: I64.t)
   : Lemma (int64_t_of_bytes (int64_t_bytes x) == x)
@@ -576,31 +510,35 @@ ghost fn int64_t_to_mem (a: ptr) (#p: perm) (#x: I64.t)
 }
 
 (* size_t *)
-let size_t_bytes (x: SZ.t) : bytes = encode 8 None (SZ.v x)
+let size_t_bytes (x: SZ.t) : bytes = encode (SZ.v size_t_sizeof) None (SZ.v x)
 
-let size_t_of_bytes (b: bytes) : SZ.t = sizet_of_uint64 (U64.uint_to_t (bytes_nat b % pow2 64))
+let size_t_of_bytes (b: bytes) : SZ.t =
+  M.lemma_mod_lt (bytes_nat b) T.addr_limit;
+  SZ.uint_to_t (bytes_nat b % T.addr_limit)
 
 let size_t_bytes_repr (x: SZ.t)
-  : Lemma (size_t_repr x (size_t_bytes x) /\ len (size_t_bytes x) == 8 /\ plain (size_t_bytes x))
+  : Lemma (size_t_repr x (size_t_bytes x) /\ len (size_t_bytes x) == SZ.v size_t_sizeof /\ plain (size_t_bytes x))
           [SMTPat (size_t_bytes x)]
   = ()
 
 let size_t_of_bytes_bytes (x: SZ.t)
   : Lemma (size_t_of_bytes (size_t_bytes x) == x)
           [SMTPat (size_t_of_bytes (size_t_bytes x))]
-  = decode_encode_exact 8 None (SZ.v x);
-    M.small_mod (SZ.v x) (pow2 64)
+  = T.addr_limit_pow2 ();
+    decode_encode_exact (SZ.v size_t_sizeof) None (SZ.v x);
+    M.small_mod (SZ.v x) T.addr_limit
 
 let size_t_bytes_of_bytes (b: bytes)
-  : Lemma (requires plain b /\ len b == 8)
+  : Lemma (requires plain b /\ len b == SZ.v size_t_sizeof)
           (ensures  size_t_bytes (size_t_of_bytes b) == b)
           [SMTPat (size_t_bytes (size_t_of_bytes b))]
-  = encode_decode b;
-    M.small_mod (bytes_nat b) (pow2 64)
+  = T.addr_limit_pow2 ();
+    encode_decode b;
+    M.small_mod (bytes_nat b) T.addr_limit
 
 ghost fn size_t_of_mem (a: ptr) (#p: perm) (#b: bytes)
   requires mem_pts_to a p b
-  requires pure (plain b /\ len b == 8 /\ aligned a size_t_alignof)
+  requires pure (plain b /\ len b == SZ.v size_t_sizeof /\ aligned a size_t_alignof)
   ensures  size_t_pts_to a p (size_t_of_bytes b)
 {
   size_t_bytes_of_bytes b;
