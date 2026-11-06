@@ -4606,20 +4606,58 @@ fn emit_fn(
             .flatten();
         let oname = format!("own_{}", base);
 
+        // A nullable struct pointer owns what its pointer fields reach on the
+        // same terms as the struct itself: inside the guard, at the value the
+        // guard's points-to is at.
+        let raw_pts_to: Rc<dyn Fn(&str, &str) -> String> = Rc::from(pts_to);
+        let guarded_deep = |perm: &str, v: &str, o: &str| -> String {
+            let (sn, _) = own_info.as_ref().unwrap();
+            format!(
+                "unless_null {} ({} ** {}_own {} {} {})",
+                pname,
+                raw_pts_to(perm, v),
+                sn,
+                v,
+                perm,
+                o
+            )
+        };
         if null_guard && arg.mode != ParamMode::Out {
             let perm = match arg.mode {
                 ParamMode::Const => format!("perm_{}", base),
                 _ => "1.0R".to_string(),
             };
-            null_payload.insert(base.clone(), pts_to(&perm, "_"));
+            null_payload.insert(
+                base.clone(),
+                match (&own_info, arg.mode) {
+                    // A preserved pointee is at the values its binders name,
+                    // and naming them is what lets closing the guard compare
+                    // a regathered ownership record by equality rather than
+                    // by shape.
+                    (Some((sn, _)), ParamMode::Const) => format!(
+                        "{} ** {}_own (reveal {}) {} (reveal {})",
+                        raw_pts_to(&perm, &format!("(reveal {})", vname)),
+                        sn,
+                        vname,
+                        perm,
+                        oname
+                    ),
+                    (Some((sn, _)), _) => {
+                        format!("{} ** {}_own _ {} _", raw_pts_to(&perm, "_"), sn, perm)
+                    }
+                    (None, _) => raw_pts_to(&perm, "_"),
+                },
+            );
         } else if null_guard && extent(tds, &arg.ty) == Some(Extent::One) {
             null_payload.insert(base.clone(), format!("{}_pts_to_uninit {}", pn, pname));
         }
         let pts_to: Box<dyn Fn(&str, &str) -> String> = if null_guard {
             let p = pname.clone();
-            Box::new(move |perm: &str, v: &str| format!("unless_null {} ({})", p, pts_to(perm, v)))
+            let raw = raw_pts_to.clone();
+            Box::new(move |perm: &str, v: &str| format!("unless_null {} ({})", p, raw(perm, v)))
         } else {
-            pts_to
+            let raw = raw_pts_to.clone();
+            Box::new(move |perm: &str, v: &str| raw(perm, v))
         };
 
         // A nullable parameter's pointee is behind the guard, so a contract
@@ -4629,7 +4667,12 @@ fn emit_fn(
         // against a precondition the caller never granted.
         if null_guard {
             null_wrap.insert(base.clone(), pname.clone());
-            if refines_struct.iter().any(|(b, _, _)| *b == base)
+            // A struct refinement that is only a proposition is stated as one,
+            // conditional on non-nullness (see `refine_own`), so the guard
+            // still has just the payload to open.
+            if refines_struct
+                .iter()
+                .any(|(b, _, p)| *b == base && refine_states_own(tds, p))
                 || refines_field.iter().any(|(b, _, _)| *b == base)
             {
                 null_payload.remove(&base);
@@ -4700,32 +4743,55 @@ fn emit_fn(
                     wits.push((perm.clone(), "perm".to_string(), false));
                     ghosts.push(format!("(#{}: erased ({}))", vname, vty));
                     wits.push((vname.clone(), vty.clone(), true));
-                    preserved.push(pts_to(&perm, &vname));
                     let v = format!("(reveal {})", vname);
+                    if let Some((_, osty)) = &own_info {
+                        ghosts.push(format!("(#{}: erased ({}))", oname, osty));
+                        wits.push((oname.clone(), osty.clone(), true));
+                        let o = format!("(reveal {})", oname);
+                        preserved.push(guarded_deep(&perm, &v, &o));
+                        owns.insert(v.clone(), (Some(o.clone()), Some(o)));
+                    } else {
+                        preserved.push(pts_to(&perm, &vname));
+                    }
                     guarded_pointees.insert(base, (Some(v.clone()), Some(v)));
                 }
                 ParamMode::Consumed => {
                     ghosts.push(format!("(#{}: erased ({}))", vname, vty));
                     wits.push((vname.clone(), vty.clone(), true));
-                    req.push(pts_to("1.0R", &vname));
-                    guarded_pointees.insert(base, (Some(format!("(reveal {})", vname)), None));
+                    let v = format!("(reveal {})", vname);
+                    if let Some((_, osty)) = &own_info {
+                        ghosts.push(format!("(#{}: erased ({}))", oname, osty));
+                        wits.push((oname.clone(), osty.clone(), true));
+                        let o = format!("(reveal {})", oname);
+                        req.push(guarded_deep("1.0R", &v, &o));
+                        owns.insert(v.clone(), (Some(o), None));
+                    } else {
+                        req.push(pts_to("1.0R", &vname));
+                    }
+                    guarded_pointees.insert(base, (Some(v), None));
                 }
                 ParamMode::Regular => {
                     ghosts.push(format!("(#{}: erased ({}))", vname, vty));
                     wits.push((vname.clone(), vty.clone(), true));
-                    req.push(pts_to("1.0R", &vname));
-                    fresh.push((
-                        format!("{}'", vname),
-                        vty,
-                        pts_to("1.0R", &format!("{}'", vname)),
-                    ));
-                    guarded_pointees.insert(
-                        base,
-                        (
-                            Some(format!("(reveal {})", vname)),
-                            Some(format!("{}'", vname)),
-                        ),
-                    );
+                    let v = format!("(reveal {})", vname);
+                    let v1 = format!("{}'", vname);
+                    if let Some((_, osty)) = &own_info {
+                        ghosts.push(format!("(#{}: erased ({}))", oname, osty));
+                        wits.push((oname.clone(), osty.clone(), true));
+                        let o = format!("(reveal {})", oname);
+                        let o1 = format!("{}'", oname);
+                        req.push(guarded_deep("1.0R", &v, &o));
+                        // Both binders are the guard's; the conjunct that
+                        // names them is on the first, so the second has none.
+                        fresh.push((v1.clone(), vty, guarded_deep("1.0R", &v1, &o1)));
+                        fresh.push((o1.clone(), osty.clone(), "emp".to_string()));
+                        owns.insert(v.clone(), (Some(o), None));
+                        owns.insert(v1.clone(), (None, Some(o1)));
+                    } else {
+                        req.push(pts_to("1.0R", &vname));
+                        fresh.push((v1.clone(), vty, pts_to("1.0R", &v1)));
+                    }
+                    guarded_pointees.insert(base, (Some(v), Some(v1)));
                 }
             }
             continue;
@@ -5552,6 +5618,7 @@ fn emit_fn(
                 _ => pre.as_deref(),
             };
             let Some(this) = this else { continue };
+            let pure_guarded = null_wrap.get(base).filter(|_| !refine_states_own(tds, p));
             let t = with_this(
                 base,
                 Some((this, None, false)),
@@ -5561,11 +5628,15 @@ fn emit_fn(
                 false,
                 None,
                 &[],
-                &|sp: &Spec, w| sp.refinement(p, w),
+                &|sp: &Spec, w| match pure_guarded {
+                    Some(_) => sp.prop(p, w),
+                    None => sp.refinement(p, w),
+                },
             )?;
-            out.push(match null_wrap.get(base) {
-                Some(ptr) => format!("unless_null {} ({})", ptr, t),
-                None => format!("({})", t),
+            out.push(match (pure_guarded, null_wrap.get(base)) {
+                (Some(ptr), _) => format!("pure (not (is_null {}) ==> ({}))", ptr, t),
+                (None, Some(ptr)) => format!("unless_null {} ({})", ptr, t),
+                (None, None) => format!("({})", t),
             });
             if refine_states_own(tds, p) {
                 *refine_own_spliced.borrow_mut() = true;
@@ -12745,6 +12816,12 @@ impl<'a> Body<'a> {
     /// call. A pointer *loaded* out of memory is not: what it addresses
     /// depends on what was stored, which the contract would have to grant
     /// separately.
+    /// Whether this function holds a parameter's pointee here: the contract
+    /// grants it, or the parameter is `_nullable` and its guard is open.
+    fn owned_here(&self, p: &str) -> bool {
+        self.granted.contains(p) || self.unguarded.iter().any(|u| u == p)
+    }
+
     /// What a struct's `_own` predicate covers, by C struct name.
     fn own_items_of(&self, sn: &str) -> Vec<OwnItem> {
         self.tds
@@ -12770,7 +12847,7 @@ impl<'a> Body<'a> {
                     return None;
                 };
                 let p = v.val.to_string();
-                if !self.params.contains(&p) || !self.granted.contains(&p) {
+                if !self.params.contains(&p) || !self.owned_here(&p) {
                     return None;
                 }
                 Some(OwnPath {
@@ -12814,7 +12891,7 @@ impl<'a> Body<'a> {
             return None;
         };
         let p = v.val.to_string();
-        if !self.granted.contains(&p) || !self.params.contains(&p) {
+        if !self.owned_here(&p) || !self.params.contains(&p) {
             return None;
         }
         let ty = self.ty_of(base).ok()?;

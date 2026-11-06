@@ -6592,3 +6592,19 @@ new facts about memory.
     `test/loop_requires_bad` and `test/loop_ensures_break_bad` fail to
     re-establish the `_requires` and to establish the `_ensures` at a
     `break`.
+
+46. **What a `_nullable` struct pointer reaches.** A non-null struct
+    pointer parameter owns the struct and, through `<s>_own`, what its
+    pointer fields reach. A `_nullable` one owned only the struct, so a
+    `_refine` on the struct that spoke of an `_array` field's length could
+    not be stated ("whose ownership the contract does not state"), and the
+    iterator could not be handed to a callee that wanted it whole. The deep
+    half now sits inside the same guard, at the value the guard's points-to
+    is at: `unless_null p (s_pts_to p q v ** s_own v q o)`. A struct
+    refinement that is only a proposition is stated as
+    `not (is_null p) ==> R`, as a refinement on the parameter itself already
+    was, so the arm of a null test that opens the guard has nothing else to
+    open. That arm reads the array field and re-points the deep half after a
+    write as for a granted pointer. `test/nullable_deep_own` reads, calls
+    through and writes a nullable iterator; `test/nullable_deep_own_bad`
+    reads one past the end its invariant allows.
