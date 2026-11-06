@@ -11991,10 +11991,6 @@ struct Body<'a> {
     /// per statement rather than per function is what keeps every branch,
     /// loop and call seeing the same shape.
     own_open: Vec<OpenOwn>,
-    /// Parameters whose struct pointee had a field written that its deep
-    /// ownership does not depend on, with the struct's Palow name: on the way
-    /// out, the ownership is moved to the value the object now holds.
-    own_moved: Vec<(String, String)>,
     /// How many slots existed when the enclosing loop's body began. A `break`
     /// or `continue` past a slot allocated since then would skip its release.
     loop_mark: Option<usize>,
@@ -12755,38 +12751,58 @@ impl<'a> Body<'a> {
         }
     }
 
-    /// Record a write to `p->f` that leaves `p`'s deep ownership keyed to a
-    /// stale value: `f` is a field the ownership does not read. A write to a
-    /// field it does read is not recorded, since the ownership then really
-    /// is about something else.
-    fn note_own_moved(&mut self, lhs: &Expr) {
+    /// A write to `p->f`, where `f` is a field `p`'s deep ownership does not
+    /// read, leaves that ownership keyed to the value before the write. Name
+    /// that value now, so that `follow_own` can move the ownership to the
+    /// value the object holds after the write. Ownership is read at the
+    /// object's current value, so it cannot be left behind. A write to a field
+    /// the ownership does read is not followed, since the ownership then
+    /// really is about something else.
+    fn own_before_write(&mut self, lhs: &Expr) -> Option<(String, String, String)> {
         let ExprT::Member(base, f) = &strip_vattr(lhs).val else {
-            return;
+            return None;
         };
         let ExprT::Deref(root) = &strip_vattr(base).val else {
-            return;
+            return None;
         };
         let ExprT::Var(v) = &strip_vattr(root).val else {
-            return;
+            return None;
         };
         let p = v.val.to_string();
         if !self.granted.contains(&p) || !self.params.contains(&p) {
-            return;
+            return None;
         }
-        let Ok(ty) = self.ty_of(base) else {
-            return;
-        };
+        let ty = self.ty_of(base).ok()?;
         let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(self.tds, &ty).val else {
-            return;
+            return None;
         };
         let items = self.own_items_of(&n.val);
         let read = format!("(x).fld_{})", f.val);
         if items.is_empty() || items.iter().any(|i| i.at.contains(&read)) {
-            return;
+            return None;
+        }
+        // While the ownership is scattered for this statement it is gathered
+        // at the value then current, so there is nothing to follow here.
+        let at = format!("var_{}", p);
+        if self
+            .own_open
+            .iter()
+            .any(|o| o.root.at.as_deref() == Some(at.as_str()))
+        {
+            return None;
         }
         let sn = format!("struct_{}", n.val);
-        if !self.own_moved.iter().any(|(q, _)| *q == p) {
-            self.own_moved.push((p, sn));
+        let w = self.fresh("own_value");
+        self.lines.push(format!(
+            "with {}. assert ({}_pts_to {} _ {});",
+            w, sn, at, w
+        ));
+        Some((sn, at, w))
+    }
+
+    fn follow_own(&mut self, before: Option<(String, String, String)>) {
+        if let Some((sn, at, w)) = before {
+            self.lines.push(format!("{}_own_follow {} {};", sn, at, w));
         }
     }
 
@@ -18714,8 +18730,8 @@ impl<'a> Body<'a> {
                 }
             }
         }
-        self.note_own_moved(lhs);
         if matches!(lhs.val, ExprT::Member(..) | ExprT::Index(..)) {
+            let before = self.own_before_write(lhs);
             let f = self.access(lhs, true)?;
             self.lines.extend(f.open_write.iter().cloned());
             match &f.bits {
@@ -18737,6 +18753,7 @@ impl<'a> Body<'a> {
                     .push(format!("{} {} {};", f.write_fn, f.at, value)),
             }
             self.lines.extend(f.close_write);
+            self.follow_own(before);
             return Ok(());
         }
         let a = self.addr(lhs)?;
@@ -20941,12 +20958,6 @@ impl<'a> Body<'a> {
     }
 
     fn release_from(&mut self, mark: usize) {
-        if mark == 0 {
-            for (p, sn) in self.own_moved.clone() {
-                self.lines
-                    .push(format!("{}_own_follow var_{} (reveal val_{});", sn, p, p));
-            }
-        }
         // Leaving the function: anything still held has to go, including a
         // validity seeded for a use that did not consume it -- storing a
         // decayed function in a slot, say.
@@ -22513,7 +22524,6 @@ fn emit_body(
         prescattered: HashSet::new(),
         decls: Vec::new(),
         own_open: Vec::new(),
-        own_moved: Vec::new(),
         loop_mark: None,
         mirrors: HashMap::new(),
         mirror_reads: false,
