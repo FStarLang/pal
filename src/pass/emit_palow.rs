@@ -22157,6 +22157,11 @@ fn array_alias_map(tds: &Typedefs, body: &Stmts) -> HashMap<String, String> {
         if !locals.contains(&q) || t.rebound.get(&q) != Some(&1) {
             continue;
         }
+        // Nor can the array itself be rebound: `q` keeps the address `a`
+        // had at the assignment, not whatever `a` is reassigned to later.
+        if t.rebound.contains_key(&*a.val) {
+            continue;
+        }
         out.insert(q, a.val.to_string());
     }
     out
