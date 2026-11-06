@@ -16715,6 +16715,27 @@ impl<'a> Body<'a> {
                     let sz: Rc<Type> = TypeT::SizeT.with_loc(e.loc.clone());
                     return convert(&sz, peel(self.tds, to), &t, self.tds.ptr_bytes);
                 }
+                // An inline Boolean conversion leaves refined machine literals
+                // inside stored values. A later Pulse join cannot re-elaborate
+                // that conditional reliably; give the result a typed name.
+                if self.inlining == 0 && matches!(peel(self.tds, &from).val, TypeT::Bool) {
+                    let suffix = match &peel(self.tds, to).val {
+                        TypeT::Int { signed, width } => Some(int_suffix(*signed, *width)?),
+                        TypeT::SizeT => Some("sz"),
+                        TypeT::PtrdiffT => Some("L"),
+                        _ => None,
+                    };
+                    if let Some(suffix) = suffix {
+                        let fty = fstar_type(self.tds, to)
+                            .ok_or_else(|| format!("a Boolean conversion to {}", describe(to)))?;
+                        let t = self.fresh("cast");
+                        self.lines.push(format!(
+                            "let {} : {} = if ({}) {{ 1{} }} else {{ 0{} }};",
+                            t, fty, v, suffix, suffix
+                        ));
+                        return Ok(t);
+                    }
+                }
                 // `peel`, not `resolve`: a `_plain int32_t *` is a pointer as
                 // far as a conversion is concerned, and the annotation
                 // wrappers would otherwise hide that.
