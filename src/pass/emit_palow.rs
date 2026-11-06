@@ -16652,6 +16652,19 @@ impl<'a> Body<'a> {
             ExprT::FloatLit(text, ty) => float_literal(self.tds, text, ty),
             ExprT::Cast(inner, to) => {
                 let from = self.ty_of(inner)?;
+                // Integer promotion followed by a truth test is the original
+                // Boolean, including when evaluating it transfers ownership.
+                if self.inlining == 0
+                    && matches!(peel(self.tds, to).val, TypeT::Bool)
+                    && matches!(
+                        peel(self.tds, &from).val,
+                        TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT
+                    )
+                    && let ExprT::Cast(value, _) = &strip_vattr(inner).val
+                    && matches!(peel(self.tds, self.ty_of(value)?.as_ref()).val, TypeT::Bool)
+                {
+                    return self.rvalue(value);
+                }
                 // An array in an rvalue context is its first element's
                 // address: C's decay, which clang has already made explicit as
                 // this cast. What the address carries is the other half. A
