@@ -1853,36 +1853,44 @@ fn always_refines(tds: &Typedefs, ty: &Type) -> Vec<Rc<Expr>> {
 }
 
 fn refinements(tds: &Typedefs, ty: &Type) -> Result<Refinements, String> {
-    refinements_through(tds, ty, true)
+    collect_refinements(tds, ty, false, true)
 }
 
-/// The refinements of a struct *field*'s value. A field of pointer type holds
-/// an address, so what the pointee's type says -- a `_refine` on the struct a
-/// `T *` field points at, say -- is the pointee's invariant, stated wherever
-/// that object is owned, and not a property of the field.
+/// The refinements of a struct *field*'s value. A field marked `_plain`
+/// delegates its inherited ownership and refinements to the enclosing
+/// protocol; clauses written above `_plain` still apply. A field of pointer
+/// type holds an address, so what the pointee's type says -- a `_refine` on
+/// the struct a `T *` field points at, say -- is the pointee's invariant,
+/// stated wherever that object is owned, and not a property of the field.
 fn field_refinements(tds: &Typedefs, ty: &Type) -> Result<Refinements, String> {
-    refinements_through(tds, ty, false)
+    collect_refinements(tds, ty, true, false)
 }
 
-fn refinements_through(tds: &Typedefs, ty: &Type, ptr: bool) -> Result<Refinements, String> {
+fn collect_refinements(
+    tds: &Typedefs,
+    ty: &Type,
+    stop_at_plain: bool,
+    ptr: bool,
+) -> Result<Refinements, String> {
     match &tds.resolve(ty).val {
+        TypeT::Plain(_) if stop_at_plain => Ok((Vec::new(), Vec::new(), Vec::new())),
         TypeT::Refine(t, p) | TypeT::RefineAlways(t, p) => {
-            let (mut v, u, b) = refinements_through(tds, t, ptr)?;
+            let (mut v, u, b) = collect_refinements(tds, t, stop_at_plain, ptr)?;
             v.push(p.clone());
             Ok((v, u, b))
         }
         TypeT::RefineUninit(t, p) => {
-            let (v, mut u, b) = refinements_through(tds, t, ptr)?;
+            let (v, mut u, b) = collect_refinements(tds, t, stop_at_plain, ptr)?;
             u.push(p.clone());
             Ok((v, u, b))
         }
         TypeT::RefineValue(t, n, vty, p) => {
-            let (v, u, mut b) = refinements_through(tds, t, ptr)?;
+            let (v, u, mut b) = collect_refinements(tds, t, stop_at_plain, ptr)?;
             b.push((n.clone(), vty.clone(), p.clone()));
             Ok((v, u, b))
         }
-        TypeT::Plain(t) | TypeT::Nullable(t) => refinements_through(tds, t, ptr),
-        TypeT::Pointer(t, _) if ptr => refinements_through(tds, t, ptr),
+        TypeT::Plain(t) | TypeT::Nullable(t) => collect_refinements(tds, t, stop_at_plain, ptr),
+        TypeT::Pointer(t, _) if ptr => collect_refinements(tds, t, stop_at_plain, ptr),
         _ => Ok((Vec::new(), Vec::new(), Vec::new())),
     }
 }
