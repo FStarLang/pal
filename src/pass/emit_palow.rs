@@ -11490,6 +11490,42 @@ fn target_assumption(tu: &TranslationUnit) -> String {
     )
 }
 
+fn module_opens(
+    module: &str,
+    code: &str,
+    owner: &HashMap<String, String>,
+    deps: &HashMap<String, BTreeSet<String>>,
+) -> BTreeSet<String> {
+    // A module's own declarations shadow earlier names, including the
+    // acquire_literal_<n> helpers independently emitted for each function.
+    let own: HashSet<String> = defined_names(code).into_iter().collect();
+    let mut opens = BTreeSet::new();
+    let mut word = String::new();
+    for c in code.chars().chain(std::iter::once(' ')) {
+        if c.is_alphanumeric() || c == '_' || c == '\'' {
+            word.push(c);
+            continue;
+        }
+        if !word.is_empty() {
+            if let Some(m) = owner.get(&word).filter(|_| !own.contains(&word)) {
+                if m != module {
+                    opens.insert(m.clone());
+                }
+            }
+            word.clear();
+        }
+    }
+    let mut queue: Vec<String> = opens.iter().cloned().collect();
+    while let Some(m) = queue.pop() {
+        for d in deps.get(&m).into_iter().flatten() {
+            if d != module && opens.insert(d.clone()) {
+                queue.push(d.clone());
+            }
+        }
+    }
+    opens
+}
+
 /// Wrap each chunk in a module that opens exactly the earlier modules it
 /// names. The edges only ever point backwards, so the result cannot have a
 /// cycle -- which matters, because F* modules may not be mutually recursive
@@ -11513,7 +11549,7 @@ fn into_modules(
     let chunks = merged;
 
     let mut owner: HashMap<String, String> = HashMap::new();
-    // What each module already opens, so that opening it brings those along.
+    // What each module's public surface opens.
     // F* `open` is not transitive, and a record literal names its labels
     // without naming its type: `{ fld_lo = 1ul }` for a `struct pair` nested
     // inside a `struct pairs` mentions nothing the scan below can see. Taking
@@ -11521,48 +11557,20 @@ fn into_modules(
     let mut deps: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut out: Vec<PalowModule> = Vec::new();
     for ch in chunks {
-        // A name the chunk defines itself is its own, even when an earlier
-        // module defines the same one: each function that shares a literal
-        // declares its own `acquire_literal_<n>`, and resolving those to the
-        // first module that happened to use the name would make every later
-        // one open it, and everything it opens.
-        let own: HashSet<String> = defined_names(&ch.code).into_iter().collect();
-        let mut opens: BTreeSet<String> = BTreeSet::new();
-        let mut word = String::new();
-        for c in ch.code.chars().chain(std::iter::once(' ')) {
-            if c.is_alphanumeric() || c == '_' || c == '\'' {
-                word.push(c);
-                continue;
-            }
-            if !word.is_empty() {
-                if let Some(m) = owner.get(&word).filter(|_| !own.contains(&word)) {
-                    if *m != ch.module {
-                        opens.insert(m.clone());
-                    }
-                }
-                word.clear();
-            }
-        }
-        let mut queue: Vec<String> = opens.iter().cloned().collect();
-        while let Some(m) = queue.pop() {
-            for d in deps.get(&m).into_iter().flatten() {
-                if *d != ch.module && opens.insert(d.clone()) {
-                    queue.push(d.clone());
-                }
-            }
-        }
-        deps.insert(ch.module.clone(), opens.clone());
+        let public = ifaces.get(&ch.module);
+        let opens = module_opens(&ch.module, &ch.code, &owner, &deps);
+        let public_opens = public
+            .map(|code| module_opens(&ch.module, code, &owner, &deps))
+            .unwrap_or_else(|| opens.clone());
+        deps.insert(ch.module.clone(), public_opens.clone());
 
-        // The interface repeats the implementation's preamble verbatim,
-        // including its `open`s. They are computed from the body, so an
-        // interface may open a module its own text does not name -- harmless,
-        // and the alternative is a second scan that could disagree with the
-        // first about which module a name belongs to.
-        let preamble = {
+        // A caller sees the interface, not its implementation dependencies.
+        // Scan both with the same name owners and public dependency graph.
+        let preamble = |opens: &BTreeSet<String>| {
             let mut p = format!("module {}\n", ch.module);
             p += HEADER;
             p += PREAMBLE;
-            for m in &opens {
+            for m in opens {
                 p += &format!("open {}\n", m);
             }
             if !opens.is_empty() {
@@ -11570,13 +11578,11 @@ fn into_modules(
             }
             p
         };
-        let iface = ifaces
-            .get(&ch.module)
-            .map(|body| format!("{}{}", preamble, body));
-        let mut code = preamble;
+        let iface = public.map(|body| format!("{}{}", preamble(&public_opens), body));
+        let mut code = preamble(&opens);
         code += target.unwrap_or_default();
         code += &ch.code;
-        for n in defined_names(&ch.code) {
+        for n in defined_names(public.unwrap_or(&ch.code)) {
             owner.insert(n, ch.module.clone());
         }
         out.push(PalowModule {
@@ -11587,6 +11593,62 @@ fn into_modules(
         });
     }
     out
+}
+
+#[cfg(test)]
+mod module_import_tests {
+    use super::*;
+
+    fn chunk(module: &str, code: &str) -> Chunk {
+        Chunk {
+            module: module.to_owned(),
+            code: code.to_owned(),
+            origin: None,
+        }
+    }
+
+    #[test]
+    fn interfaces_hide_body_dependencies_but_keep_nested_types() {
+        let chunks = vec![
+            chunk("Inner", "type inner = { fld_item: UInt32.t }\n"),
+            chunk("Outer", "type outer = { fld_inner: inner }\n"),
+            chunk("Helper", "fn helper () { () }\n"),
+            chunk("Callee", "fn callee (x: outer) { helper () }\n"),
+            chunk("Caller", "fn caller (x: outer) { callee x }\n"),
+        ];
+        let ifaces = HashMap::from([
+            ("Helper".to_owned(), "fn helper ()\n".to_owned()),
+            ("Callee".to_owned(), "fn callee (x: outer)\n".to_owned()),
+            ("Caller".to_owned(), "fn caller (x: outer)\n".to_owned()),
+        ]);
+        let modules = into_modules(chunks, &ifaces, None);
+        let callee = &modules[3];
+        let caller = &modules[4];
+        assert!(callee.code.contains("open Helper\n"));
+        assert!(!callee.iface.as_ref().unwrap().contains("open Helper\n"));
+        assert!(!caller.code.contains("open Helper\n"));
+        assert!(caller.code.contains("open Callee\n"));
+        for module in [callee, caller] {
+            for text in [&module.code, module.iface.as_ref().unwrap()] {
+                assert!(text.contains("open Inner\n"));
+                assert!(text.contains("open Outer\n"));
+            }
+        }
+    }
+
+    #[test]
+    fn implementation_private_names_do_not_own_caller_locals() {
+        let chunks = vec![
+            chunk("Private", "let helper_value = 1ul\nfn callee () { () }\n"),
+            chunk(
+                "Unrelated",
+                "fn unrelated () {\n  let helper_value = 2ul;\n  ()\n}\n",
+            ),
+        ];
+        let ifaces = HashMap::from([("Private".to_owned(), "fn callee ()\n".to_owned())]);
+        let modules = into_modules(chunks, &ifaces, None);
+        assert!(!modules[1].code.contains("open Private\n"));
+    }
 }
 
 /* ---------------------------------------------------------------------------
