@@ -290,8 +290,8 @@ public:
            d->hasAttr<IFuncAttr>() || d->hasAttr<WeakRefAttr>();
   }
 
-  static bool hasFunctionAnnotation(FunctionDecl *fd, llvm::StringRef name) {
-    for (auto *attr : fd->specific_attrs<AnnotateAttr>())
+  static bool hasAnnotation(Decl *decl, llvm::StringRef name) {
+    for (auto *attr : decl->specific_attrs<AnnotateAttr>())
       if (attr->getAnnotation() == name && attr->args_size() == 0)
         return true;
     return false;
@@ -301,9 +301,9 @@ public:
     for (auto *d : dc->decls()) {
       if (d->isInvalidDecl())
         continue;
-      auto *function = dyn_cast<FunctionDecl>(d);
-      if (function && hasFunctionAnnotation(function, "pal-ignore"))
+      if (hasAnnotation(d, "pal-ignore"))
         continue;
+      auto *function = dyn_cast<FunctionDecl>(d);
       auto *object = dyn_cast<VarDecl>(d);
       if ((function || object) && isLinkerAlias(d) &&
           (astCtx->getSourceManager().isWrittenInMainFile(
@@ -497,6 +497,8 @@ public:
 
   void trRecordDecl(Rc<ir::Ident> ident, RecordDecl *decl,
                     AnonNameGen *liftStructs) {
+    if (hasAnnotation(decl, "pal-ignore"))
+      return;
     auto key = recordKey(decl);
     if (!decl->isCompleteDefinition()) {
       if (decl->getTagKind() == TagTypeKind::Struct) {
@@ -2255,7 +2257,8 @@ public:
           if (auto *ds = dyn_cast<DeclStmt>(s)) {
             bool allStaticAsserts = true;
             for (auto *d : ds->decls()) {
-              if (!isa<StaticAssertDecl>(d)) {
+              if (!isa<StaticAssertDecl>(d) &&
+                  !hasAnnotation(d, "pal-ignore")) {
                 allStaticAsserts = false;
               }
             }
@@ -2480,6 +2483,8 @@ public:
       hoistRValueMembers(stmts, ifs->getCond());
     } else if (auto *ds = dyn_cast<DeclStmt>(stmt)) {
       for (auto *d : ds->decls()) {
+        if (hasAnnotation(d, "pal-ignore"))
+          continue;
         if (auto *vd = dyn_cast<VarDecl>(d)) {
           hoistAddressedCompoundLiterals(stmts, vd->getInit());
           hoistRValueMembers(stmts, vd->getInit());
@@ -3265,6 +3270,8 @@ public:
       return trStmt(stmts, subStmt);
     } else if (auto *ds = dyn_cast<DeclStmt>(stmt)) {
       for (auto d : ds->decls()) {
+        if (hasAnnotation(d, "pal-ignore"))
+          continue;
         auto dloc = getRange(d->getSourceRange());
         if (auto vd = dyn_cast<VarDecl>(d)) {
           if (vd->isStaticLocal()) {
@@ -3465,10 +3472,10 @@ public:
   }
 
   rust::Unit HandleDecl(Decl *D) {
+    if (hasAnnotation(D, "pal-ignore"))
+      return {};
     if (auto *FD = dyn_cast<FunctionDecl>(D)) {
-      if (hasFunctionAnnotation(FD, "pal-ignore"))
-        return {};
-      bool admit = hasFunctionAnnotation(FD, "pal-admit");
+      bool admit = hasAnnotation(FD, "pal-admit");
       // Include block
       if (FD->getName().starts_with("__pal_include_anchor")) {
         std::optional<unsigned> code;

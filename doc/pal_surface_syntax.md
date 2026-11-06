@@ -282,10 +282,13 @@ Notes:
 
 - `_pure` — function has no effects; callable in spec position.
 - `_rec` — recursive (must be paired with `_decreases`).
-- `_pal_ignore` — omit a function declaration/definition, including its signature
-  and contract. PAL does not translate its body. Mark the first declaration as
+- `_pal_ignore` — omit a declaration/definition entirely: functions, typedefs,
+  structs/unions (including their fields and nested types), enums, or variables
+  (including initializers). It also works on block-scope declarations.
+  Mark the declaration itself, not individual fields. Mark the first declaration as
   well if the function has a separate prototype; Clang inherits the marker on
-  later declarations. Calls from translated code still need a translated declaration.
+  later declarations. Translated code using an ignored function, type, or variable
+  still needs a supported declaration; this does not create an opaque type.
 - `_pal_admit` — translate a function's signature and contract as a
   declaration, without translating its body. Calls trust that contract; the
   implementation is not verified. Contracts on an earlier prototype are retained.
@@ -303,6 +306,16 @@ int platform_identity(int x) _ensures(return == x) {
     return x;
 }
 ```
+
+For types, attach the marker to the typedef name or the struct/union/enum tag:
+
+```c
+typedef long double platform_float _pal_ignore;
+struct _pal_ignore platform_state { int signed_bits : 3; };
+typedef struct _pal_ignore { long double value; } platform_record _pal_ignore;
+```
+
+The typedef and its record are separate declarations: mark both to omit both.
 
 ## Global variables
 
