@@ -12046,6 +12046,9 @@ struct Body<'a> {
     /// Set only while the loop's `ensures` is written out: inside the body
     /// the locals themselves are in scope and are what the author meant.
     mirror_reads: bool,
+    /// The ghost flag a `break` out of the innermost enclosing loop sets,
+    /// when that loop has a `_requires`; see `loop_`.
+    break_flag: Option<String>,
     /// The slots the last `frame` gave a binder to, in order.
     frame_slots: Vec<String>,
     /// Functions already known to be divergent. Calling one makes this body
@@ -19142,6 +19145,36 @@ impl<'a> Body<'a> {
         what: &str,
         body: Option<&Stmts>,
     ) -> Result<(Vec<String>, Vec<String>, Vec<String>, Vec<usize>), String> {
+        let (binders, owns, props, storage, _) = self.frame_ext(clause, &[], what, body)?;
+        Ok((binders, owns, props, storage))
+    }
+
+    /// `frame`, with further groups of pure clauses rendered over the same
+    /// binders and returned one conjunction per group rather than added to
+    /// the invariant: a loop's `_requires` and `_ensures`, which hold only at
+    /// some of the points the invariant does.
+    #[allow(clippy::type_complexity)]
+    fn frame_ext(
+        &mut self,
+        clause: &Exprs,
+        extras: &[&Exprs],
+        what: &str,
+        body: Option<&Stmts>,
+    ) -> Result<
+        (
+            Vec<String>,
+            Vec<String>,
+            Vec<String>,
+            Vec<usize>,
+            Vec<String>,
+        ),
+        String,
+    > {
+        let named: Exprs = clause
+            .iter()
+            .chain(extras.iter().flat_map(|x| x.iter()))
+            .cloned()
+            .collect();
         let mut binders: Vec<String> = Vec::new();
         let mut owns: Vec<String> = Vec::new();
         let mut bound: Vec<String> = Vec::new();
@@ -19160,7 +19193,7 @@ impl<'a> Body<'a> {
         let kept: Option<HashSet<String>> = body.map(|b| {
             let mut t = Touched::default();
             touch_stmts(b, &mut t);
-            touch_exprs(clause, &mut t);
+            touch_exprs(&named, &mut t);
             t.written.union(&t.vars).cloned().collect()
         });
         // A clause that states ownership is the author speaking about storage
@@ -19189,7 +19222,7 @@ impl<'a> Body<'a> {
             t
         });
         let mut mentioned = Touched::default();
-        touch_exprs(clause, &mut mentioned);
+        touch_exprs(&named, &mut mentioned);
         let mut deref_slots: Vec<(String, String)> = Vec::new();
         for (i, s) in self.slots.clone().into_iter().enumerate() {
             let s = &s;
@@ -19456,9 +19489,31 @@ impl<'a> Body<'a> {
                 format!(r"({} /\ {})", guards.join(r" /\ "), p)
             });
         }
+        let mut groups: Vec<String> = Vec::new();
+        for g in extras {
+            let mut ps: Vec<String> = Vec::new();
+            for e in g.iter() {
+                if is_slprop_clause(self.tds, e) {
+                    return Err(format!("{} with an ownership clause in its contract", what));
+                }
+                spec.guards.borrow_mut().clear();
+                let p = spec.prop(e, When::Pre)?;
+                let guards = spec.guards.borrow();
+                ps.push(if guards.is_empty() {
+                    p
+                } else {
+                    format!(r"({} /\ {})", guards.join(r" /\ "), p)
+                });
+            }
+            groups.push(if ps.is_empty() {
+                "True".to_string()
+            } else {
+                format!("({})", ps.join(r" /\ "))
+            });
+        }
         self.uses.extend(spec.uses.borrow().iter().cloned());
         self.frame_slots = bound;
-        Ok((binders, owns, props, storage))
+        Ok((binders, owns, props, storage, groups))
     }
 
     /// The same frame, written out as one slprop.
@@ -19489,13 +19544,53 @@ impl<'a> Body<'a> {
         ensures: &Exprs,
         body: &Stmts,
     ) -> Result<(), String> {
-        if !requires.is_empty() {
-            return Err("a loop with its own `requires`".to_string());
-        }
         let breaks = has_break(body);
 
-        let (binders, mut owns, props, storage) = self.frame(inv, "a loop", Some(body))?;
+        // A loop's `_requires` is the part of its invariant a `break` does not
+        // have to re-establish, and its `_ensures` is what a `break` has to
+        // establish instead -- Pulse's own reading of the two, and the one
+        // the old model passed straight through. Palow states every value in
+        // the invariant through its own binders, which Pulse's `requires` is
+        // outside the scope of, so both are said in the invariant itself and
+        // told apart by a ghost flag that each `break` sets just before it
+        // leaves:
+        //
+        //   loop_requires_marker (broke == false) /\
+        //   (broke == false ==> requires) /\ (broke == true ==> ensures)
+        //
+        // Pulse replaces the marked conjunct by `True` in what a `break`
+        // must prove, so a `break` needs only the invariant, the flag and the
+        // `_ensures`; everywhere else the flag is false and the `_requires`
+        // is in force. The loop's own `ensures` is the flag, so after it
+        // either the condition is false and the `_requires` holds or the loop
+        // broke out with the `_ensures`.
+        let contract = !requires.is_empty();
+        let (binders, mut owns, mut props, storage, groups) = if contract {
+            self.frame_ext(inv, &[requires, ensures], "a loop", Some(body))?
+        } else {
+            let (b, o, p, st) = self.frame(inv, "a loop", Some(body))?;
+            (b, o, p, st, Vec::new())
+        };
+        let mut binders = binders;
         let bound = std::mem::take(&mut self.frame_slots);
+        let flag = if contract {
+            let flag = self.fresh("broke");
+            self.lines.push(format!(
+                "let {} = Pulse.Lib.GhostReference.alloc false;",
+                flag
+            ));
+            binders.push("(inv_broke: bool)".to_string());
+            owns.push(format!(
+                "Pulse.Lib.GhostReference.pts_to {} inv_broke",
+                flag
+            ));
+            props.push("Pulse.Lib.Core.loop_requires_marker (inv_broke == false)".to_string());
+            props.push(format!("(inv_broke == false ==> {})", groups[0]));
+            props.push(format!("(inv_broke == true ==> {})", groups[1]));
+            Some(flag)
+        } else {
+            None
+        };
 
         let before = self.lines.len();
         self.in_guard = true;
@@ -19533,7 +19628,7 @@ impl<'a> Body<'a> {
         // nested loop's invariant would have to carry the mirror through an
         // iteration that writes it, and it does not know to.
         let mut mirrors: Vec<(String, String)> = Vec::new();
-        if breaks && !ensures.is_empty() && !has_loop(body) {
+        if breaks && !contract && !ensures.is_empty() && !has_loop(body) {
             let mut named = Touched::default();
             touch_exprs(ensures, &mut named);
             // An `_ensures` is usually spliced Pulse, and `touch_expr` looks
@@ -19577,6 +19672,7 @@ impl<'a> Body<'a> {
         let was_tail_branch = std::mem::replace(&mut self.tail_branch, false);
         let was_loop = self.in_loop;
         self.in_loop = true;
+        let outer_flag = std::mem::replace(&mut self.break_flag, flag.clone());
         let was_mark = self.loop_mark.replace(self.slots.len());
         let outer_storage = std::mem::replace(&mut self.loop_storage, storage);
         let inits: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
@@ -19616,6 +19712,7 @@ impl<'a> Body<'a> {
         self.in_branch = was_branch;
         self.tail_branch = was_tail_branch;
         self.in_loop = was_loop;
+        self.break_flag = outer_flag;
         self.loop_mark = was_mark;
         self.loop_storage = outer_storage;
         let body_lines = std::mem::replace(&mut self.lines, outer);
@@ -19649,7 +19746,12 @@ impl<'a> Body<'a> {
         // source promised: C makes no claim about a loop it jumped out of,
         // and what the author does claim arrives as `_ensures`, asserted
         // below. A loop without a `break` keeps the negated condition.
-        if breaks {
+        if let Some(flag) = &flag {
+            self.lines.push(format!(
+                "  ensures (Pulse.Lib.GhostReference.op_Bang {} == true)",
+                flag
+            ));
+        } else if breaks {
             // With a mirror for every local the author's `_ensures` names, the
             // claim *can* be said out here, and saying it to Pulse is what
             // makes it available after the loop: Pulse has to prove it at the
@@ -19690,6 +19792,11 @@ impl<'a> Body<'a> {
         for (_, gm) in mirrors.iter() {
             self.lines
                 .push(format!("Pulse.Lib.GhostReference.free {};", gm));
+        }
+        if let Some(flag) = &flag {
+            self.lines
+                .push(format!("Pulse.Lib.GhostReference.free {};", flag));
+            return Ok(());
         }
         // A loop's `_ensures` is what holds when it exits, and a `break` is
         // the reason it needs saying: the ordinary exit is covered by the
@@ -20340,6 +20447,12 @@ impl<'a> Body<'a> {
                 self.lines.extend(close);
                 self.release_from(self.loop_mark.unwrap_or(self.slots.len()));
                 self.forget_loop_storage()?;
+                if matches!(s.val, StmtT::Break)
+                    && let Some(flag) = &self.break_flag
+                {
+                    self.lines
+                        .push(format!("Pulse.Lib.GhostReference.write {} true;", flag));
+                }
                 self.lines.push(
                     match &s.val {
                         StmtT::Break => "break;",
@@ -23188,6 +23301,7 @@ fn emit_body(
         loop_storage: Vec::new(),
         mirrors: HashMap::new(),
         mirror_reads: false,
+        break_flag: None,
         frame_slots: Vec::new(),
         divergent_fns,
         blocks: Vec::new(),

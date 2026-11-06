@@ -1,0 +1,3 @@
+Failed to prove pure property:
+Failed to prove: __inv_found
+at out/Func_find_zero_wrong.fst(

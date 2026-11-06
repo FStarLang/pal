@@ -6573,3 +6573,22 @@ new facts about memory.
     lemma, which unions do not have. `test/memset_union_field` zeroes a
     struct with a union, bit-fields and an array, directly and as a union
     arm; `test/memset_union_field_bad` claims the second member is live.
+
+45. **Loops with their own `_requires` and `_ensures`.** The old model passed
+    them to Pulse's `while`, where `requires` is the part of the invariant a
+    `break` need not re-establish and `ensures` is what a `break` must
+    establish instead; after the loop, either the condition is false and
+    the `requires` holds, or the loop broke out with the `ensures`. Palow
+    refused such a loop. Pulse's `requires` cannot name the invariant's
+    binders, which is how Palow says everything about a local, so both are
+    now stated in the invariant and told apart by a ghost flag that each
+    `break` sets just before it leaves:
+    `loop_requires_marker (broke == false) /\ (broke == false ==> R) /\
+    (broke == true ==> E)`. Pulse replaces the marked conjunct by `True` in
+    what a `break` has to prove, and the loop's `ensures` is the flag. A
+    loop without a `_requires` keeps its `_ensures` as before: asserted after
+    the loop, at every exit. `test/loop_requires` covers a search, a batch
+    bounded through pointer parameters and a loop without a `break`;
+    `test/loop_requires_bad` and `test/loop_ensures_break_bad` fail to
+    re-establish the `_requires` and to establish the `_ensures` at a
+    `break`.
