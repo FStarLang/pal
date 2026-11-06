@@ -20169,7 +20169,11 @@ impl<'a> Body<'a> {
                 // before it says nothing about what is live after.
                 self.active.clear();
                 self.union_values.clear();
+                // A body that diverges says nothing about the code after the
+                // loop: the condition may be false on entry.
+                let outer_diverged = self.diverged;
                 self.loop_(cond, inv, requires, ensures, body)?;
+                self.diverged = outer_diverged;
                 self.active.clear();
                 self.union_values.clear();
                 self.asserted_uninit.clear();
@@ -22540,6 +22544,11 @@ fn array_alias_map(tds: &Typedefs, body: &Stmts) -> HashMap<String, String> {
         // is a pointer object whose value changes, which is a different thing
         // entirely.
         if !locals.contains(&q) || t.rebound.get(&q) != Some(&1) {
+            continue;
+        }
+        // Nor can the array itself be rebound: `q` keeps the address `a`
+        // had at the assignment, not whatever `a` is reassigned to later.
+        if t.rebound.contains_key(&*a.val) {
             continue;
         }
         out.insert(q, a.val.to_string());
