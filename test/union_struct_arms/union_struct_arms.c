@@ -391,3 +391,32 @@ struct event_envelope copy_default_event(void)
 {
   return default_event;
 }
+
+static const struct event_envelope configured_event = {
+  .sequence = 11,
+  .event = { .rec = { .rd = { .sensor = { 1, 0, 0, 9 }, .value = 42 } } }
+};
+
+struct event_envelope copy_configured_event(void)
+  _ensures(return.sequence == 11)
+  _ensures(return.event.rec._active && return.event.rec.rd._active)
+  _ensures(return.event.rec.rd.value == 42 && return.event.rec.rd.sensor[3] == 9)
+{
+  return configured_event;
+}
+
+union event copy_configured_payload(void)
+  _ensures(return.rec._active && return.rec.rd._active)
+  _ensures(return.rec.rd.value == 42 && return.rec.rd.sensor[3] == 9)
+{
+  return configured_event.event;
+}
+
+static const union event configured_alarm = { .al = { .raised_at = 12, .level = 2 } };
+
+union event copy_configured_alarm(void)
+  _ensures(return.al._active)
+  _ensures(return.al.raised_at == 12 && return.al.level == 2)
+{
+  return configured_alarm;
+}
