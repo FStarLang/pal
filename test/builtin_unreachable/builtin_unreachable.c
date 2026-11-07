@@ -175,3 +175,31 @@ dispatch_abort_no_jump(uint32_t version) _requires(version == 2)
 
     return result;
 }
+
+// The abort without an `_assert` in front of it: the guard `!0` folds to true,
+// so the empty arm of that `if` is dead too, and the switch arm aborts.
+int32_t
+dispatch_guarded_abort(uint32_t version) _requires(version == 2)
+    _ensures(return == 20)
+{
+    int32_t result;
+
+    switch (version)
+        _ensures(_live(version) && _live(result))
+        _ensures(result == 20)
+    {
+    case 2:
+        result = 20;
+        break;
+    default:
+        do
+        {
+            if (!0)
+            {
+                __builtin_unreachable();
+            }
+        } while (0);
+    }
+
+    return result;
+}
