@@ -18,6 +18,8 @@ mod hauntedc;
 mod ir;
 mod layout;
 mod mayberc;
+#[cfg(feature = "mcp")]
+mod mcp;
 mod pass;
 mod prims;
 mod source_range_info;
@@ -154,6 +156,11 @@ fn serialize_diags(diags: &Diagnostics) -> String {
 fn main() {
     #[cfg(target_os = "macos")]
     set_default_sdkroot();
+
+    #[cfg(feature = "mcp")]
+    if mcp::dispatch_if_requested() {
+        return;
+    }
 
     let cli = Cli::parse();
 
