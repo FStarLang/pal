@@ -35,6 +35,10 @@
 //! is the property that makes the pointer-kind inference in
 //! [`crate::pass::elab`] unnecessary.
 
+mod module_names;
+use module_names::ModuleNames;
+
+use crate::diag::{Diagnostic, DiagnosticLevel, Diagnostics};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -1527,6 +1531,9 @@ struct Chunk {
     module: String,
     code: String,
     origin: Option<Origin>,
+    /// An `_include_pulse` module, whose name is the author's and is never
+    /// renamed (see `module_names`).
+    explicit: bool,
 }
 
 /// The Palow name of a C type: the prefix of its `_pts_to`, `_repr`, `_read`
@@ -6878,6 +6885,7 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
                 module: format!("Struct_{}", name),
                 code: format!("(* skipped struct {}: {} *)\n\n", name, bad),
                 origin: origin_of(decl),
+                explicit: false,
             });
             continue;
         }
@@ -6922,6 +6930,7 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
             module: format!("Struct_{}", name),
             code: emit_struct(tds, &name),
             origin: origin_of(decl),
+            explicit: false,
         });
     }
     code
@@ -6944,6 +6953,7 @@ fn collect_union(
         module: format!("Union_{}", name),
         code: format!("(* skipped union {}: {} *)\n\n", name, why),
         origin: None,
+        explicit: false,
     };
     let (Some(size), Some(align)) = (
         layouts
@@ -7007,6 +7017,7 @@ fn collect_union(
         module: format!("Union_{}", name),
         code: emit_union(tds, &name),
         origin: None,
+        explicit: false,
     }
 }
 
@@ -9835,6 +9846,7 @@ fn emit_array_fill_helpers(tds: &Typedefs, tu: &TranslationUnit) -> Option<Chunk
             module: "ArrayFill".to_string(),
             code: fills.into_values().collect::<Vec<_>>().join("\n"),
             origin: None,
+            explicit: false,
         })
     }
 }
@@ -9972,6 +9984,7 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> Vec<Chunk> {
                 module: format!("Global_{}", name),
                 code: out,
                 origin: origin_of(decl),
+                explicit: false,
             });
             continue;
         }
@@ -10040,6 +10053,7 @@ fn emit_globals(tds: &Typedefs, tu: &TranslationUnit) -> Vec<Chunk> {
                 out
             ),
             origin: origin_of(decl),
+            explicit: false,
         });
     }
     chunks
@@ -10675,9 +10689,10 @@ pub fn decl_name(decl: &Decl) -> String {
 pub fn emit_palow(
     tu: &TranslationUnit,
     header_statics: &[super::linkage::HeaderStatic],
-    has_errors: bool,
+    diags: &mut Diagnostics,
     portable: bool,
 ) -> Vec<PalowModule> {
+    let has_errors = diags.has_errors();
     let mut tds = Typedefs::new(tu);
     let mut base = Env::new();
     for decl in &tu.decls {
@@ -10708,6 +10723,7 @@ pub fn emit_palow(
             module: format!("Type_{}", td.name.val),
             code: text,
             origin: origin_of(decl),
+            explicit: false,
         });
     }
 
@@ -10754,6 +10770,7 @@ pub fn emit_palow(
             module: format!("Let_{}", ld.name.val),
             code: text,
             origin: origin_of(decl),
+            explicit: false,
         });
     }
 
@@ -10775,6 +10792,7 @@ pub fn emit_palow(
             module: id.module_name.to_string(),
             code: text,
             origin: origin_of(decl),
+            explicit: true,
         });
     }
 
@@ -10862,6 +10880,7 @@ pub fn emit_palow(
             module: format!("Func_{}", fndecl.name.val),
             code: text,
             origin: origin_of(decl),
+            explicit: false,
         });
     }
     // A `_pure` copy of a header function whose proof another copy already
@@ -11248,6 +11267,7 @@ pub fn emit_palow(
             module: format!("Func_{}", name),
             code: std::mem::take(&mut items[i].code),
             origin: items[i].origin.clone(),
+            explicit: false,
         });
         // The wrapper gets a module of its own, next to the function it
         // wraps. It is emitted only for a function whose address is taken --
@@ -11261,10 +11281,12 @@ pub fn emit_palow(
                 module: format!("Funcptr_{}", name),
                 code: fp,
                 origin: items[i].origin.clone(),
+                explicit: false,
             });
         }
     }
 
+    let (chunks, ifaces) = allocate_module_names(diags, tu, chunks, ifaces);
     let target = (!portable).then(|| target_assumption(tu));
     let mut modules = into_modules(chunks, &ifaces, target.as_deref());
     for m in &mut modules {
@@ -11274,6 +11296,81 @@ pub fn emit_palow(
         }
     }
     modules
+}
+
+/// F* looks modules up case-insensitively, so C names that differ only in
+/// case (`foo` and `Foo`) would give two files the same module. Generated
+/// module names are allocated case-insensitively instead: a name that does
+/// not collide is unchanged, and in a collision the lexicographically first
+/// candidate keeps its name while the rest get numeric suffixes. Explicit
+/// `_include_pulse` names are the author's, take precedence, and are never
+/// renamed. Qualified references to a renamed module are rewritten, including
+/// those an antiquotation such as `$type(t)` produces in an include block.
+fn allocate_module_names(
+    diags: &mut Diagnostics,
+    tu: &TranslationUnit,
+    chunks: Vec<Chunk>,
+    ifaces: HashMap<String, String>,
+) -> (Vec<Chunk>, HashMap<String, String>) {
+    let (names, conflicts) = ModuleNames::new(
+        chunks
+            .iter()
+            .filter(|ch| !ch.explicit)
+            .map(|ch| ch.module.as_str()),
+        chunks
+            .iter()
+            .filter(|ch| ch.explicit)
+            .map(|ch| ch.module.as_str()),
+    );
+    for (name, existing) in conflicts {
+        let decl = tu
+            .decls
+            .iter()
+            .find(|d| matches!(&d.val, DeclT::IncludeDecl(id) if *id.module_name == *name));
+        if let Some(decl) = decl {
+            diags.report(Diagnostic {
+                loc: decl.loc.location().clone(),
+                level: DiagnosticLevel::Error,
+                msg: format!(
+                    "explicit module name {name} conflicts with {existing}; \
+                     F* module names are case-insensitive"
+                ),
+            });
+        }
+    }
+    // An include block's own text may name another include block, which wins
+    // over a generated module of the exact same name.
+    let explicit: HashSet<String> = chunks
+        .iter()
+        .filter(|ch| ch.explicit)
+        .map(|ch| ch.module.clone())
+        .collect();
+    let explicit: HashSet<&str> = explicit.iter().map(String::as_str).collect();
+    let none = HashSet::new();
+    let chunks = chunks
+        .into_iter()
+        .map(|ch| {
+            if ch.explicit {
+                let code = names.rewrite_references(&ch.code, &explicit);
+                return Chunk { code, ..ch };
+            }
+            Chunk {
+                module: names.get(&ch.module).to_string(),
+                code: names.rewrite_references(&ch.code, &none),
+                ..ch
+            }
+        })
+        .collect();
+    let ifaces = ifaces
+        .into_iter()
+        .map(|(m, body)| {
+            (
+                names.get(&m).to_string(),
+                names.rewrite_references(&body, &none),
+            )
+        })
+        .collect();
+    (chunks, ifaces)
 }
 
 /// The body of a header function whose proof is its representative's: a call
