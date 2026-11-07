@@ -925,6 +925,16 @@ public:
     return e;
   }
 
+  Expr *ignoreCCleanups(Expr *e) {
+    if (auto *cleanups = dyn_cast<ExprWithCleanups>(e);
+        cleanups && !astCtx->getLangOpts().CPlusPlus &&
+        cleanups->getNumObjects() == 0 &&
+        !cleanups->cleanupsHaveSideEffects()) {
+      return cleanups->getSubExpr();
+    }
+    return e;
+  }
+
   Rc<ir::Expr> trLValue(Expr *e) {
     auto loc = getRange(e->getSourceRange());
 
@@ -1291,11 +1301,8 @@ public:
   Rc<ir::Expr> trRValue(Expr *e) {
     auto loc = getRange(e->getSourceRange());
 
-    if (auto *cleanups = dyn_cast<ExprWithCleanups>(e);
-        cleanups && !astCtx->getLangOpts().CPlusPlus &&
-        cleanups->getNumObjects() == 0 &&
-        !cleanups->cleanupsHaveSideEffects()) {
-      return trRValue(cleanups->getSubExpr());
+    if (auto *value = ignoreCCleanups(e); value != e) {
+      return trRValue(value);
     }
     if (auto *value = ignoreCRecordTemporary(e); value != e) {
       return trRValue(value);
@@ -2679,6 +2686,12 @@ public:
   }
 
   rust::Unit trStmt(Vec<Rc<ir::Stmt>> &stmts, Stmt *stmt) {
+    if (auto *e = dyn_cast<Expr>(stmt)) {
+      if (auto *value = ignoreCCleanups(e); value != e) {
+        return trStmt(stmts, value);
+      }
+    }
+
     auto loc = getRange(stmt->getSourceRange());
 
     if (auto *e = dyn_cast<Expr>(stmt)) {
