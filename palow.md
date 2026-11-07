@@ -683,6 +683,17 @@ so we do not need a per-array-type axiomatization, and the existing
 today a dedicated `MallocFlex` special case — become an ordinary struct
 followed by an `array_repr` chunk, with no special support in the translator.
 
+A `_refine` on a struct declaration is a fact about every value of the struct,
+so an `_array` of it carries the fact for every element. The struct's module
+names the value-level refinement `struct_X__refine (x: struct_X) : prop`, and a
+contract (or a loop invariant that rebinds the array's sequence) states
+`seq_forall struct_X__refine xs` beside the array's points-to. `seq_forall` is
+opaque to SMT; `Pulse.Lib.C.Palow.Array` exposes it through patterned lemmas
+that fire on a concrete read (`Seq.index xs i`) and on the sequences the array
+operations build (`Seq.upd`, `Seq.slice`, `Seq.append`, `Seq.create`). A struct
+refinement that states ownership cannot be spread over a sequence, and an
+array of such a struct is refused rather than given a weaker contract.
+
 ### Effective types
 
 C's effective-type rules (C11 6.5p6-7) are what license a compiler's

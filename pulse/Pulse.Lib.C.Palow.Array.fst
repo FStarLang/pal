@@ -884,3 +884,71 @@ ghost fn array_pts_to_not_null (#t: Type0) (t_repr: t -> bytes -> prop)
   mem_pts_to_not_null a;
   fold array_pts_to t_repr esize ealign a p xs;
 }
+
+(* ---------------------------------------------------------------------------
+   Element refinements
+
+   `seq_forall p xs`: every element of `xs` satisfies `p`. This is how a pure
+   `_refine` on a struct declaration reaches the elements of an `_array` of that
+   struct: PAL names the refinement `struct_X__refine` in the struct's module
+   and states `seq_forall struct_X__refine xs` beside the array's points-to.
+
+   It is opaque to the SMT solver on purpose. A bare
+   `forall i. i < length xs ==> p (index xs i)` sits in every query in its
+   scope, one copy per refined array, and without an explicit pattern Z3
+   chooses its own trigger. Here the quantifier is never seen; the lemmas below
+   expose exactly what generated code needs, on patterns that bound
+   instantiation:
+
+   - reading a cell: `seq_forall_elim` fires only when the predicate AND a
+     concrete read `Seq.index xs i` are both present -- once per read;
+   - building a new sequence: one introduction per constructor the array
+     operations produce (`upd`, `slice`, `append`, `create`), each firing only
+     on the goal `seq_forall p (<constructor> ...)`.
+
+   `seq_forall_reveal` is the manual escape hatch; it has no pattern.
+   --------------------------------------------------------------------------- *)
+
+[@@"opaque_to_smt"]
+let seq_forall (#t: Type) (p: t -> prop) (xs: Seq.seq t) : prop =
+  forall (i: nat). {:pattern (Seq.index xs i)}
+    i < Seq.length xs ==> p (Seq.index xs i)
+
+let seq_forall_reveal (#t: Type) (p: t -> prop) (xs: Seq.seq t)
+  : Lemma (seq_forall p xs <==>
+           (forall (i: nat). i < Seq.length xs ==> p (Seq.index xs i)))
+  = reveal_opaque (`%seq_forall) (seq_forall p xs)
+
+let seq_forall_elim (#t: Type) (p: t -> prop) (xs: Seq.seq t) (i: nat)
+  : Lemma (requires seq_forall p xs /\ i < Seq.length xs)
+          (ensures p (Seq.index xs i))
+          [SMTPat (seq_forall p xs); SMTPat (Seq.index xs i)]
+  = seq_forall_reveal p xs
+
+let seq_forall_upd (#t: Type) (p: t -> prop) (xs: Seq.seq t) (i: nat) (y: t)
+  : Lemma (requires seq_forall p xs /\ i < Seq.length xs /\ p y)
+          (ensures seq_forall p (Seq.upd xs i y))
+          [SMTPat (seq_forall p (Seq.upd xs i y))]
+  = seq_forall_reveal p xs;
+    seq_forall_reveal p (Seq.upd xs i y)
+
+let seq_forall_slice (#t: Type) (p: t -> prop) (xs: Seq.seq t) (i j: nat)
+  : Lemma (requires seq_forall p xs /\ i <= j /\ j <= Seq.length xs)
+          (ensures seq_forall p (Seq.slice xs i j))
+          [SMTPat (seq_forall p (Seq.slice xs i j))]
+  = seq_forall_reveal p xs;
+    seq_forall_reveal p (Seq.slice xs i j)
+
+let seq_forall_append (#t: Type) (p: t -> prop) (xs ys: Seq.seq t)
+  : Lemma (requires seq_forall p xs /\ seq_forall p ys)
+          (ensures seq_forall p (Seq.append xs ys))
+          [SMTPat (seq_forall p (Seq.append xs ys))]
+  = seq_forall_reveal p xs;
+    seq_forall_reveal p ys;
+    seq_forall_reveal p (Seq.append xs ys)
+
+let seq_forall_create (#t: Type) (p: t -> prop) (n: nat) (x: t)
+  : Lemma (requires p x)
+          (ensures seq_forall p (Seq.create n x))
+          [SMTPat (seq_forall p (Seq.create n x))]
+  = seq_forall_reveal p (Seq.create n x)

@@ -1174,6 +1174,11 @@ struct StructInfo {
     /// object, and the object is what `_pts_to` is about. So it goes there,
     /// and every operation that produces a `_pts_to` has to say it holds.
     inv: Option<String>,
+    /// The `_refine` written on the struct declaration, as a proposition about
+    /// a binder `x` of the struct's type, when every clause of it is a
+    /// proposition about the value. Emitted as `struct_X__refine`, it is what
+    /// an `_array` of the struct says of each of its elements.
+    elem_refine: Option<String>,
 }
 
 /// One member of a union the emitter generated a Palow type for.
@@ -2407,6 +2412,11 @@ struct OwnedParam {
     /// name is the signature's own ghost binder, which is in scope throughout
     /// the body.
     entry: String,
+    /// For an `_array` of a struct whose declaration carries a `_refine`, the
+    /// struct's named element predicate. A loop invariant that rebinds the
+    /// array's sequence states it again, or the refinement would be lost on
+    /// the first iteration.
+    elem_refine: Option<String>,
 }
 
 /// Which values a specification expression refers to: the ones on entry, the
@@ -4608,6 +4618,19 @@ fn emit_fn(
                     }
                 }
             };
+        let elem_refine = match &peel(tds, pt).val {
+            TypeT::TypeRef(TypeRefKind::Struct(sn))
+                if extent(tds, &arg.ty) == Some(Extent::Array)
+                    && arg.mode != ParamMode::Out
+                    && tds
+                        .structs
+                        .get(&*sn.val)
+                        .is_some_and(|si| si.elem_refine.is_some()) =>
+            {
+                Some(format!("struct_{}__refine", sn.val))
+            }
+            _ => None,
+        };
         // The deep half of the parameter's ownership. A struct pointer in C
         // almost always means the struct *and* what its pointers reach; the
         // two are separate predicates here, so the contract states both. A
@@ -4734,6 +4757,7 @@ fn emit_fn(
                             pre: format!("{}_pts_to {} 1.0R ", pn, pname),
                             uninit: Some(format!("{}_pts_to_uninit {}", pn, pname)),
                             entry: String::new(),
+                            elem_refine: None,
                         });
                     }
                     if !ens_own {
@@ -4823,6 +4847,7 @@ fn emit_fn(
                         pre: pts_to("1.0R", ""),
                         uninit: Some(format!("{}_pts_to_uninit {}", pn, pname)),
                         entry: String::new(),
+                        elem_refine: None,
                     });
                 }
                 // The mode is a statement about the *pre*condition: what
@@ -4874,6 +4899,7 @@ fn emit_fn(
                     pre: pts_to(&perm, ""),
                     uninit: None,
                     entry: format!("(reveal {})", vname),
+                    elem_refine: elem_refine.clone(),
                 });
                 if let Some((sn, osty)) = &own_info {
                     ghosts.push(format!("(#{}: erased ({}))", oname, osty));
@@ -4898,6 +4924,7 @@ fn emit_fn(
                     pre: pts_to("1.0R", ""),
                     uninit: None,
                     entry: format!("(reveal {})", vname),
+                    elem_refine: elem_refine.clone(),
                 });
                 if let Some((sn, osty)) = &own_info {
                     ghosts.push(format!("(#{}: erased ({}))", oname, osty));
@@ -4923,6 +4950,7 @@ fn emit_fn(
                     pre: pts_to("1.0R", ""),
                     uninit: None,
                     entry: format!("(reveal {})", vname),
+                    elem_refine: elem_refine.clone(),
                 });
                 fresh.push((
                     format!("{}'", vname),
@@ -5617,6 +5645,7 @@ fn emit_fn(
                 None => stated_own,
             });
         }
+        let mut elem_refined: HashSet<String> = HashSet::new();
         for (base, ty, p) in &refines_struct {
             let Some((pre, post)) = spec
                 .pointees
@@ -5630,6 +5659,35 @@ fn emit_fn(
                 _ => pre.as_deref(),
             };
             let Some(this) = this else { continue };
+            // An `_array`'s value is a sequence, and the struct's refinement
+            // is about each element of it, not about the sequence: it is
+            // stated once per array through the struct's named predicate.
+            if spec.arrays.contains(base)
+                && let TypeT::TypeRef(TypeRefKind::Struct(sn)) = &peel(tds, ty).val
+                && struct_refines(ty).iter().any(|q| Rc::ptr_eq(q, p))
+            {
+                if !elem_refined.insert(base.clone()) {
+                    continue;
+                }
+                if tds
+                    .structs
+                    .get(&*sn.val)
+                    .and_then(|si| si.elem_refine.as_ref())
+                    .is_none()
+                {
+                    return Err(format!(
+                        "parameter var_{} is an array of struct {}, whose `_refine` is not a \
+                         proposition about the value of each element",
+                        base, sn.val
+                    ));
+                }
+                let t = format!("seq_forall struct_{}__refine ({})", sn.val, this);
+                out.push(match null_wrap.get(base) {
+                    Some(ptr) => format!("pure (not (is_null {}) ==> ({}))", ptr, t),
+                    None => format!("pure ({})", t),
+                });
+                continue;
+            }
             let pure_guarded = null_wrap.get(base).filter(|_| !refine_states_own(tds, p));
             let t = with_this(
                 base,
@@ -6709,6 +6767,71 @@ fn struct_invariant(tds: &Typedefs, env: &Env, fields: &[StructField]) -> Option
     Some(out.join(" /\\ "))
 }
 
+/// The `_refine` on a struct declaration as a proposition about a binder `x`
+/// of the struct's type, for stating of every element of an `_array` of it.
+///
+/// A parameter of the struct type carries the refinement at its own value,
+/// but an array has a sequence of values and no `this` to bind; the clause has
+/// to become a predicate first. Only a clause that is a proposition about the
+/// value qualifies: ownership in a refinement cannot be spread over the
+/// elements of a sequence, and a clause that does not render here is refused
+/// at the array rather than dropped (see `refine_own` in `emit_fn_sig`).
+fn struct_elem_refine(tds: &Typedefs, env: &Env, name: &str) -> Option<String> {
+    let r = tds.refined_structs.get(name)?;
+    let (ps, _, _) = refinements(tds, r).ok()?;
+    let first = ps.first()?;
+    let sty = TypeT::TypeRef(TypeRefKind::Struct(
+        Rc::<str>::from(name).with_loc(first.loc.clone()),
+    ))
+    .with_loc(first.loc.clone());
+    let mut env = env.clone();
+    env.push_var_decl(
+        &Rc::<str>::from("this").with_loc(first.loc.clone()),
+        sty,
+        crate::env::LocalDeclKind::RValue,
+    );
+    let mut locals = HashMap::new();
+    locals.insert("this".to_string(), "x".to_string());
+    let spec = Spec {
+        tds,
+        env: &env,
+        pointees: HashMap::new(),
+        old_vals: HashMap::new(),
+        olds: HashMap::new(),
+        arrays: HashSet::new(),
+        olens: HashMap::new(),
+        owns: HashMap::new(),
+        addrs: HashMap::new(),
+        guarded: HashSet::new(),
+        guards: RefCell::new(Vec::new()),
+        ret: "x".to_string(),
+        locals,
+        uses: RefCell::new(HashSet::new()),
+        signed_ok: false,
+        valued: RefCell::new(Vec::new()),
+        maybes: HashSet::new(),
+        defined: RefCell::new(Vec::new()),
+    };
+    let mut out = Vec::new();
+    for p in &ps {
+        let (mut own, mut props) = (Vec::new(), Vec::new());
+        split_refine(tds, p, &mut own, &mut props);
+        if !own.is_empty() {
+            return None;
+        }
+        for c in props {
+            out.push(format!("({})", spec.prop(c, When::Pre).ok()?));
+            if !spec.guards.borrow().is_empty() {
+                return None;
+            }
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out.join(" /\\ "))
+}
+
 fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<Chunk> {
     let layouts = crate::layout::LayoutCtx::of_tu(tu);
     let mut code: Vec<Chunk> = Vec::new();
@@ -6914,10 +7037,13 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
                 has_read,
                 has_bytes,
                 inv,
+                elem_refine: None,
             },
         );
         let own = collect_own_items(tds, &tds.structs[&name], &name);
         tds.structs.get_mut(&name).unwrap().own = own;
+        let elem_refine = struct_elem_refine(tds, env, &name);
+        tds.structs.get_mut(&name).unwrap().elem_refine = elem_refine;
         code.push(Chunk {
             module: format!("Struct_{}", name),
             code: emit_struct(tds, &name),
@@ -8020,6 +8146,11 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
         }
         None => String::new(),
     };
+    // The declaration's own `_refine`, named so that every `_array` of the
+    // struct states the same term of its elements, in every module.
+    if let Some(p) = &si.elem_refine {
+        c += &format!("let {}__refine (x: {}) : prop =\n  {}\n\n", sn, sn, p);
+    }
     let inv_at = |v: &str| struct_inv_req(si, &sn, v);
     c += &format!(
         "let {}_pts_to ([@@@mkey] a: ptr) (p: perm) (x: {}) : slprop =\n  {} **\n  {}_padding a p{}\n\n",
@@ -19514,6 +19645,9 @@ impl<'a> Body<'a> {
             let b = format!("inv_val_{}", o.base);
             binders.push(format!("({}: {})", b, o.vty));
             owns.push(format!("{}{}", o.pre, b));
+            if let Some(r) = &o.elem_refine {
+                owns.push(format!("pure (seq_forall {} {})", r, b));
+            }
             // `_old` is the function's entry state, not this iteration's, so
             // it gets the signature's ghost binder rather than the invariant's.
             pointees.insert(o.base.clone(), (Some(b.clone()), Some(b)));
