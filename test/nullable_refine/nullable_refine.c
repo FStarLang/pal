@@ -74,21 +74,14 @@ void guarded_optional_refinement(
 void call_optional_refined_null(uint32_t divisor)
     _requires(divisor == 0)
 {
-    _ghost_stmt(intro_unless_null_null null (int32_t_pts_to_uninit null));
     init_optional_refined(42, NULL);
-    _ghost_stmt(elim_unless_null_null null _);
-    _ghost_stmt(intro_unless_null_null null (uint32_t_pts_to_uninit null));
     null_refined_division(divisor, NULL);
-    _ghost_stmt(elim_unless_null_null null _);
 }
 
 int32_t call_optional_refined_nonnull(void)
     _ensures(return == 42)
 {
     int32_t value;
-    _ghost_stmt(int32_t_pts_to_uninit_not_null $&(value));
-    _ghost_stmt(intro_unless_null $&(value) (int32_t_pts_to_uninit $&(value)));
     forward_optional_refined(42, &value);
-    _ghost_stmt(elim_unless_null $&(value) _);
     return value;
 }
