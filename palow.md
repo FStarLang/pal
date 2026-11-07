@@ -6691,6 +6691,23 @@ new facts about memory.
     they lacked. A caller's own `_nullable` parameter is forwarded with its
     guard untouched, since the caller cannot say which way the test goes,
     and a `_plain` or hand-granted argument, an array, and a declined
-    initialized input (whose value the guard would have to name) are left
+    initialized input (whose value the guard would have to name; see entry 49) are left
     to the author as before. `test/nullable_caller_transfer` supplies,
     declines and forwards optional outputs, including a local's address.
+
+49. **Declining an optional input, and supplying a borrowed member.** A
+    `_nullable` input (const or not) names its pointee value -- and, if
+    const, its permission -- as implicits of the callee's signature, which a
+    call passing `NULL` has nothing to solve against. Under a null pointer
+    the guard is `emp`, so a call now introduces it outright:
+    `intro_unless_null_null null (T_pts_to null 1.0R <zero>)` before and
+    `elim_unless_null_null null _` after, which pins both implicits by
+    structural match and asserts nothing about memory. Only pointees that
+    state nothing beyond a `pts_to` qualify -- scalars and structs of them;
+    a refinement or an owned pointer field would be a second guarded
+    conjunct, and an array has no canonical length -- so those are still
+    written by hand (`test/nullable`, `test/struct_pointee_refine`). The
+    take-back of entry 48 also covers `&s->f`, a field `field_args` opened
+    for the call: the field's resource is taken back out of the guard
+    before the field is unfocused. `test/nullable_const_in` declines,
+    forwards, and supplies a member of a borrowed struct.
