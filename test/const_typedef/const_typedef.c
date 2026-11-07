@@ -28,15 +28,12 @@ void read_optional(PCINT _nullable _mutable p)
 // A null argument still has no hold of its own to solve the parameter's value
 // implicit against -- under Palow even a mutable optional parameter names its
 // pointee value in the signature -- so the ghost steps test/nullable describes
-// for any null argument supply one.
+// for a null argument supply one.
 void call_read_optional()
 {
     int x = 67;
-    // A supplied argument's hold comes back wrapped in the guard; knowing the
-    // address is not null takes it back out.
-    _ghost_stmt(int32_t_pts_to_not_null $&(x));
+    // PAL takes a supplied argument's hold back out of the guard itself.
     read_optional(&x);
-    _ghost_stmt(elim_unless_null $&(x) _);
     _ghost_stmt(intro_unless_null_null null (int32_t_pts_to null 1.0R 0l));
     read_optional(NULL);
     _ghost_stmt(elim_unless_null_null null _);
