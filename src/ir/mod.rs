@@ -1,5 +1,6 @@
 use num_bigint::BigInt;
 use std::fmt::{Debug, Display};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 pub mod pretty;
 
@@ -82,10 +83,28 @@ impl Debug for SourceInfo {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone)]
+#[derive(Clone)]
 pub struct Ast<T> {
     pub val: T,
     pub loc: Rc<SourceInfo>,
+}
+
+// `loc` is provenance, not identity: two nodes with the same `val` denote the
+// same thing however they were written. Deriving these would compare `loc` at
+// every level of the tree, so two specs that are identical apart from where
+// they were written would never compare equal. `Hash` must agree with `Eq`.
+impl<T: PartialEq> PartialEq for Ast<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.val == other.val
+    }
+}
+
+impl<T: Eq> Eq for Ast<T> {}
+
+impl<T: Hash> Hash for Ast<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.val.hash(state);
+    }
 }
 
 impl<T> Ast<T> {
@@ -257,6 +276,8 @@ pub enum BinOp {
     BitXor,
     Shl,
     Shr,
+    /// GNU `a ?: b`: `a` if it is nonzero, else `b`.
+    Elvis,
 }
 
 impl BinOp {
@@ -278,6 +299,7 @@ impl BinOp {
             BinOp::BitXor => "^",
             BinOp::Shl => "<<",
             BinOp::Shr => ">>",
+            BinOp::Elvis => "?:",
         }
     }
 }
@@ -534,35 +556,12 @@ impl FieldT {
             FieldT::BitField { name, .. } => name,
         }
     }
-    pub fn is_array(&self) -> bool {
-        match self {
-            FieldT::Plain { ty, .. } => {
-                matches!(
-                    peel_type(ty).val,
-                    TypeT::FixedArray(_, _) | TypeT::FlexArray(_)
-                )
-            }
-            FieldT::BitField { .. } => false,
-        }
-    }
-
     /// For a bit-field, the number of bits in its declared width; `None` for a
     /// plain field. Doubles as a "this is a bit-field" predicate.
     pub fn bit_width(&self) -> Option<u32> {
         match self {
             FieldT::BitField { width, .. } => Some(*width),
             FieldT::Plain { .. } => None,
-        }
-    }
-
-    /// For array fields, return the element type and length.
-    pub fn fixed_array_info(&self) -> Option<(&Rc<Type>, u64)> {
-        match self {
-            FieldT::Plain { ty, .. } => match &peel_type(ty).val {
-                TypeT::FixedArray(elem_ty, length) => Some((elem_ty, *length)),
-                _ => None,
-            },
-            FieldT::BitField { .. } => None,
         }
     }
 
@@ -662,6 +661,16 @@ pub enum AuxFnKind {
     /// uninitialized. Union-only; has no struct form. Emits the per-arm
     /// activation fn `union_<U>__activate_<arm>`.
     Activate,
+    /// `$scattered(struct S) $(p)` — says that `*p` is already in pieces:
+    /// its fields are owned one by one, those the body writes as storage.
+    /// Palow-only; it emits nothing, and only tells the emitter to fill the
+    /// remaining fields by address instead of opening the object.
+    Scattered,
+    /// `$gathered(struct S) $(p)` — the closing form of `$scattered`: says
+    /// that `*p` is a whole object again, because a ghost step of the
+    /// author's put it back together. Palow-only, and emits nothing; it only
+    /// tells the emitter to stop treating the object as a heap of fields.
+    Gathered,
 }
 
 impl AuxFnKind {
@@ -672,26 +681,8 @@ impl AuxFnKind {
             AuxFnKind::Fold => "fold",
             AuxFnKind::FoldUninit => "fold-uninit",
             AuxFnKind::Activate => "activate",
-        }
-    }
-
-    /// The struct-level aux fn infix, if this kind has a struct form.
-    /// `Activate` is union-only and has none.
-    pub fn struct_aux_name(self) -> Option<&'static str> {
-        match self {
-            AuxFnKind::Unfold => Some("raw_unfold"),
-            AuxFnKind::UnfoldUninit => Some("raw_unfold_uninit"),
-            AuxFnKind::Fold => Some("raw_fold"),
-            AuxFnKind::FoldUninit => Some("raw_fold_uninit"),
-            AuxFnKind::Activate => None,
-        }
-    }
-
-    pub fn union_aux_name(self) -> Option<&'static str> {
-        match self {
-            AuxFnKind::Unfold => Some("raw_unfold"),
-            AuxFnKind::Fold => Some("raw_fold"),
-            AuxFnKind::UnfoldUninit | AuxFnKind::FoldUninit | AuxFnKind::Activate => None,
+            AuxFnKind::Scattered => "scattered",
+            AuxFnKind::Gathered => "gathered",
         }
     }
 }
@@ -726,6 +717,13 @@ pub enum InlinePulseToken {
         ident: Rc<Ident>,
         ty: Rc<Type>,
     },
+    /// `$witness` — the ghost arguments that instantiate the contract of the
+    /// indirect call that follows. It stands at the head of the statement and
+    /// emits nothing; the rest of the statement is the witness term. Only the
+    /// author knows it, so there is nothing for the emitter to derive.
+    /// Palow-only: the old model spells the same thing as a call to
+    /// `Pulse.Lib.C.FuncPtr.eta_expanded_erased`, and wants a different tuple.
+    WitnessAntiquot(CodeToken),
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -762,18 +760,43 @@ pub struct GlobalVar {
     pub name: Rc<Ident>,
     pub ty: Rc<Type>,
     pub init: Option<Rc<Expr>>,
+    /// Whether the object is immutable: `const`, or annotated `_pure`. This is
+    /// about mutability alone; whether its value is *known here* is `init` and
+    /// `is_extern`.
     pub is_pure: bool,
+    /// Whether the object is defined in another translation unit, so that no
+    /// file in this build supplies its value. Distinguishes `extern const T g;`
+    /// from the tentative definition `const T g;`, which are otherwise alike in
+    /// having no initializer but differ in value: unknown versus 0.
+    pub is_extern: bool,
     pub opaque_to_smt: bool,
+    /// An enumerator published so a contract can name it. C calls these
+    /// *constants*, not objects: an enumerator has no storage and `&Color_Red`
+    /// is not something that can be written, so unlike a real global it gets no
+    /// address.
+    pub is_enum_constant: bool,
 }
 
-/// Whether a global is an array. Array globals are emitted as a *spec*
-/// (`full_array_lspec`) rather than storage, so they are excluded from
-/// address-of support; see `Env::addressable_global`.
+/// Whether a global is an array. A *pure* array global is emitted as a *spec*
+/// (`full_array_lspec`) rather than storage, so it is excluded from address-of
+/// support; see `Env::addressable_global`. A mutable one is emitted as an
+/// assumed `array` handle; see `global_array_object`.
 pub fn global_var_is_array(gv: &GlobalVar) -> bool {
-    matches!(
-        &gv.ty.val,
-        TypeT::FixedArray(_, _) | TypeT::FlexArray(_) | TypeT::Pointer(_, PointerKind::Array)
-    )
+    global_array_object(gv).is_some()
+}
+
+/// The element type and declared extent of an array global.
+///
+/// The extent is `Some(N)` for `T g[N]` and `None` when this translation unit
+/// does not know it: `extern T g[]` (an incomplete type, sized in the defining
+/// unit) and the `_array T *g` spelling both arrive as an array pointer, which
+/// carries no length.
+pub fn global_array_object(gv: &GlobalVar) -> Option<(&Rc<Type>, Option<u64>)> {
+    match &gv.ty.val {
+        TypeT::FixedArray(elem, len) => Some((elem, Some(*len))),
+        TypeT::FlexArray(elem) | TypeT::Pointer(elem, PointerKind::Array) => Some((elem, None)),
+        _ => None,
+    }
 }
 
 pub type Decl = Ast<DeclT>;
@@ -791,8 +814,59 @@ pub enum DeclT {
     GlobalVar(GlobalVar),
 }
 
+/// Identifies a named C type whose layout is recorded in [`LayoutTable`].
+///
+/// Only named types need an entry: the size and alignment of every other type
+/// (scalars, pointers, arrays) follows from its structure.
+#[derive(Debug, PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
+pub enum LayoutKey {
+    Typedef(Rc<str>),
+    Struct(Rc<str>),
+    Union(Rc<str>),
+}
+
+impl LayoutKey {
+    pub fn of_type_ref(kind: &TypeRefKind) -> LayoutKey {
+        match kind {
+            TypeRefKind::Typedef(i) => LayoutKey::Typedef(i.val.clone()),
+            TypeRefKind::Struct(i) => LayoutKey::Struct(i.val.clone()),
+            TypeRefKind::Union(i) => LayoutKey::Union(i.val.clone()),
+        }
+    }
+}
+
+/// Layout of a named C type, as computed by clang for the target ABI.
+///
+/// Sizes and offsets are in bytes. `field_offsets` is empty for typedefs and
+/// unions (all union members start at offset 0).
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Default)]
+pub struct TypeLayout {
+    pub size: u64,
+    pub align: u64,
+    pub field_offsets: Vec<(Rc<str>, u64)>,
+    /// Bit offsets of the bit-fields, which have no byte offset of their own.
+    /// A bit-field is addressed by the byte range its storage unit occupies
+    /// plus its position inside it, and this is the second half of that.
+    pub field_bit_offsets: Vec<(Rc<str>, u64)>,
+}
+
+/// Target-specific layout of every named C type in the translation unit.
+///
+/// Populated by the clang frontend (see `cpp/impl.cpp`) and consumed by the
+/// emitter, which turns `sizeof`/`_Alignof` into concrete `SizeT` literals
+/// instead of opaque, F*-type-indexed `c_sizeof`/`c_alignof` applications.
+pub type LayoutTable = std::collections::BTreeMap<LayoutKey, TypeLayout>;
+
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct TranslationUnit {
     pub main_file_names: Vec<Rc<str>>,
     pub decls: Vec<Decl>,
+    /// Layout of named C types, keyed by [`LayoutKey`]. See [`LayoutTable`].
+    pub layouts: LayoutTable,
+    /// Size of a data pointer in bytes, as reported by clang.
+    pub pointer_size: u64,
+    /// Byte order of the target, as reported by clang.
+    pub little_endian: bool,
+    /// `_Alignof(max_align_t)` on the target, in bytes.
+    pub max_align: u64,
 }

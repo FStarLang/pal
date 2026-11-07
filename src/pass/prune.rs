@@ -62,6 +62,12 @@ enum DeclName {
     Typedef(Rc<str>),
     GlobalVar(Rc<str>),
     Include(Rc<SourceInfo>),
+    /// Not a declaration: the F* module an `_include_pulse(M, ...)` block
+    /// contributes to, reached by a verbatim `M.x` in inline Pulse and
+    /// leading to every block of that module. Without it, a block in a header
+    /// is dropped however much main-file code names it, because verbatim F*
+    /// otherwise contributes no dependency at all.
+    IncludeModule(Rc<str>),
 }
 
 fn in_main_file(main_files: &[Rc<str>], loc: &SourceInfo) -> bool {
@@ -141,7 +147,14 @@ fn scan_inline_pulse_code(deps: &mut HashSet<DeclName>, code: &InlinePulseCode) 
             InlinePulseToken::TypeAntiquot { ty, .. } | InlinePulseToken::Declare { ty, .. } => {
                 scan_type(deps, ty)
             }
-            InlinePulseToken::Verbatim(_) => {}
+            InlinePulseToken::Verbatim(tok) => {
+                // Any capitalized identifier may be a module qualifier; the
+                // node is inert unless an `_include_pulse` defines it.
+                if tok.text.val.starts_with(|c: char| c.is_ascii_uppercase()) {
+                    deps.insert(DeclName::IncludeModule(tok.text.val.clone()));
+                }
+            }
+            InlinePulseToken::WitnessAntiquot(_) => {}
             InlinePulseToken::FieldAntiquot { ty, .. } => {
                 scan_type(deps, ty);
             }
@@ -154,7 +167,16 @@ fn scan_inline_pulse_code(deps: &mut HashSet<DeclName>, code: &InlinePulseCode) 
 
 fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
     match &rv.val {
-        ExprT::Var(_) => {}
+        // Keeps a global of this name alive: without this edge a global
+        // declared in a header is unreachable from the main-file roots and
+        // gets pruned, leaving `&g` with no addressable global to emit.
+        //
+        // Prune runs before elab, so a `Var` carries no scope information and
+        // a local cannot be told apart from a global. The edge is therefore
+        // unconditional; it can only over-retain, never under-retain.
+        ExprT::Var(n) => {
+            deps.insert(DeclName::GlobalVar(n.val.clone()));
+        }
         ExprT::Deref(v) => scan_expr(deps, v),
         ExprT::Member(x, _a) => scan_expr(deps, x),
         ExprT::VAttr(_, x) => scan_expr(deps, x),
@@ -433,8 +455,10 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
                 }
             }
             DeclT::IncludeDecl(code) => {
-                let ds = deps.deps_for(n);
+                let ds = deps.deps_for(n.clone());
                 scan_inline_pulse_code(ds, &code.code);
+                deps.deps_for(DeclName::IncludeModule(code.module_name.clone()))
+                    .insert(n);
             }
             DeclT::LetDecl(let_decl) => {
                 let ds = deps.deps_for(n);
@@ -455,7 +479,9 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
                 ty,
                 init,
                 is_pure: _,
+                is_extern: _,
                 opaque_to_smt: _,
+                is_enum_constant: _,
             }) => {
                 let ds = deps.deps_for(n);
                 scan_type(ds, ty);
@@ -467,9 +493,22 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
     }
 }
 
-pub fn prune(tu: &mut TranslationUnit) {
+pub fn prune(tu: &mut TranslationUnit, required_functions: &[String]) {
     let mut deps = Deps::new();
     scan_translation_unit(&mut deps, tu);
+    for name in required_functions {
+        deps.add_root(DeclName::Fn(Rc::from(name.as_str())));
+    }
+    // A selected TU-local function is known by its renamed name.
+    for decl in &tu.decls {
+        if let DeclT::FnDefn(f) = &decl.val
+            && required_functions
+                .iter()
+                .any(|n| n == crate::pass::linkage::source_name(&f.decl.name.val))
+        {
+            deps.add_root(decl_name(decl));
+        }
+    }
     for decl in &tu.decls {
         if in_main_file(&tu.main_file_names, &decl.loc) {
             deps.add_root(decl_name(&decl))

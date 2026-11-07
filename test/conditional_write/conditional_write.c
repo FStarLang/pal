@@ -30,8 +30,120 @@ void caller(_out _array int *a, bool b)
   _requires(a._length == 1)
 {
     int *p = &a[0];
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.forget_maybe $(p));
     maybe_write(p, b);
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some (array_cell_ref $(a) (SizeT.v 0sz)));
-    _ghost_stmt(array_return_cell $(a));
+}
+
+bool native_outputs(_plain void **p, _plain bool *flag, void *value, bool write)
+  _requires(_inline_pulse(Pulse.Lib.C.Palow.Scalar.ptr_pts_to_uninit $(p)))
+  _requires(_inline_pulse(Pulse.Lib.C.Palow.CTypes.bool_t_pts_to_uninit $(flag)))
+  _ensures(_inline_pulse(
+    if $(return) then
+      ptr_pts_to $(p) 1.0R $(value) ** bool_t_pts_to $(flag) 1.0R $(write)
+    else ptr_pts_to_uninit $(p) ** bool_t_pts_to_uninit $(flag)))
+{
+    if (!write) {
+        return false;
+    }
+    *p = NULL;
+    *p = value;
+    *flag = true;
+    return true;
+}
+
+void native_scalar(_plain uint32_t *p, uint32_t value)
+  _requires(_inline_pulse(uint32_t_pts_to_uninit $(p)))
+  _ensures(_inline_pulse(uint32_t_pts_to $(p) 1.0R $(value)))
+{
+    _assert(_inline_pulse(uint32_t_pts_to_uninit $(p)));
+    *p = 0;
+    *p = value;
+}
+
+struct native_pair {
+    uint32_t first;
+    uint32_t second;
+};
+
+void native_fields(_plain struct native_pair *p, uint32_t value)
+  _requires(_inline_pulse(Struct_native_pair.struct_native_pair_pts_to_uninit $(p)))
+  _ensures(_inline_pulse(Struct_native_pair.struct_native_pair_pts_to $(p) 1.0R
+    { Struct_native_pair.fld_first = 1ul; Struct_native_pair.fld_second = $(value) }))
+{
+    p->first = 1;
+    p->second = value;
+}
+
+void forgotten_local(void *value, bool forget)
+{
+    void *p = value;
+    if (forget) {
+        _ghost_stmt(Pulse.Lib.C.Palow.Scalar.ptr_forget $&(p));
+        _assert((_slprop)_inline_pulse(Pulse.Lib.C.Palow.Scalar.ptr_pts_to_uninit $&(p)));
+        return;
+    }
+    _assert(p == value);
+}
+
+uint32_t rewritten_local(void)
+  _ensures(return == 2)
+{
+    uint32_t value = 1;
+    _ghost_stmt(uint32_t_forget $&(value));
+    _assert((_slprop)_inline_pulse(uint32_t_pts_to_uninit $&(value)));
+    value = 2;
+    return value;
+}
+
+void forgotten_fields(void)
+{
+    struct native_pair pair = {1, 2};
+    _ghost_stmt(Struct_native_pair.struct_native_pair_forget $&(pair));
+    _assert((_slprop)_inline_pulse(Struct_native_pair.struct_native_pair_pts_to_uninit $&(pair)));
+    pair.first = 3;
+    pair.second = 4;
+    _assert(pair.first == 3 && pair.second == 4);
+    _ghost_stmt(Struct_native_pair.struct_native_pair_forget $&(pair));
+    _assert((_slprop)_inline_pulse(Struct_native_pair.struct_native_pair_pts_to_uninit $&(pair)));
+}
+
+struct output_message {
+    _plain uint64_t *result;
+    uint64_t initial;
+};
+
+uint64_t message_output(_plain struct output_message message)
+  _requires(_inline_pulse(uint64_t_pts_to_uninit $(message.result)))
+  _ensures(_inline_pulse(uint64_t_pts_to $(message.result) 1.0R $(return)))
+  _ensures(return == message.initial)
+{
+    _assert(_inline_pulse(Pulse.Lib.C.Palow.CTypes.uint64_t_pts_to_uninit $(message.result)));
+    *message.result = 0;
+    *message.result = message.initial;
+    return *message.result;
+}
+
+uint64_t aliased_message_output(_plain struct output_message message)
+  _requires(_inline_pulse(uint64_t_pts_to_uninit $(message.result)))
+  _ensures(_inline_pulse(uint64_t_pts_to $(message.result) 1.0R $(return)))
+  _ensures(return == message.initial)
+{
+    uint64_t *result = message.result;
+    _assert(_inline_pulse(uint64_t_pts_to_uninit $&(*result)));
+    *result = message.initial;
+    return *result;
+}
+
+uint64_t message_output_join(_plain struct output_message message, bool choose)
+  _requires(_inline_pulse(uint64_t_pts_to_uninit $(message.result)))
+  _ensures(_inline_pulse(uint64_t_pts_to $(message.result) 1.0R $(return)))
+  _ensures(return == message.initial)
+{
+    _assert(_inline_pulse(uint64_t_pts_to_uninit $(message.result)));
+    if (choose) {
+        *message.result = 0;
+    } else {
+        *message.result = 1;
+    }
+    *message.result = message.initial;
+    return *message.result;
 }

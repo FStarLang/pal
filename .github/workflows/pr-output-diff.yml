@@ -1,0 +1,142 @@
+name: PR Output Diff
+
+# Generates a diff of the F* code that `pal` produces for the test suite, as
+# of the base of the pull request versus as of its head. The diff is uploaded
+# as an artifact; the "PR Output Diff Comment" workflow picks it up and posts
+# it to the pull request.
+#
+# The job builds and runs code from the pull request, so it deliberately holds
+# no write permissions and uses no secrets beyond a read-only GITHUB_TOKEN.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull request number to report on"
+        required: true
+        type: string
+
+# Also used by the `!diff` command to find the run it just dispatched.
+run-name: "Output diff for pull request #${{ github.event.pull_request.number || inputs.pr }}"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-output-diff-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Share a target directory between the base and head builds so that the
+  # dependencies are only compiled once.
+  CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+  PR: ${{ github.event.pull_request.number || inputs.pr }}
+  REPO: ${{ github.repository }}
+
+jobs:
+  diff:
+    runs-on: ubuntu-latest
+    steps:
+      # Checked out at the merge commit for `pull_request` events and at the
+      # default branch for `workflow_dispatch`. Either way it provides the
+      # snapshot script, which is deliberately taken from here rather than
+      # from the pull request head: pull requests opened before this workflow
+      # existed do not contain it.
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          path: repo
+          fetch-depth: 0
+
+      - name: Resolve the revisions to compare
+        id: revs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          case "$PR" in
+            '' | *[!0-9]*)
+              echo "error: invalid pull request number '$PR'" >&2
+              exit 1
+              ;;
+          esac
+
+          pr_json=$(gh api "repos/$REPO/pulls/$PR")
+          base_branch=$(jq -r .base.ref <<<"$pr_json")
+          head_sha=$(jq -r .head.sha <<<"$pr_json")
+
+          cd repo
+          # `refs/pull/N/merge` exists in this repository even for pull
+          # requests from forks, and comparing against its first parent shows
+          # exactly the effect of merging the pull request.
+          if git fetch --no-tags --force origin "refs/pull/$PR/merge:refs/pal/merge"; then
+            head=$(git rev-parse refs/pal/merge)
+            base=$(git rev-parse 'refs/pal/merge^1')
+          else
+            echo "no merge ref (the pull request probably conflicts); comparing against the merge base"
+            git fetch --no-tags --force origin "refs/pull/$PR/head:refs/pal/head"
+            git fetch --no-tags --force origin "$base_branch:refs/pal/base"
+            head=$(git rev-parse refs/pal/head)
+            base=$(git merge-base refs/pal/base refs/pal/head)
+          fi
+          echo "comparing $base -> $head (pull request #$PR, head $head_sha)"
+
+          git worktree add --detach ../base "$base"
+          git worktree add --detach ../head "$head"
+
+          {
+            echo "base=$base"
+            echo "head_sha=$head_sha"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Install clang
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 20
+          sudo apt update
+          sudo apt install -y clang-20 libclang-cpp20-dev g++ clang-tools-20 libclang-20-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ env.CARGO_TARGET_DIR }}
+          key: pr-output-diff-${{ runner.os }}-${{ hashFiles('head/Cargo.lock') }}
+          restore-keys: pr-output-diff-${{ runner.os }}-
+
+      - name: Snapshot base output
+        run: repo/.github/scripts/pal-snapshot.sh base snapshots/base
+
+      - name: Snapshot head output
+        run: repo/.github/scripts/pal-snapshot.sh head snapshots/head
+
+      - name: Compute diff
+        run: |
+          mkdir -p report
+          cd snapshots
+          git -c core.pager=cat diff --no-index --no-color --no-prefix \
+            -- base head >../report/output.diff || true
+          git -c core.pager=cat diff --no-index --no-color --no-prefix --stat=200,180 \
+            -- base head >../report/output.stat || true
+
+      - name: Record pull request metadata
+        env:
+          BASE_SHA: ${{ steps.revs.outputs.base }}
+          HEAD_SHA: ${{ steps.revs.outputs.head_sha }}
+        run: |
+          jq -n --argjson pr "$PR" --arg base "$BASE_SHA" --arg head "$HEAD_SHA" \
+            '{pr: $pr, base_sha: $base, head_sha: $head}' >report/metadata.json
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: pal-output-diff
+          path: report/
+          retention-days: 14

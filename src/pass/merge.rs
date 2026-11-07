@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::{
@@ -184,7 +184,7 @@ fn rename_inline_pulse_in_place(code: &mut InlinePulseCode, renames: &HashMap<Rc
             | InlinePulseToken::Declare { ty, .. } => {
                 rename_type_in_place(Rc::make_mut(ty), renames);
             }
-            InlinePulseToken::Verbatim(_) => {}
+            InlinePulseToken::Verbatim(_) | InlinePulseToken::WitnessAntiquot(_) => {}
         }
     }
 }
@@ -230,7 +230,7 @@ fn rename_type_in_place(ty: &mut Type, renames: &HashMap<Rc<str>, Rc<Ident>>) {
 
 pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     // === Phase 1: Deduplicate identical declarations from shared headers ===
-    // For each declaration kind+name, keep the most complete (last) content at the
+    // For each declaration kind+name, keep the most complete content at the
     // earliest (first) position. This preserves the source ordering so that later
     // passes (e.g. elab) that build their environment incrementally see types
     // before they are referenced by `_include_pulse` blocks in the same file.
@@ -255,8 +255,7 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
             };
             if let Some(key) = key {
                 if let Some(&first) = first_idx.get(&key) {
-                    // Copy this (later, more complete) decl back to the first position
-                    // and mark this duplicate for removal.
+                    // Merge this decl into the first position and remove the duplicate.
                     moves.push((i, first));
                     to_remove.push(i);
                 } else {
@@ -265,10 +264,84 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
             }
         }
 
-        // Apply moves in order so the final value at each first position is the
-        // last (most complete) occurrence.
+        // Merge in order, comparing against the accumulated result rather than
+        // the original first declaration, which may have had no specifications.
         for &(src, dst) in &moves {
-            tu.decls[dst] = tu.decls[src].clone();
+            let later = tu.decls[src].clone();
+            if let DeclT::FnDecl(later_decl) = &later.val
+                && let DeclT::FnDecl(earlier_decl) = &tu.decls[dst].val
+            {
+                let earlier_has_specs =
+                    !earlier_decl.requires.is_empty() || !earlier_decl.ensures.is_empty();
+                let later_has_specs =
+                    !later_decl.requires.is_empty() || !later_decl.ensures.is_empty();
+                if earlier_has_specs && !later_has_specs {
+                    // Keep the whole signature so specs retain their parameter
+                    // names, ghost binders, and annotated types.
+                    continue;
+                }
+                if earlier_has_specs && later_has_specs {
+                    let renames = param_renames(earlier_decl, later_decl);
+                    let renamed_requires = rename_specs(&earlier_decl.requires, &renames);
+                    let renamed_ensures = rename_specs(&earlier_decl.ensures, &renames);
+                    if renamed_requires != later_decl.requires
+                        || renamed_ensures != later_decl.ensures
+                    {
+                        report(
+                            diags,
+                            format!(
+                                "multiple declarations of {} have differing specifications",
+                                later_decl.name.val
+                            ),
+                            &later_decl.name.loc,
+                        );
+                    }
+                }
+            }
+            // A global's value, purity and externness belong to the object, not
+            // to any one of its declarations, so "last wins" would discard
+            // information an earlier declaration carried: in
+            // `const T g = 1; const T g;` the later declaration has no
+            // initializer, and a file that only sees `extern T g;` says nothing
+            // about the value another file defines. Merge field-wise instead,
+            // which also makes the declaration orderings agree.
+            if let DeclT::GlobalVar(later_gv) = &later.val
+                && let DeclT::GlobalVar(earlier_gv) = &tu.decls[dst].val
+            {
+                // Being an enumerator is fixed for the entity, so the two
+                // declarations cannot disagree: C forbids redeclaring an
+                // enumerator, and one sharing a name with a global is a
+                // redeclaration clang rejects before we see it.
+                debug_assert_eq!(earlier_gv.is_enum_constant, later_gv.is_enum_constant);
+                let merged = GlobalVar {
+                    name: later_gv.name.clone(),
+                    ty: later_gv.ty.clone(),
+                    init: later_gv.init.clone().or_else(|| earlier_gv.init.clone()),
+                    is_pure: earlier_gv.is_pure || later_gv.is_pure,
+                    // The object is external only if *no* file in this build
+                    // defines it: one file seeing only an `extern` declaration
+                    // does not make it external when another defines it.
+                    is_extern: earlier_gv.is_extern && later_gv.is_extern,
+                    opaque_to_smt: earlier_gv.opaque_to_smt || later_gv.opaque_to_smt,
+                    is_enum_constant: later_gv.is_enum_constant,
+                };
+                // Point at whichever declaration says most about the object:
+                // the one carrying the initializer, else one that defines it.
+                let loc = if later_gv.init.is_some() {
+                    later.loc.clone()
+                } else if earlier_gv.init.is_some() || (later_gv.is_extern && !earlier_gv.is_extern)
+                {
+                    tu.decls[dst].loc.clone()
+                } else {
+                    later.loc.clone()
+                };
+                tu.decls[dst] = Ast {
+                    loc,
+                    val: DeclT::GlobalVar(merged),
+                };
+            } else {
+                tu.decls[dst] = later;
+            }
         }
 
         to_remove.sort_unstable();
@@ -346,7 +419,7 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
 
                     let renames = param_renames(fn_decl, &defn.decl);
                     if !renames.is_empty() {
-                        arg_type_renames.push((defn_idx, renames));
+                        arg_type_renames.push((defn_idx, renames.clone()));
                     }
 
                     let decl_has_specs =
@@ -369,9 +442,12 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                     }
 
                     if decl_has_specs && defn_has_specs {
-                        // Both have specs — they must match
-                        if fn_decl.requires != defn.decl.requires
-                            || fn_decl.ensures != defn.decl.ensures
+                        // Both have specs — they must match, up to
+                        // declaration/definition parameter renaming.
+                        let renamed_requires = rename_specs(&fn_decl.requires, &renames);
+                        let renamed_ensures = rename_specs(&fn_decl.ensures, &renames);
+                        if renamed_requires != defn.decl.requires
+                            || renamed_ensures != defn.decl.ensures
                         {
                             report(
                                 diags,
@@ -386,7 +462,6 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                     }
 
                     if decl_has_specs && !defn_has_specs {
-                        let renames = param_renames(fn_decl, &defn.decl);
                         // The specs we copy below (and the definition's own body)
                         // reference the declaration's ghost-argument variables. If
                         // the definition declared no ghost args of its own, the
@@ -491,6 +566,9 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         tu.decls.remove(i);
     }
 
+    // === Phase 2.5: Give implicitly-declared struct tags a placeholder ===
+    declare_implicit_structs(tu);
+
     // === Phase 3: Order type definitions before their dependents ===
     reorder_type_deps(tu);
 }
@@ -515,6 +593,20 @@ const UNION_NS: u8 = 2;
 /// contribute no predicate/spec at emission, so they impose no ordering
 /// constraint and are deliberately not descended into (doing so would create a
 /// false dependency cycle for the recursive structs core_ref exists to break).
+/// Whether an annotation chain wraps a `_plain` pointer -- a bare address
+/// that carries no predicate about what it points at.
+fn is_plain_ptr(ty: &Type) -> bool {
+    match &ty.val {
+        TypeT::Plain(inner) => matches!(&inner.val, TypeT::Pointer(..)),
+        TypeT::Refine(inner, _)
+        | TypeT::RefineAlways(inner, _)
+        | TypeT::RefineUninit(inner, _)
+        | TypeT::RefineValue(inner, _, _, _)
+        | TypeT::Nullable(inner) => is_plain_ptr(inner),
+        _ => false,
+    }
+}
+
 fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
     match &ty.val {
         // See the doc comment: `core_ref` imposes no emission-order dependency.
@@ -535,6 +627,23 @@ fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
             };
             out.push(key);
         }
+        _ => {}
+    }
+}
+
+/// By-value dependencies cannot be broken to order a pointer-reference cycle:
+/// the enclosing aggregate needs their value types and byte representations.
+fn collect_value_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
+    match &ty.val {
+        TypeT::FixedArray(inner, _)
+        | TypeT::FlexArray(inner)
+        | TypeT::Plain(inner)
+        | TypeT::Refine(inner, _)
+        | TypeT::RefineAlways(inner, _)
+        | TypeT::RefineUninit(inner, _)
+        | TypeT::RefineValue(inner, _, _, _)
+        | TypeT::Nullable(inner) => collect_value_type_refs(inner, out),
+        TypeT::TypeRef(_) => collect_type_refs(ty, out),
         _ => {}
     }
 }
@@ -645,7 +754,7 @@ fn collect_refs_inline(code: &InlinePulseCode, out: &mut Vec<TypeKey>) {
             | InlinePulseToken::FieldAntiquot { ty, .. }
             | InlinePulseToken::AuxFnAntiquot { ty, .. }
             | InlinePulseToken::Declare { ty, .. } => collect_type_refs(ty, out),
-            InlinePulseToken::Verbatim(_) => {}
+            InlinePulseToken::Verbatim(_) | InlinePulseToken::WitnessAntiquot(_) => {}
         }
     }
 }
@@ -734,7 +843,22 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
         StmtT::Return(None) | StmtT::Break | StmtT::Continue | StmtT::Goto(_) | StmtT::Error => {}
     }
 }
-/// emitted after the type definitions it references by-value or by-pointer.
+fn in_dependency_cycle(node: usize, prereqs: &[Vec<usize>], done: &[bool]) -> bool {
+    let mut seen = vec![false; prereqs.len()];
+    let mut pending = prereqs[node].clone();
+    while let Some(i) = pending.pop() {
+        if i == node {
+            return true;
+        }
+        if !done[i] && !seen[i] {
+            seen[i] = true;
+            pending.extend(&prereqs[i]);
+        }
+    }
+    false
+}
+
+/// Emit each declaration after the types it references by-value or by-pointer.
 ///
 /// This is required because emission populates the spec-parameter tables for a
 /// type when its predicate is emitted, and a dependent type's predicate reads
@@ -764,58 +888,10 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
 
     // Compute prerequisites: indices that must precede each declaration.
     let mut prereqs: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut value_prereqs: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, d) in tu.decls.iter().enumerate() {
         let mut refs: Vec<TypeKey> = Vec::new();
-        match &d.val {
-            DeclT::Typedef(t) => collect_type_refs(&t.body, &mut refs),
-            DeclT::StructDefn(s) => {
-                collect_type_refs(&s.refines, &mut refs);
-                for f in &s.fields {
-                    collect_type_refs(&f.val.logical_type(&f.loc), &mut refs);
-                }
-            }
-            DeclT::UnionDefn(u) => {
-                for f in &u.fields {
-                    collect_type_refs(&f.val.logical_type(&f.loc), &mut refs);
-                }
-            }
-            // Functions, globals and let-definitions also reference type
-            // predicates (via their signature types) when emitting specs, so
-            // they must follow the type definitions they mention.
-            DeclT::FnDecl(fd) => {
-                collect_type_refs(&fd.ret_type, &mut refs);
-                for a in &fd.args {
-                    collect_type_refs(&a.ty, &mut refs);
-                }
-                for e in fd.requires.iter().chain(fd.ensures.iter()) {
-                    collect_refs_expr(e, &mut refs);
-                }
-            }
-            DeclT::FnDefn(fd) => {
-                collect_type_refs(&fd.decl.ret_type, &mut refs);
-                for a in &fd.decl.args {
-                    collect_type_refs(&a.ty, &mut refs);
-                }
-                for e in fd.decl.requires.iter().chain(fd.decl.ensures.iter()) {
-                    collect_refs_expr(e, &mut refs);
-                }
-                for st in fd.body.iter() {
-                    collect_refs_stmt(st, &mut refs);
-                }
-            }
-            DeclT::LetDecl(ld) => {
-                collect_type_refs(&ld.ret_type, &mut refs);
-                for a in &ld.params {
-                    collect_type_refs(&a.ty, &mut refs);
-                }
-                for e in ld.requires.iter().chain(ld.ensures.iter()) {
-                    collect_refs_expr(e, &mut refs);
-                }
-                collect_refs_expr(&ld.body, &mut refs);
-            }
-            DeclT::GlobalVar(gv) => collect_type_refs(&gv.ty, &mut refs),
-            _ => {}
-        }
+        collect_decl_type_refs(d, true, &mut refs);
         for r in refs {
             if let Some(&j) = node_of_key.get(&r) {
                 if j != i {
@@ -823,17 +899,51 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
                 }
             }
         }
+        let mut refs = Vec::new();
+        match &d.val {
+            DeclT::Typedef(t) => collect_value_type_refs(&t.body, &mut refs),
+            DeclT::StructDefn(s) => {
+                collect_value_type_refs(&s.refines, &mut refs);
+                for f in &s.fields {
+                    collect_value_type_refs(&f.val.logical_type(&f.loc), &mut refs);
+                }
+            }
+            DeclT::UnionDefn(u) => {
+                for f in &u.fields {
+                    collect_value_type_refs(&f.val.logical_type(&f.loc), &mut refs);
+                }
+            }
+            _ => {
+                value_prereqs[i] = prereqs[i].clone();
+                continue;
+            }
+        }
+        for r in refs {
+            if let Some(&j) = node_of_key.get(&r)
+                && j != i
+            {
+                value_prereqs[i].push(j);
+            }
+        }
     }
 
     // Stable topological sort: repeatedly pick the lowest-indexed declaration
-    // whose prerequisites are already placed. On a dependency cycle (e.g.
-    // mutually pointer-referential structs), fall back to original order to
-    // avoid looping.
+    // whose prerequisites are already placed. Break pointer cycles only after
+    // satisfying by-value dependencies, and only at a node on the cycle:
+    // unrelated owners of that node must still wait for its representation.
+    // Keep a final source-order fallback for malformed cycles.
     let mut done = vec![false; n];
     let mut order: Vec<usize> = Vec::with_capacity(n);
     while order.len() < n {
         let picked = (0..n)
             .find(|&i| !done[i] && prereqs[i].iter().all(|&j| done[j]))
+            .or_else(|| {
+                (0..n).find(|&i| {
+                    !done[i]
+                        && value_prereqs[i].iter().all(|&j| done[j])
+                        && in_dependency_cycle(i, &prereqs, &done)
+                })
+            })
             .or_else(|| (0..n).find(|&i| !done[i]))
             .expect("at least one undone declaration");
         done[picked] = true;
@@ -846,5 +956,157 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
             .map(Some)
             .collect();
         tu.decls = order.into_iter().map(|i| old[i].take().unwrap()).collect();
+    }
+}
+
+/// Synthesize a `StructDecl` for every struct tag that is referenced but never
+/// declared or defined in this translation unit.
+///
+/// C lets a struct tag be introduced implicitly by its first use, so
+///
+/// ```c
+/// struct holder { struct opaque *p; };   // no `struct opaque;` anywhere
+/// ```
+///
+/// names a perfectly legal incomplete type. Clang only hands us a `RecordDecl`
+/// for a tag that appears in declaration position, so the implicit case
+/// produced no `StructDecl`, and `check` reported `unknown struct opaque`.
+///
+/// That diagnostic did not stop emission: `Struct_holder.fst` was still written
+/// out referring to `Struct_opaque.struct_opaque`, a module that was never
+/// created. Every consumer then failed with `Error 72: Module name
+/// Struct_opaque could not be resolved` -- which reads like a proof failure and
+/// is nothing of the kind. Real SDK headers often declare such pointer
+/// fields to a struct that is never declared anywhere else.
+///
+/// The treatment here is exactly the one an explicit `struct opaque;` already
+/// receives: an axiomatized placeholder module. An incomplete type cannot be
+/// used by value in C, so nothing is lost by having no layout for it, and
+/// making the implicit and explicit spellings agree is the whole of the fix.
+///
+/// Synthesized declarations go at the FRONT of the unit, before any use.
+/// `reorder_type_deps` runs afterwards and is free to move them.
+fn declare_implicit_structs(tu: &mut TranslationUnit) {
+    let mut known: HashSet<Rc<str>> = HashSet::new();
+    for decl in &tu.decls {
+        match &decl.val {
+            DeclT::StructDefn(d) => {
+                known.insert(d.name.val.clone());
+            }
+            DeclT::StructDecl(n) => {
+                known.insert(n.val.clone());
+            }
+            _ => {}
+        }
+    }
+
+    // `collect_type_refs` deliberately does not descend into `core_ref`
+    // pointers, which is right here too: a `core_ref` erases its pointee on
+    // emission, so it never names the module and needs no placeholder.
+    let mut refs: Vec<TypeKey> = Vec::new();
+    for decl in &tu.decls {
+        collect_decl_type_refs(decl, false, &mut refs);
+    }
+
+    let mut missing: Vec<Rc<str>> = Vec::new();
+    let mut seen: HashSet<Rc<str>> = HashSet::new();
+    for (ns, name) in refs {
+        if ns == STRUCT_NS && !known.contains(&name) && seen.insert(name.clone()) {
+            missing.push(name);
+        }
+    }
+
+    // Deterministic order: two runs over the same input must emit the same
+    // modules in the same order, or the per-image merge in a driver that
+    // compares outputs byte-for-byte will see spurious disagreements.
+    missing.sort();
+
+    // A unit with no declarations cannot reference a struct, so `missing` is
+    // empty here and the loop does not run.
+    let Some(loc) = tu.decls.first().map(|d| d.loc.clone()) else {
+        return;
+    };
+
+    for name in missing.into_iter().rev() {
+        let ident = Rc::new(Ast {
+            val: name,
+            loc: loc.clone(),
+        });
+        tu.decls.insert(
+            0,
+            Ast {
+                loc: loc.clone(),
+                val: DeclT::StructDecl(ident),
+            },
+        );
+    }
+}
+
+/// Collect every type a declaration mentions: its own types, the types in its
+/// specification clauses, and (for a definition) the types in its body.
+///
+/// Extracted so `reorder_type_deps` and `declare_implicit_structs` cannot drift
+/// apart. They ask the same question -- which types does this declaration name
+/// -- and a tag missed here becomes a dangling module reference in one pass or
+/// a bad emission order in the other.
+fn collect_decl_type_refs(d: &Decl, skip_plain_ptrs: bool, refs: &mut Vec<TypeKey>) {
+    match &d.val {
+        DeclT::Typedef(t) => collect_type_refs(&t.body, refs),
+        DeclT::StructDefn(s) => {
+            collect_type_refs(&s.refines, refs);
+            for f in &s.fields {
+                let fty = f.val.logical_type(&f.loc);
+                // A pointer field's F* type is `ptr`, so the only reason a
+                // struct has to follow the one it points at is the ownership
+                // predicate -- and a `_plain` pointer has none. Dropping the
+                // edge is what lets a pair of mutually referential structs be
+                // emitted at all.
+                if skip_plain_ptrs && is_plain_ptr(&fty) {
+                    continue;
+                }
+                collect_type_refs(&fty, refs);
+            }
+        }
+        DeclT::UnionDefn(u) => {
+            for f in &u.fields {
+                collect_type_refs(&f.val.logical_type(&f.loc), refs);
+            }
+        }
+        // Functions, globals and let-definitions also reference type
+        // predicates (via their signature types) when emitting specs, so
+        // they must follow the type definitions they mention.
+        DeclT::FnDecl(fd) => {
+            collect_type_refs(&fd.ret_type, refs);
+            for a in &fd.args {
+                collect_type_refs(&a.ty, refs);
+            }
+            for e in fd.requires.iter().chain(fd.ensures.iter()) {
+                collect_refs_expr(e, refs);
+            }
+        }
+        DeclT::FnDefn(fd) => {
+            collect_type_refs(&fd.decl.ret_type, refs);
+            for a in &fd.decl.args {
+                collect_type_refs(&a.ty, refs);
+            }
+            for e in fd.decl.requires.iter().chain(fd.decl.ensures.iter()) {
+                collect_refs_expr(e, refs);
+            }
+            for st in fd.body.iter() {
+                collect_refs_stmt(st, refs);
+            }
+        }
+        DeclT::LetDecl(ld) => {
+            collect_type_refs(&ld.ret_type, refs);
+            for a in &ld.params {
+                collect_type_refs(&a.ty, refs);
+            }
+            for e in ld.requires.iter().chain(ld.ensures.iter()) {
+                collect_refs_expr(e, refs);
+            }
+            collect_refs_expr(&ld.body, refs);
+        }
+        DeclT::GlobalVar(gv) => collect_type_refs(&gv.ty, refs),
+        _ => {}
     }
 }

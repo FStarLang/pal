@@ -1,0 +1,46 @@
+#include "pal.h"
+#include <stdint.h>
+#include <stddef.h>
+
+// ===========================================================================
+// `_array` / `_arrayptr` through a pointer typedef.
+//
+// C codebases commonly name pointers with a typedef (`typedef E* PE;`). The
+// pointer-kind attributes classify the *pointer*, so PAL desugars a typedef
+// that resolves to a pointer before applying them. Without that, `PE` is an
+// opaque type reference and the attribute has nothing to attach to.
+// ===========================================================================
+
+typedef struct _E
+{
+    uint16_t a;
+    uint16_t b;
+} E;
+
+typedef E* PE;
+typedef const E* PCE;
+
+// The classic bounds-checked table accessor: the caller owns `table`, the
+// index is in bounds, and the result is a live pointer to cell `idx`.
+_arrayptr PE get_entry(_array PE table, uint32_t count, uint32_t idx)
+  _requires(table._length == count && idx < count)
+  /* A pointer is an address here, so an interior pointer is arithmetic and
+     there is no separate `arrayptr` predicate to relate it to the array: the
+     cell's address *is* the base plus the index, scaled by the element size.
+     The caller keeps the array's ownership throughout. */
+  _ensures(_inline_pulse(
+      pure ($(return) == $(table) +! ($(sizeof(E)) `SizeT.mul` sizet_of_uint32 $(idx)))))
+{
+    _arrayptr PE entry = NULL;
+
+    entry = &table[idx];
+
+    return entry;
+}
+
+// The same desugaring applies to a const-qualified pointer typedef.
+uint16_t read_first(_array PCE table)
+  _requires(table._length > 0)
+{
+    return table[0].a;
+}

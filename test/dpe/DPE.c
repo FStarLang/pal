@@ -4,12 +4,16 @@
 #include "DPE.h"
 #include "EngineCore.h"
 
+// Palow spelling. An array's value in Palow is the sequence of the elements
+// themselves; `option` is how the old model records which cells are still
+// uninitialised, and Palow says that with a separate `maybe_repr` view of the
+// same storage rather than inside the value.
 _include_pulse(DPE_context_full_data,
   $declare(context_t s)
   [@@erasable]
   noeq type context_full_data =
-    | PL_Engine of (Seq.seq (option UInt8.t))
-    | PL_L0 of (Seq.seq (option UInt8.t))
+    | PL_Engine of (Seq.seq UInt8.t)
+    | PL_L0 of (Seq.seq UInt8.t)
     | PL_L1 // tbd
 )
 
@@ -24,24 +28,26 @@ _let(bool tag_relation(context_t s, context_full_data h),
     | 2uy -> $(s.payload.l1_context._active) /\ PL_L1? $(h)
     | _ -> False))
 
+// The same two predicates in Palow. A `_array uint8_t *` is a `ptr`, its
+// ownership is `array_pts_to` over the byte representation, and `freeable`
+// names how much storage has to be handed back -- which the old model's
+// `freeable_array` leaves to the array object to remember.
 _include_pulse(DPE_predicates0,
   $declare(context_t s)
   $declare(context_full_data h)
   open DPE_context_full_data
 
   [@@pulse_eager_unfold]
-  let uds_pred (uds: $type(uds_array)) (uds_data: Seq.seq (option UInt8.t)) : slprop =
-    exists* (aspec: full_array_spec UInt8.t).
-      Typedef_uds_array.ty_uds_array__pred uds 1.0R aspec **
-      pure (array_spec_seq aspec == uds_data) **
-      freeable_array uds
+  let uds_pred (uds: $type(uds_array)) (uds_data: Seq.seq UInt8.t) : slprop =
+    array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) uds 1.0R uds_data **
+    pure (Seq.length uds_data == 32) **
+    freeable uds 32sz
 
   [@@pulse_eager_unfold]
-  let cdi_pred (cdi: $type(dice_digest)) (cdi_data: Seq.seq (option UInt8.t)) : slprop =
-    exists* (aspec: full_array_spec UInt8.t).
-      Typedef_dice_digest.ty_dice_digest__pred cdi 1.0R aspec **
-      pure (array_spec_seq aspec == cdi_data) **
-      freeable_array cdi
+  let cdi_pred (cdi: $type(dice_digest)) (cdi_data: Seq.seq UInt8.t) : slprop =
+    array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) cdi 1.0R cdi_data **
+    pure (Seq.length cdi_data == 64) **
+    freeable cdi 64sz
 )
 
 _let(_slprop context_full_pred(context_t s, context_full_data h),
@@ -114,10 +120,15 @@ _include_pulse(DPE_predicates,
   }
 )
 
-void memcpy_(size_t len, _array const uint8_t *a1, _out _array uint8_t *a2)
-  _preserves(a1._length == len)
-  _preserves(a2._length == len)
-  _ensures((bool) _inline_pulse(array_value_of $(a2) == array_value_of $(a1)))
+// Palow: same story as `compare` in EngineCore.c -- the value of an array is a
+// binder in the contract rather than something read off the pointer, so the
+// ownership is spelled by hand and `a2` ends up holding `a1`'s sequence.
+void memcpy_(size_t len, _plain _array const uint8_t *a1, _plain _out _array uint8_t *a2)
+  _preserves(_inline_pulse(array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) $(a1) $`p_a1 $`v_a1))
+  _requires(_inline_pulse(array_pts_to (maybe_repr uint8_t_repr 1) 1 (SizeT.v uint8_t_alignof) $(a2) 1.0R $`v_a2))
+  _requires((bool) _inline_pulse(Seq.length $`v_a1 == SizeT.v $(len)))
+  _requires((bool) _inline_pulse(Seq.length $`v_a2 == SizeT.v $(len)))
+  _ensures(_inline_pulse(array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) $(a2) 1.0R $`v_a1))
 {
   _ghost_stmt(admit());
 }
@@ -129,12 +140,28 @@ typedef context_t *context_obj;
 _letimpure(context_full_data engine_state(const context_obj ctx),
   _inline_pulse(observe (fun h -> $(context_full_pred(*ctx, _inline_pulse(h))))))
 
-_allocated context_obj init_engine_context(const uds_array uds)
-  _ensures((bool) _inline_pulse(DPE_predicates.engine_state $(*return) == DPE_context_full_data.PL_Engine (array_value_of $(uds))))
+// Palow: `DPE_predicates` is hand-written Pulse this model does not translate,
+// so the state of a context is named through the `_letimpure` accessor -- the
+// binder the handle's own `_refine_value` quantifies over -- rather than
+// through a ghost function. The array's value is a binder too, which is why
+// `uds` is spelled out with `_plain`.
+// Two allocations, either of which can fail, so the Palow spelling returns a
+// `_nullable` handle and the grant it makes is under that guard.
+_nullable _allocated context_obj init_engine_context(_plain const _array uint8_t *uds)
+  _preserves(_inline_pulse(array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) $(uds) $`p_uds $`v_uds))
+  _requires((bool) _inline_pulse(Seq.length $`v_uds == 32))
+  _ensures((bool) _inline_pulse($(engine_state(return)) == DPE_context_full_data.PL_Engine $`v_uds))
 {
   uint8_t *uds_buf = (uint8_t*)malloc(UDS_LEN * sizeof(uint8_t));
+  if (uds_buf == NULL) {
+    return NULL;
+  }
   memcpy_(UDS_LEN, uds, uds_buf);
   context_t *ctx = (context_t*)malloc(sizeof(context_t));
+  if (ctx == NULL) {
+    free(uds_buf);
+    return NULL;
+  }
   *ctx = (context_t) {
     .tag = ENGINE_CONTEXT,
     .payload = (u_context_t) { .uds = uds_buf },
@@ -143,21 +170,24 @@ _allocated context_obj init_engine_context(const uds_array uds)
   return ctx;
 }
 
-_include_pulse (DPE_ghost_helpers,
-  ghost fn elim_maybe_true (p:slprop)
-  requires maybe _true_ p
-  ensures p
-  { unfold maybe; }
-)
 
 _let(bool is_pl_engine(context_full_data state), _inline_pulse(DPE_context_full_data.PL_Engine? $(state)))
 _let(bool is_pl_l0(context_full_data state), _inline_pulse(DPE_context_full_data.PL_L0? $(state)))
 
-void init_l0_context(context_obj ctx, const dice_digest cdi)
+// Palow's allocator can fail, and a `void` function has no way to say so, so
+// the Palow spelling reports the failure the way `derive_child_from_context`
+// does: a boolean result, with the state left alone when it is false.
+bool init_l0_context(context_obj ctx, _plain const _array uint8_t *cdi)
+  _preserves(_inline_pulse(array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) $(cdi) $`p_cdi $`v_cdi))
+  _requires((bool) _inline_pulse(Seq.length $`v_cdi == 64))
   _requires(is_pl_engine(engine_state(ctx)))
-  _ensures((bool) _inline_pulse(DPE_predicates.engine_state $(*ctx) == DPE_context_full_data.PL_L0 (array_value_of $(cdi))))
+  _ensures(return ==> (bool) _inline_pulse($(engine_state(ctx)) == DPE_context_full_data.PL_L0 $`v_cdi))
+  _ensures(!return ==> (bool) _inline_pulse($(engine_state(ctx)) == $(_old(engine_state(ctx)))))
 {
   uint8_t *cdi_buf = (uint8_t*)malloc(DICE_DIGEST_LEN * sizeof(uint8_t));
+  if (cdi_buf == NULL) {
+    return false;
+  }
   memcpy_(DICE_DIGEST_LEN, cdi, cdi_buf);
   _ghost_stmt(DPE_predicates.elim_context_full_pred_uds $(*ctx));
   uint8_t* uds_buf = ctx->payload.uds;
@@ -165,7 +195,7 @@ void init_l0_context(context_obj ctx, const dice_digest cdi)
   ctx->tag = 1;
   ctx->payload.cdi = cdi_buf;
   _ghost_stmt(DPE_predicates.intro_context_full_pred_cdi $(*ctx));
-  return;
+  return true;
 }
 
 void destroy_uds_context(_consumes _allocated context_obj ctx)
@@ -178,11 +208,12 @@ void destroy_uds_context(_consumes _allocated context_obj ctx)
   return;
 }
 
-void mk_l0_context(context_obj ctx, _consumes _allocated_array dice_digest cdi)
+void mk_l0_context(context_obj ctx, _plain _consumes _array uint8_t *cdi)
+  _requires(_inline_pulse(array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) $(cdi) 1.0R $`v_cdi ** freeable $(cdi) 64sz))
+  _requires((bool) _inline_pulse(Seq.length $`v_cdi == 64))
   _requires(ctx->tag == 0)
-  _ensures((bool) _inline_pulse(DPE_predicates.engine_state $(*ctx) == DPE_context_full_data.PL_L0 (old (array_value_of $(cdi)))))
+  _ensures((bool) _inline_pulse($(engine_state(ctx)) == DPE_context_full_data.PL_L0 $`v_cdi))
 {
-  _assert(cdi._length == DICE_DIGEST_LEN);
   _ghost_stmt(DPE_predicates.elim_context_full_pred_uds $(*ctx));
   uint8_t* uds_buf = ctx->payload.uds;
   free(uds_buf);
@@ -194,10 +225,16 @@ void mk_l0_context(context_obj ctx, _consumes _allocated_array dice_digest cdi)
 bool derive_child_from_context(context_obj ctx, const engine_record_t *record)
   _requires(ctx->tag == 0)
   _ensures(return ==> is_pl_l0(engine_state(ctx)))
-  _ensures(!return ==> (bool) _inline_pulse(DPE_predicates.engine_state $(*ctx) == old (DPE_predicates.engine_state $(*ctx))))
+  _ensures(!return ==> (bool) _inline_pulse($(engine_state(ctx)) == $(_old(engine_state(ctx)))))
 {
   _ghost_stmt(DPE_predicates.elim_context_full_pred_uds $(*ctx));
   uint8_t *cdi_buf = (uint8_t*)calloc(DICE_DIGEST_LEN, sizeof(uint8_t));
+  // Allocation can fail, and the context is untouched when it does, which is
+  // exactly what the `!return` postcondition promises.
+  if (cdi_buf == NULL) {
+    _ghost_stmt(DPE_predicates.intro_context_full_pred_uds $(*ctx));
+    return false;
+  }
   _assert(cdi_buf._length == DICE_DIGEST_LEN);
   bool ok = engine_main(cdi_buf, ctx->payload.uds, record);
   if (ok) {

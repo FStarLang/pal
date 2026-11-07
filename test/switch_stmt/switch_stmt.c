@@ -46,6 +46,80 @@ int32_t classify(int32_t x)
     return r;
 }
 
+/* The final group shares its body between a named case and default. */
+int32_t default_stacked_last(int32_t x)
+    _ensures(x == 0 ==> return == 10)
+    _ensures(x == 1 ==> return == 20)
+    _ensures((x != 0 && x != 1) ==> return == 20)
+{
+    int32_t result = 0;
+    switch (x) {
+    case 0:
+        result = 10;
+        break;
+    case 1:
+    default:
+        result = 20;
+        break;
+    }
+    return result;
+}
+
+/* Annotated terminal-break dispatch uses the shared body as its wildcard. */
+_ghost_arg(int32_t input)
+int32_t default_stacked_match(int32_t x)
+    _requires(x == input)
+    _ensures(input == 0 ==> return == 10)
+    _ensures(input != 0 ==> return == 20)
+{
+    int32_t result = 0;
+    switch (x)
+        _ensures(_live(x) && _live(result))
+        _ensures(input == 0 ==> result == 10)
+        _ensures(input != 0 ==> result == 20)
+    {
+    case 0:
+        result = 10;
+        break;
+    case 1:
+    case 2:
+    default:
+        result = 20;
+        break;
+    }
+    return result;
+}
+
+int32_t default_stacked_returns(int32_t x)
+    _ensures(x == 0 ==> return == 10)
+    _ensures(x != 0 ==> return == 20)
+{
+    switch (x) {
+    case 0:
+        return 10;
+    case 1:
+    default:
+        return 20;
+    }
+}
+
+/* Falling through an earlier case executes the shared default body once. */
+int32_t default_stacked_fallthrough(int32_t x)
+    _ensures(x == 0 ==> return == 30)
+    _ensures(x != 0 ==> return == 20)
+{
+    int32_t result = 0;
+    switch (x) {
+    case 0:
+        result = 10;
+    case 1:
+    default:
+        result = result + 20;
+        break;
+    }
+    return result;
+}
+
 /* A genuine fall-through switch retains the general switch encoding. */
 int32_t accumulate_with_fallthrough(int32_t x)
     _requires(x == 0 || x == 1)
@@ -64,8 +138,51 @@ int32_t accumulate_with_fallthrough(int32_t x)
 }
 
 static void write_result(int32_t* _out result)
+    _ensures(*result == 42)
 {
     *result = 42;
+}
+
+void dispatch_output(int32_t version, int32_t* _out result)
+    _requires(version == 1)
+    _ensures(*result == 42)
+{
+    switch (version) {
+    case 1:
+        write_result(result);
+        break;
+    default:
+        _assert(0);
+        break;
+    }
+}
+
+void grouped_outputs(int32_t version, int32_t* _out result)
+    _ensures((version == 1 || version == 2) ==> *result == 42)
+    _ensures((version != 1 && version != 2) ==> *result == 7)
+{
+    switch (version) {
+    case 1:
+    case 2:
+        *result = 42;
+        break;
+    default:
+        *result = 7;
+        break;
+    }
+}
+
+int32_t one_case_without_default(int32_t version)
+    _ensures(version == 1 ==> return == 42)
+    _ensures(version != 1 ==> return == 7)
+{
+    int32_t result = 7;
+    switch (version) {
+    case 1:
+        result = 42;
+        break;
+    }
+    return result;
 }
 
 /* An annotated match preserves resources across a potentially divergent call. */

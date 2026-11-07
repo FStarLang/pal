@@ -1,0 +1,4 @@
+variant_body
+variant_contract
+private_read
+addressed

@@ -1,0 +1,107 @@
+name: PR Output Diff Command
+
+# Lets a reviewer generate the generated-output diff on demand by commenting
+# `!diff` on a pull request.
+#
+# The report is produced by dispatching the "PR Output Diff" workflow. GitHub
+# does not emit `workflow_run` events for runs started with the GITHUB_TOKEN,
+# so this workflow waits for the dispatched run itself and then calls the
+# comment workflow directly rather than relying on that trigger.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  dispatch:
+    if: >-
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '!diff')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      run_id: ${{ steps.run.outputs.run_id }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR: ${{ github.event.issue.number }}
+      REPO: ${{ github.repository }}
+      COMMENT: ${{ github.event.comment.id }}
+      SERVER: ${{ github.server_url }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Acknowledge the command
+        run: |
+          gh api -X POST "repos/$REPO/issues/comments/$COMMENT/reactions" \
+            -f content=eyes >/dev/null
+
+      - name: Dispatch the output diff workflow
+        id: run
+        run: |
+          set -euo pipefail
+
+          # Run ids increase monotonically, so the run we are about to create
+          # is the first one newer than the latest existing run.
+          before=$(gh run list -R "$REPO" --workflow pr-output-diff.yml \
+            --limit 1 --json databaseId --jq '.[0].databaseId // 0')
+          gh workflow run pr-output-diff.yml -R "$REPO" -f pr="$PR"
+
+          # `gh workflow run` does not report the run it created, so look it up
+          # by the run name that the dispatched workflow sets.
+          title="Output diff for pull request #$PR"
+          run_id=""
+          for _ in $(seq 1 40); do
+            sleep 5
+            run_id=$(gh run list -R "$REPO" --workflow pr-output-diff.yml \
+              --event workflow_dispatch --limit 20 \
+              --json databaseId,displayTitle \
+              --jq "[.[] | select(.displayTitle == \"$title\" and .databaseId > $before)]
+                    | first | .databaseId // empty")
+            [ -n "$run_id" ] && break
+          done
+
+          if [ -z "$run_id" ]; then
+            echo "error: the dispatched run never showed up" >&2
+            exit 1
+          fi
+
+          echo "waiting for $SERVER/$REPO/actions/runs/$run_id"
+          gh run watch "$run_id" -R "$REPO" --interval 20 >/dev/null || true
+
+          conclusion=$(gh run view "$run_id" -R "$REPO" --json conclusion --jq .conclusion)
+          echo "run $run_id finished: $conclusion"
+          if [ "$conclusion" != "success" ]; then
+            echo "reported=true" >>"$GITHUB_OUTPUT"
+            gh pr comment "$PR" -R "$REPO" --body \
+              "The [\`PR Output Diff\` run]($SERVER/$REPO/actions/runs/$run_id) $conclusion, so there is no diff to report."
+            exit 1
+          fi
+
+          echo "run_id=$run_id" >>"$GITHUB_OUTPUT"
+
+      - name: Confirm
+        run: |
+          gh api -X POST "repos/$REPO/issues/comments/$COMMENT/reactions" \
+            -f content=rocket >/dev/null
+
+      - name: Report failure
+        if: failure() && steps.run.outputs.reported != 'true'
+        run: |
+          gh pr comment "$PR" -R "$REPO" --body \
+            "Sorry, I couldn't run the \`PR Output Diff\` workflow. See [the logs]($RUN_URL) for details."
+
+  comment:
+    needs: dispatch
+    if: needs.dispatch.outputs.run_id != ''
+    uses: ./.github/workflows/pr-output-diff-comment.yml
+    with:
+      run_id: ${{ needs.dispatch.outputs.run_id }}
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    secrets: inherit

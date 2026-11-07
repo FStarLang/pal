@@ -1,10 +1,12 @@
 #include "generated.h"
+#include "clang/AST/RecordLayout.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Lex/MacroArgs.h"
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
 #include <dlfcn.h>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <unordered_set>
@@ -50,6 +52,23 @@ static bool hasTopLevelContinue(const Stmt *s) {
     return false;
   for (const Stmt *child : s->children())
     if (hasTopLevelContinue(child))
+      return true;
+  return false;
+}
+
+// A `break` that would bind to the enclosing do-while. Unlike `continue`, a
+// `break` also binds to a `switch`, so a switch is a boundary here and is not
+// one above.
+static bool hasTopLevelBreak(const Stmt *s) {
+  if (!s)
+    return false;
+  if (isa<BreakStmt>(s))
+    return true;
+  if (isa<ForStmt>(s) || isa<WhileStmt>(s) || isa<DoStmt>(s) ||
+      isa<SwitchStmt>(s))
+    return false;
+  for (const Stmt *child : s->children())
+    if (hasTopLevelBreak(child))
       return true;
   return false;
 }
@@ -195,8 +214,65 @@ public:
   std::unordered_map<RecordDecl *, std::string>
       structNames; // map record decls to generated struct names
   Expr *forLoopIncrement = nullptr;
+
+  // Where a statement expression used as an rvalue may put the statements
+  // ahead of its value, or null if there is nowhere to put them.
+  //
+  // Set only by trStmt, and only for a position that is genuinely a statement
+  // context evaluated exactly once: a declaration's initializer, and the
+  // right-hand side of an assignment statement. It is cleared again around any
+  // operand that C evaluates conditionally -- ?:'s arms, &&'s and ||'s right
+  // operand -- where running the statements unconditionally would change the
+  // program. See the StmtExpr arm in trRValue.
+  Vec<Rc<ir::Stmt>> *hoistTarget = nullptr;
+
+  // Clears hoistTarget for the extent of a conditionally-evaluated operand.
+  struct NoHoist {
+    Vec<Rc<ir::Stmt>> **slot;
+    Vec<Rc<ir::Stmt>> *saved;
+    explicit NoHoist(Vec<Rc<ir::Stmt>> **s) : slot(s), saved(*s) {
+      *slot = nullptr;
+    }
+    ~NoHoist() { *slot = saved; }
+  };
   // When inside a switch desugaring, break sets this flag instead of mk_break
   Rc<ir::Ident> *switchBreakId = nullptr;
+
+  // The arm a `?:` actually takes, when clang can decide the condition at
+  // compile time, or null when it cannot.
+  //
+  // C evaluates exactly one arm of a conditional, so when the condition is a
+  // constant the program IS that arm and nothing else. Translating the whole
+  // conditional is not merely wasteful, it is wrong in the way that matters
+  // here: the arm that is never taken is often not meant to be compiled at
+  // all. Generated RPC-stub headers can wrap every call argument in
+  // a test like
+  //
+  //   (__builtin_classify_type(x) == 12 || __builtin_classify_type(x) == 13)
+  //       ? ERROR__Struct_or_union_arguments_not_allowed_in_call()
+  //       : (uint64_t)(x)
+  //
+  // where the error function is declared and deliberately never defined, so
+  // that a struct argument fails to link. Once the classify_type calls fold,
+  // the condition is `1 == 12 || 1 == 13` and the dead arm is a call to a
+  // function PAL has no body for -- which, before this, both introduced an
+  // admitted module and made the conditional ill-typed, since the two arms'
+  // types agree in C but not after PAL maps a typedef and its underlying type
+  // to different F* names ("The branches of a conditional must return the same
+  // type: Typedef_uint64_t.ty_uint64_t and UInt64.t").
+  //
+  // Requiring the condition to be side-effect free is what makes dropping it
+  // sound: `f() ? a : b` must still call f. HasSideEffects is asked
+  // separately from the evaluation because EvaluateAsBooleanCondition has no
+  // equivalent of EvaluateAsInt's SE_NoSideEffects.
+  Expr *constantCondArm(const ConditionalOperator *co) {
+    bool val = false;
+    if (co->getCond()->HasSideEffects(*astCtx) ||
+        !co->getCond()->EvaluateAsBooleanCondition(val, *astCtx)) {
+      return nullptr;
+    }
+    return val ? co->getTrueExpr() : co->getFalseExpr();
+  }
 
   // TODO: should probably wait with translation until after parsing
 
@@ -206,6 +282,137 @@ public:
     ctx.set_target_int_widths(
         TargetIntWidths(TI.getCharWidth(), TI.getShortWidth(), TI.getIntWidth(),
                         TI.getLongWidth(), TI.getLongLongWidth()));
+    ctx.set_pointer_size(TI.getPointerWidth(LangAS::Default) / 8);
+    ctx.set_little_endian(TI.isLittleEndian());
+    // `max_align_t` is clang's `struct { long long; long double; }` (or
+    // `double` where `long double` is `double`), each member at its preferred
+    // alignment.
+    ctx.set_max_align(
+        std::max(
+            Context.getPreferredTypeAlign(Context.LongLongTy.getTypePtr()),
+            Context.getPreferredTypeAlign(Context.LongDoubleTy.getTypePtr())) /
+        TI.getCharWidth());
+    ctx.set_linkage_context(toStr(StringRef(TI.getDataLayoutString())));
+  }
+
+  // Layout `kind` tags shared with `Ctx::set_type_layout` on the Rust side.
+  static constexpr uint32_t kLayoutTypedef = 0;
+  static constexpr uint32_t kLayoutStruct = 1;
+  static constexpr uint32_t kLayoutUnion = 2;
+
+  // Report the target-ABI size and alignment of `qt` under the name PAL uses
+  // for it, so that the emitter can turn `sizeof`/`_Alignof` into concrete
+  // `SizeT` literals rather than opaque `c_sizeof` applications.
+  void recordTypeLayout(uint32_t kind, StringRef name, QualType qt) {
+    if (qt.isNull() || qt->isIncompleteType() || qt->isDependentType() ||
+        qt->isVariableArrayType())
+      return;
+    ctx.set_type_layout(kind, toStr(name),
+                        astCtx->getTypeSizeInChars(qt).getQuantity(),
+                        astCtx->getTypeAlignInChars(qt).getQuantity());
+  }
+
+  // Report the offset of every field of `decl`. A bit-field has no byte
+  // offset of its own -- several of them share one storage unit -- so it is
+  // reported in bits instead, and the emitter works out which bytes the unit
+  // covers.
+  void recordFieldOffsets(uint32_t kind, StringRef name, RecordDecl *decl) {
+    auto const &layout = astCtx->getASTRecordLayout(decl);
+    for (auto *f : decl->fields()) {
+      auto bitOffset = layout.getFieldOffset(f->getFieldIndex());
+      if (f->isBitField()) {
+        ctx.set_field_bit_offset(kind, toStr(name), toStr(fieldNameStr(f)),
+                                 bitOffset);
+        continue;
+      }
+      if (bitOffset % astCtx->getCharWidth() != 0)
+        continue;
+      ctx.set_field_offset(kind, toStr(name), toStr(fieldNameStr(f)),
+                           bitOffset / astCtx->getCharWidth());
+    }
+  }
+
+  bool isLinkerAlias(const Decl *d) {
+    return d->hasAttr<AsmLabelAttr>() || d->hasAttr<AliasAttr>() ||
+           d->hasAttr<IFuncAttr>() || d->hasAttr<WeakRefAttr>();
+  }
+
+  void collectLinkage(DeclContext *dc) {
+    for (auto *d : dc->decls()) {
+      if (d->isInvalidDecl())
+        continue;
+      auto *function = dyn_cast<FunctionDecl>(d);
+      auto *object = dyn_cast<VarDecl>(d);
+      if ((function || object) && isLinkerAlias(d) &&
+          (astCtx->getSourceManager().isWrittenInMainFile(
+               astCtx->getSourceManager().getExpansionLoc(d->getLocation())) ||
+           (function && function->doesThisDeclarationHaveABody()) ||
+           (object && object->isThisDeclarationADefinition() !=
+                          VarDecl::DeclarationOnly)))
+        ctx.report_diag(getRange(d->getSourceRange()), true,
+                        "unsupported linker symbol alias"_rs);
+      if (auto *fd = dyn_cast<FunctionDecl>(d)) {
+        // These anchors emit Pulse/type declarations, not C functions.
+        bool anchor = false;
+        for (auto *attr : fd->specific_attrs<AnnotateAttr>()) {
+          auto name = attr->getAnnotation();
+          anchor |= name == "pal-type" || name == "pal-includes" ||
+                    name == "pal-let" || name == "pal-let-rec" ||
+                    name == "pal-letimpure";
+        }
+        if (anchor)
+          continue;
+        ctx.add_c_symbol(toStr(fd->getName()), 0,
+                         toStr(fd->getType().getCanonicalType().getAsString()),
+                         !fd->hasExternalFormalLinkage(),
+                         fd->doesThisDeclarationHaveABody(), fd->isInlined(),
+                         getRange(fd->getSourceRange()));
+      } else if (auto *vd = dyn_cast<VarDecl>(d); vd && vd->isFileVarDecl()) {
+        ctx.add_c_symbol(toStr(vd->getName()), 1,
+                         toStr(vd->getType().getCanonicalType().getAsString()),
+                         !vd->hasExternalFormalLinkage(),
+                         vd->isThisDeclarationADefinition() !=
+                             VarDecl::DeclarationOnly,
+                         false, getRange(vd->getSourceRange()));
+      } else if (auto *rd = dyn_cast<RecordDecl>(d);
+                 rd && rd->isCompleteDefinition()) {
+        if (rd->getIdentifier()) {
+          const auto &layout = astCtx->getASTRecordLayout(rd);
+          std::string signature =
+              std::to_string(layout.getSize().getQuantity()) + ":" +
+              std::to_string(layout.getAlignment().getQuantity());
+          for (auto *field : rd->fields()) {
+            signature +=
+                "|" + fieldNameStr(field) + ":" +
+                field->getType().getCanonicalType().getAsString() + ":" +
+                std::to_string(layout.getFieldOffset(field->getFieldIndex()));
+            if (field->isBitField())
+              signature += ":" + std::to_string(field->getBitWidthValue());
+          }
+          ctx.add_c_symbol(toStr(rd->getName()), rd->isUnion() ? 3 : 2,
+                           toStr(signature), false, false, false,
+                           getRange(rd->getSourceRange()));
+        }
+        collectLinkage(rd);
+      } else if (auto *td = dyn_cast<TypedefNameDecl>(d)) {
+        ctx.add_c_symbol(
+            toStr(td->getName()), 4,
+            toStr(td->getUnderlyingType().getCanonicalType().getAsString()),
+            false, false, false, getRange(td->getSourceRange()));
+      } else if (auto *ed = dyn_cast<EnumDecl>(d)) {
+        for (auto *constant : ed->enumerators()) {
+          SmallString<32> value;
+          constant->getInitVal().toString(value, 10);
+          ctx.add_c_symbol(toStr(constant->getName()), 5,
+                           toStr(StringRef(value)), false, false, false,
+                           getRange(constant->getSourceRange()));
+        }
+      }
+    }
+  }
+
+  void HandleTranslationUnit(ASTContext &Context) override {
+    collectLinkage(Context.getTranslationUnitDecl());
   }
 
   virtual bool HandleTopLevelDecl(DeclGroupRef DG) override {
@@ -217,7 +424,17 @@ public:
   Rc<ir::Ident> getDeclName(NamedDecl *d) {
     auto loc = mk_fallback_sourceinfo(
         getRange(d->getSourceRange())); // TODO: get range of name token
-    return ctx.mk_ident(toStr(d->getName()), std::move(loc));
+    return symbolIdent(d, std::move(loc), false);
+  }
+
+  Rc<ir::Ident> symbolIdent(NamedDecl *d, Rc<ir::SourceInfo> loc,
+                            bool reference = true) {
+    if (reference && isLinkerAlias(d))
+      ctx.report_diag(loc.clone(), true, "unsupported linker symbol alias"_rs);
+    bool internal = isa<FunctionDecl>(d) && !d->hasExternalFormalLinkage();
+    if (auto *vd = dyn_cast<VarDecl>(d))
+      internal = vd->isFileVarDecl() && !vd->hasExternalFormalLinkage();
+    return ctx.mk_symbol_ident(toStr(d->getName()), internal, std::move(loc));
   }
 
   // Name to use for a struct/union field. Unnamed fields (e.g. C11 anonymous
@@ -311,7 +528,8 @@ public:
           ctx.mk_ident(toStr(fieldNameStr(f)), std::move(floc)),
           trTypeAttrs(f->getAttrs(),
                       trQualType(f->getType(), f->getSourceRange(), liftStructs,
-                                 findFnProtoTypeLoc(f->getTypeSourceInfo()))));
+                                 findFnProtoTypeLoc(f->getTypeSourceInfo())),
+                      f->getType(), f->getSourceRange()));
     }
   }
 
@@ -358,6 +576,9 @@ public:
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/false);
       }
+      recordTypeLayout(kLayoutStruct, toStringRef(ident_name(ident)),
+                       astCtx->getRecordType(decl));
+      recordFieldOffsets(kLayoutStruct, toStringRef(ident_name(ident)), decl);
       ctx.add_struct(std::move(builder));
     } else if (decl->getTagKind() == TagTypeKind::Union) {
       // Process nested record declarations (inner structs/unions)
@@ -375,6 +596,8 @@ public:
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/true);
       }
+      recordTypeLayout(kLayoutUnion, toStringRef(ident_name(ident)),
+                       astCtx->getRecordType(decl));
       ctx.add_union(std::move(builder));
     } else {
       reportUnsupported(decl->getSourceRange(), loc, "unsupported record kind",
@@ -522,11 +745,41 @@ public:
     return mk_type_err(std::move(loc));
   }
 
+  // `_array`, `_arrayptr` and `_core_ref` reclassify a *pointer*. When the
+  // declared type only reaches the pointer through a typedef (e.g.
+  // `typedef E* PE;`), the translated type is an opaque type reference and the
+  // classification has nothing to attach to. Desugar to the underlying pointer
+  // type in that case so the attribute applies to the pointer it names.
+  static bool isPointerKindAttr(AnnotateAttr *ann) {
+    if (ann->args_size() != 0)
+      return false;
+    auto name = ann->getAnnotation();
+    return name == "pal-array" || name == "pal-arrayptr" ||
+           name == "pal-core-ref";
+  }
+
+  Rc<ir::Type> desugarPointerTypedef(Rc<ir::Type> &&ty, QualType declQt,
+                                     SourceRange declRange) {
+    if (declQt.isNull())
+      return std::move(ty);
+    auto qt = declQt.IgnoreParens();
+    auto ptr = qt->getAs<PointerType>();
+    if (!ptr || isa<PointerType>(qt.getTypePtr()))
+      return std::move(ty);
+    return trQualType(astCtx->getPointerType(ptr->getPointeeType()), declRange);
+  }
+
   Rc<ir::Type> trTypeAttrs(AttrVec const &attrs, Rc<ir::Type> &&ty,
                            QualType declQt = QualType(),
                            SourceRange declRange = SourceRange()) {
-    (void)declQt;
-    (void)declRange;
+    for (auto attr : attrs) {
+      if (auto ann = dyn_cast<AnnotateAttr>(attr)) {
+        if (isPointerKindAttr(ann)) {
+          ty = desugarPointerTypedef(std::move(ty), declQt, declRange);
+          break;
+        }
+      }
+    }
     bool sawNullable = false;
     std::optional<Rc<ir::SourceInfo>> nullableLoc;
     for (auto it = attrs.rbegin(); it != attrs.rend(); ++it) {
@@ -587,6 +840,43 @@ public:
     return ty;
   }
 
+  // A `_core_ref` parameter carries no ownership: `core_ref` is an
+  // axiomatized address with no `pts_to`, and the predicate generated for it
+  // is `emp`. Reading its const qualifier as a borrow would still give it a
+  // permission implicit, and an implicit that appears only in `emp` is one no
+  // call site can ever solve, so the call does not elaborate. The attribute
+  // is nearly always written on a typedef -- it has to be, to land on the
+  // pointee of a `void const**` -- so the typedef chain is walked.
+  static bool isCoreRefQualType(QualType qt) {
+    while (!qt.isNull()) {
+      qt = qt.IgnoreParens();
+      auto *td = qt->getAs<TypedefType>();
+      if (!td)
+        return false;
+      for (auto *attr : td->getDecl()->getAttrs()) {
+        if (auto *ann = dyn_cast<AnnotateAttr>(attr)) {
+          if (ann->getAnnotation() == "pal-core-ref" && ann->args_size() == 0)
+            return true;
+        }
+      }
+      QualType next = td->getDecl()->getUnderlyingType();
+      if (next.getAsOpaquePtr() == qt.getAsOpaquePtr())
+        return false;
+      qt = next;
+    }
+    return false;
+  }
+
+  bool hasCoreRefAttr(AttrVec const &attrs) {
+    for (auto attr : attrs) {
+      if (auto ann = dyn_cast<AnnotateAttr>(attr)) {
+        if (ann->getAnnotation() == "pal-core-ref" && ann->args_size() == 0)
+          return true;
+      }
+    }
+    return false;
+  }
+
   bool hasConsumesAttr(AttrVec const &attrs) {
     for (auto it = attrs.rbegin(); it != attrs.rend(); ++it) {
       if (auto ann = dyn_cast<AnnotateAttr>(*it)) {
@@ -619,7 +909,7 @@ public:
     if (auto generic = dyn_cast<GenericSelectionExpr>(e)) {
       return trLValue(generic->getResultExpr());
     } else if (auto dre = dyn_cast<DeclRefExpr>(e)) {
-      auto id = ctx.mk_ident(toStr(dre->getDecl()->getName()), loc.clone());
+      auto id = symbolIdent(dre->getDecl(), loc.clone());
       return mk_lvalue_var(std::move(loc), std::move(id));
     } else if (auto p = dyn_cast<ParenExpr>(e)) {
       return trLValue(p->getSubExpr());
@@ -649,12 +939,69 @@ public:
       if (ic->getCastKind() == CK_NoOp) {
         return trLValue(ic->getSubExpr());
       }
+    } else if (isa<CompoundLiteralExpr>(e)) {
+      auto hoisted = hoistedCompoundLiterals.find(e->IgnoreParenImpCasts());
+      if (hoisted != hoistedCompoundLiterals.end()) {
+        auto tmp = ctx.mk_ident(toStr(StringRef(hoisted->second)), loc.clone());
+        return mk_lvalue_var(std::move(loc), std::move(tmp));
+      }
+      // C11 6.5.2.5p4 makes a compound literal an lvalue, so `(T){...}.f` and
+      // `&(T){...}` are both legal. The object it names is unnamed and fresh,
+      // though, so nothing stored through it can be observed by any later
+      // expression -- which means translating it as its own value loses
+      // nothing. That is what lets a read like `((T){.f = 0}).f`, the shape a
+      // named-constant macro expands to, go through.
+      return trRValue(e);
     }
 
     reportUnsupported(e->getSourceRange(), loc,
                       "unsupported lvalue expression ", e->getStmtClassName());
     return mk_lvalue_err(std::move(loc),
                          trQualType(e->getType(), e->getSourceRange()));
+  }
+
+  // C11 6.7.9p21: elements of an aggregate that the initializer list does not
+  // reach are initialized as objects with static storage duration, i.e. to
+  // zero. Build that zero value for `qt`, so a partial array initializer can be
+  // padded out to the array's declared length.
+  Rc<ir::Expr> trZeroInit(QualType qt, SourceRange range,
+                          Rc<ir::SourceInfo> loc) {
+    auto desugared = qt.getDesugaredType(*astCtx);
+    if (auto *cat = dyn_cast<ConstantArrayType>(desugared.getTypePtr())) {
+      auto elemTy = trQualType(cat->getElementType(), range);
+      auto elems = Vec<Rc<ir::Expr>>::new_();
+      uint64_t n = cat->getSize().getLimitedValue();
+      for (uint64_t i = 0; i < n; ++i)
+        elems.push(trZeroInit(cat->getElementType(), range, loc.clone()));
+      return mk_array_init(std::move(loc), std::move(elemTy), std::move(elems),
+                           false);
+    }
+    if (auto *rec = dyn_cast<RecordType>(desugared.getTypePtr())) {
+      auto *decl = rec->getDecl();
+      auto it = structNames.find(recordKey(decl));
+      if (it != structNames.end() &&
+          decl->getTagKind() == TagTypeKind::Struct) {
+        // An empty field list means "every field takes its type's default",
+        // which is what emission already does for fields omitted from a
+        // designated initializer.
+        auto structName = ctx.mk_ident(toStr(it->second), loc.clone());
+        return StructInitBuilder::new_(loc.clone(), std::move(structName))
+            .build();
+      }
+      reportUnsupported(range, loc, "unsupported zero initializer for type ",
+                        qt.getAsString().c_str());
+      return mk_rvalue_err(std::move(loc), trQualType(qt, range));
+    }
+    if (desugared->isScalarType()) {
+      // Covers integers, enums, floating point, booleans and pointers; a null
+      // pointer constant is a zero literal of the pointer's type, which is how
+      // `isNull` casts are already translated.
+      return mk_int_lit(std::move(loc), mk_bigint("0"_rs),
+                        trQualType(qt, range));
+    }
+    reportUnsupported(range, loc, "unsupported zero initializer for type ",
+                      qt.getAsString().c_str());
+    return mk_rvalue_err(std::move(loc), trQualType(qt, range));
   }
 
   Rc<ir::Expr> trInitList(InitListExpr *init, SourceRange range,
@@ -664,11 +1011,42 @@ public:
     if (auto *cat = dyn_cast<ConstantArrayType>(qt.getTypePtr())) {
       auto elemTy = trQualType(cat->getElementType(), range);
       auto elems = Vec<Rc<ir::Expr>>::new_();
-      for (unsigned i = 0; i < init->getNumInits(); ++i) {
+      unsigned given = init->getNumInits();
+      for (unsigned i = 0; i < given; ++i) {
         elems.push(trRValue(init->getInit(i)));
+      }
+      // An initializer list may be shorter than the array; the array's length
+      // comes from its type, not from the list. Pad the tail with the filler
+      // Clang recorded, or with zeroes when that filler is the implicit one.
+      // Without this the array literal takes the length of the list and the
+      // result no longer has the array's type.
+      uint64_t declared = cat->getSize().getLimitedValue();
+      Expr *filler = init->getArrayFiller();
+      for (uint64_t i = given; i < declared; ++i) {
+        if (filler && !isa<ImplicitValueInitExpr>(filler))
+          elems.push(trRValue(filler));
+        else
+          elems.push(trZeroInit(cat->getElementType(), range, getRange(range)));
       }
       return mk_array_init(std::move(loc), std::move(elemTy), std::move(elems),
                            false);
+    }
+    // A braced initializer for a scalar object: C permits `int x = {0}` and
+    // `T x = {}`. Code can reach it through typedefs whose definition is a
+    // struct on one platform and a plain integer on another. The list holds at
+    // most one element, and it initializes the object directly.
+    if (qt->isScalarType()) {
+      if (init->getNumInits() == 0) {
+        return trZeroInit(init->getType(), range, std::move(loc));
+      }
+      if (init->getNumInits() == 1) {
+        return trRValue(init->getInit(0));
+      }
+      reportUnsupported(range, loc,
+                        "initializer list for a scalar type has more than one "
+                        "element",
+                        "");
+      return mk_rvalue_err(std::move(loc), trQualType(init->getType(), range));
     }
     auto *rec = dyn_cast<RecordType>(qt.getTypePtr());
     if (!rec) {
@@ -734,23 +1112,158 @@ public:
     return builder.build();
   }
 
+  // Recognize a `sizeof` operand in an allocation size expression. Both
+  // spellings are accepted: a type operand (`sizeof(T)`) and an expression
+  // operand (`sizeof(*p)`, `sizeof *p`), the latter being the common C idiom
+  // `p = malloc(sizeof(*p))`. The operand type is read off with
+  // `getTypeOfArgument()`, which covers both. Returns nullptr if `e` is not a
+  // `sizeof`.
+  static const UnaryExprOrTypeTraitExpr *asSizeof(Expr *e) {
+    auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(e->IgnoreParenImpCasts());
+    if (!s || s->getKind() != UETT_SizeOf)
+      return nullptr;
+    // A VLA operand has no static size, so it does not denote an allocation
+    // unit; an incomplete operand type cannot be translated either.
+    auto argTy = s->getTypeOfArgument();
+    if (argTy->isIncompleteType() || argTy->isDependentType() ||
+        argTy->isVariableArrayType())
+      return nullptr;
+    return s;
+  }
+
   // For a flexible-array-member allocation's trailing size term, return the
   // count operand `n` of `n * sizeof(elem)` or `sizeof(elem) * n` (the
   // non-sizeof multiplicand). Returns nullptr if the term is not a recognized
-  // product with a type-sizeof factor.
+  // product with a sizeof factor.
   static Expr *flexArrayCountSide(Expr *e) {
     auto *mul = dyn_cast<BinaryOperator>(e->IgnoreParenImpCasts());
     if (!mul || mul->getOpcode() != BO_Mul)
       return nullptr;
-    auto isTypeSizeof = [](Expr *x) {
-      auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(x->IgnoreParenImpCasts());
-      return s && s->getKind() == UETT_SizeOf && s->isArgumentType();
-    };
-    if (isTypeSizeof(mul->getLHS()))
+    if (asSizeof(mul->getLHS()))
       return mul->getRHS();
-    if (isTypeSizeof(mul->getRHS()))
+    if (asSizeof(mul->getRHS()))
       return mul->getLHS();
     return nullptr;
+  }
+
+  // The size in bytes of a record's flexible array member's element type, or 0
+  // if the record has no flexible array member. `malloc(sizeof(S) + n)` is an
+  // allocation of `n` elements exactly when that size is 1, which is the usual
+  // shape for a byte pool.
+  uint64_t flexElemSize(QualType qt) {
+    const auto *rt = qt->getAsStructureType();
+    if (!rt)
+      return 0;
+    const RecordDecl *rd = rt->getDecl()->getDefinition();
+    if (!rd)
+      return 0;
+    const FieldDecl *last = nullptr;
+    for (const auto *f : rd->fields())
+      last = f;
+    if (!last)
+      return 0;
+    const auto *arr = astCtx->getAsIncompleteArrayType(last->getType());
+    if (!arr)
+      return 0;
+    return astCtx->getTypeSizeInChars(arr->getElementType()).getQuantity();
+  }
+
+  // Whether an ignored variadic argument can be dropped without losing a
+  // proof obligation: evaluating it must have no side effects, read no memory
+  // other than non-volatile locals, and have no undefined behavior.
+  bool canOmitVariadicArgument(Expr *e) {
+    if (e->HasSideEffects(*astCtx))
+      return false;
+    return isInertVariadicOperand(e);
+  }
+
+  bool isInertVariadicOperand(Expr *e) {
+    e = e->IgnoreParenImpCasts();
+    if (isa<IntegerLiteral, CharacterLiteral, FloatingLiteral, StringLiteral,
+            PredefinedExpr>(e))
+      return true;
+    if (e->getType()->isIntegerType() && e->isIntegerConstantExpr(*astCtx))
+      return true;
+    // A conversion between integer types is never undefined.
+    if (auto *cast = dyn_cast<ExplicitCastExpr>(e);
+        cast && cast->getType()->isIntegerType() &&
+        cast->getSubExpr()->getType()->isIntegerType())
+      return isInertVariadicOperand(cast->getSubExpr());
+    if (auto *op = dyn_cast<UnaryOperator>(e);
+        op && op->getOpcode() == UO_Not && op->getType()->isIntegerType())
+      return isInertVariadicOperand(op->getSubExpr());
+    if (auto *bin = dyn_cast<BinaryOperator>(e)) {
+      auto ty = bin->getType();
+      bool operands = isInertVariadicOperand(bin->getLHS()) &&
+                      isInertVariadicOperand(bin->getRHS());
+      switch (bin->getOpcode()) {
+      case BO_And:
+      case BO_Or:
+      case BO_Xor:
+        return ty->isIntegerType() && operands;
+      // Unsigned arithmetic wraps. Division is excluded: a zero divisor is
+      // undefined whatever the type.
+      case BO_Add:
+      case BO_Sub:
+      case BO_Mul:
+        return ty->isUnsignedIntegerType() && operands;
+      case BO_Shl:
+      case BO_Shr: {
+        if (!ty->isUnsignedIntegerType() || !operands)
+          return false;
+        auto amount = bin->getRHS()->getIntegerConstantExpr(*astCtx);
+        return amount && amount->isNonNegative() &&
+               amount->getZExtValue() < astCtx->getTypeSize(ty);
+      }
+      default:
+        return false;
+      }
+    }
+    bool address = false;
+    if (auto *op = dyn_cast<UnaryOperator>(e);
+        op && op->getOpcode() == UO_AddrOf) {
+      address = true;
+      e = op->getSubExpr()->IgnoreParens();
+    }
+    auto *ref = dyn_cast<DeclRefExpr>(e);
+    auto *var = ref ? dyn_cast<VarDecl>(ref->getDecl()) : nullptr;
+    if (!var || (!isa<ParmVarDecl>(var) && !var->hasLocalStorage()))
+      return false;
+    auto ty = var->getType();
+    // A local array passed to `...` has decayed to its address.
+    return !ty.isVolatileQualified() && !ty->isAtomicType() &&
+           (address || ty->isScalarType() || ty->isArrayType());
+  }
+
+  Rc<ir::Expr> trStringLiteral(StringLiteral *sl, Rc<ir::SourceInfo> loc) {
+    if (sl->getKind() != StringLiteralKind::Ordinary ||
+        sl->getCharByteWidth() != 1) {
+      reportUnsupported(sl->getSourceRange(), loc,
+                        "unsupported non-narrow string literal", "");
+      return mk_rvalue_err(std::move(loc),
+                           trQualType(sl->getType(), sl->getSourceRange()));
+    }
+    auto charIsSigned = astCtx->getLangOpts().CharIsSigned;
+    auto charWidth = astCtx->getTargetInfo().getCharWidth();
+    auto mkCharTy = [&]() {
+      return mk_int_type(loc.clone(), charIsSigned, charWidth);
+    };
+    auto mkCharLit = [&](unsigned char ch) {
+      long long value = ch;
+      if (charIsSigned && charWidth > 0 && value >= (1LL << (charWidth - 1))) {
+        value -= 1LL << charWidth;
+      }
+      return mk_int_lit(loc.clone(), mk_bigint(toStr(std::to_string(value))),
+                        mkCharTy());
+    };
+    auto elems = Vec<Rc<ir::Expr>>::new_();
+    for (unsigned char ch : sl->getBytes()) {
+      elems.push(mkCharLit(ch));
+    }
+    elems.push(mkCharLit(0));
+    auto elemTy = mkCharTy();
+    return mk_array_init(std::move(loc), std::move(elemTy), std::move(elems),
+                         true);
   }
 
   Rc<ir::Expr> trRValue(Expr *e) {
@@ -758,6 +1271,12 @@ public:
 
     if (auto generic = dyn_cast<GenericSelectionExpr>(e)) {
       return trRValue(generic->getResultExpr());
+    }
+
+    // `__func__` and friends denote a string literal holding the function name.
+    if (auto pe = dyn_cast<PredefinedExpr>(e)) {
+      if (auto *sl = pe->getFunctionName())
+        return trStringLiteral(sl, std::move(loc));
     }
 
     if (auto ic = dyn_cast<CastExpr>(e)) {
@@ -778,11 +1297,28 @@ public:
         return trRValue(ic->getSubExpr());
       case CK_ArrayToPointerDecay: {
         auto *subExpr = ic->getSubExpr()->IgnoreParenImpCasts();
-        if (dyn_cast<StringLiteral>(subExpr) ||
-            dyn_cast<CompoundLiteralExpr>(subExpr)) {
+        if (isa<StringLiteral, PredefinedExpr, CompoundLiteralExpr>(subExpr)) {
           return trRValue(ic->getSubExpr());
         }
         return mk_rvalue_lvalue(std::move(loc), trLValue(ic->getSubExpr()));
+      }
+      case CK_PointerToIntegral: {
+        auto *target = ic->getType()->getAs<BuiltinType>();
+        auto source = ic->getSubExpr()->getType();
+        if (target &&
+            (target->getKind() == BuiltinType::Long ||
+             target->getKind() == BuiltinType::ULong) &&
+            source->isPointerType() &&
+            !source->getPointeeType()->isFunctionType()) {
+          return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
+                                trQualType(ic->getType(), e->getSourceRange()));
+        }
+        reportUnsupported(e->getSourceRange(), loc,
+                          "unsupported pointer-to-integer cast",
+                          "only object or void pointers to long or unsigned "
+                          "long are supported");
+        return mk_rvalue_err(std::move(loc),
+                             trQualType(e->getType(), e->getSourceRange()));
       }
       case CK_IntegralCast:
       case CK_IntegralToBoolean:
@@ -791,6 +1327,26 @@ public:
       case CK_IntegralToFloating:
       case CK_FloatingToIntegral:
       case CK_FloatingToBoolean:
+        return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
+                              trQualType(ic->getType(), ic->getSourceRange()));
+
+      // Integer -> pointer. Lowered to an ordinary IR cast; the emitter
+      // routes it through `core_ref`, PAL's raw-pointer model, and the result
+      // carries no ownership.
+      //
+      // `isNull` is tested first, because a null pointer constant that has
+      // already picked up an integral cast -- `(T *)(uintptr_t)0` -- must stay
+      // a null pointer rather than become an opaque address.
+      //
+      // This used to fall through to "unsupported rvalue expression
+      // CStyleCastExpr", which is much worse than it sounds: PAL then emits
+      // `(admit())` for the whole enclosing expression, so the *rest* of the
+      // function's obligations go unchecked too.
+      case CK_IntegralToPointer:
+        if (isNull(ic)) {
+          return mk_int_lit(std::move(loc), mk_bigint("0"_rs),
+                            trQualType(ic->getType(), ic->getSourceRange()));
+        }
         return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
                               trQualType(ic->getType(), ic->getSourceRange()));
 
@@ -806,14 +1362,11 @@ public:
           if (auto *callee = call->getDirectCallee()) {
             if (callee->getName() == "malloc" && call->getNumArgs() == 1) {
               auto *arg = call->getArg(0)->IgnoreParenImpCasts();
-              // Single element: malloc(sizeof(T))
-              if (auto *sizeofExpr = dyn_cast<UnaryExprOrTypeTraitExpr>(arg)) {
-                if (sizeofExpr->getKind() == UETT_SizeOf &&
-                    sizeofExpr->isArgumentType()) {
-                  auto allocTy = trQualType(sizeofExpr->getArgumentType(),
-                                            sizeofExpr->getSourceRange());
-                  return mk_malloc(std::move(loc), std::move(allocTy));
-                }
+              // Single element: malloc(sizeof(T)) or malloc(sizeof(*p))
+              if (auto *sizeofExpr = asSizeof(arg)) {
+                auto allocTy = trQualType(sizeofExpr->getTypeOfArgument(),
+                                          sizeofExpr->getSourceRange());
+                return mk_malloc(std::move(loc), std::move(allocTy));
               }
               // Flexible array member allocation:
               //   malloc(sizeof(struct foo) + n * sizeof(elem))
@@ -824,11 +1377,8 @@ public:
                 if (binOp->getOpcode() == BO_Add) {
                   auto structSizeofSide =
                       [&](Expr *e) -> const UnaryExprOrTypeTraitExpr * {
-                    auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(
-                        e->IgnoreParenImpCasts());
-                    if (s && s->getKind() == UETT_SizeOf &&
-                        s->isArgumentType() &&
-                        s->getArgumentType()->isRecordType())
+                    auto *s = asSizeof(e);
+                    if (s && s->getTypeOfArgument()->isRecordType())
                       return s;
                     return nullptr;
                   };
@@ -840,7 +1390,7 @@ public:
                     arrayTerm = binOp->getLHS();
                   }
                   if (structSide) {
-                    auto allocTy = trQualType(structSide->getArgumentType(),
+                    auto allocTy = trQualType(structSide->getTypeOfArgument(),
                                               structSide->getSourceRange());
                     // Extract `n` from the trailing array term `n *
                     // sizeof(elem)` or `sizeof(elem) * n`, so the flexible tail
@@ -850,35 +1400,41 @@ public:
                       return mk_malloc_flex(std::move(loc), std::move(allocTy),
                                             std::move(countExpr));
                     }
-                    // Unrecognized array term: fall back to an empty flexible
-                    // tail (plain struct malloc).
-                    return mk_malloc(std::move(loc), std::move(allocTy));
+                    // `malloc(sizeof(S) + n)` with a byte-sized tail: the term
+                    // is the count, since the elements are bytes.
+                    if (flexElemSize(structSide->getTypeOfArgument()) == 1) {
+                      auto countExpr = trRValue(arrayTerm);
+                      return mk_malloc_flex(std::move(loc), std::move(allocTy),
+                                            std::move(countExpr));
+                    }
+                    // Anything else would have to be dropped to be translated,
+                    // and a smaller allocation than the C asked for is not a
+                    // weaker translation of it but a different program.
+                    reportUnsupported(
+                        e->getSourceRange(), loc,
+                        "unsupported flexible-array allocation size",
+                        "the trailing term must be `n * sizeof(elem)`, or the "
+                        "element type must be a byte");
+                    return mk_rvalue_err(
+                        std::move(loc),
+                        trQualType(e->getType(), e->getSourceRange()));
                   }
                 }
               }
               // Array: malloc(sizeof(T) * n) or malloc(n * sizeof(T))
               if (auto *binOp = dyn_cast<BinaryOperator>(arg)) {
                 if (binOp->getOpcode() == BO_Mul) {
-                  auto *lhs = binOp->getLHS()->IgnoreParenImpCasts();
-                  auto *rhs = binOp->getRHS()->IgnoreParenImpCasts();
                   const UnaryExprOrTypeTraitExpr *sizeofSide = nullptr;
                   Expr *countSide = nullptr;
-                  if (auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(lhs)) {
-                    if (s->getKind() == UETT_SizeOf && s->isArgumentType()) {
-                      sizeofSide = s;
-                      countSide = binOp->getRHS();
-                    }
-                  }
-                  if (!sizeofSide) {
-                    if (auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(rhs)) {
-                      if (s->getKind() == UETT_SizeOf && s->isArgumentType()) {
-                        sizeofSide = s;
-                        countSide = binOp->getLHS();
-                      }
-                    }
+                  if (auto *s = asSizeof(binOp->getLHS())) {
+                    sizeofSide = s;
+                    countSide = binOp->getRHS();
+                  } else if (auto *s = asSizeof(binOp->getRHS())) {
+                    sizeofSide = s;
+                    countSide = binOp->getLHS();
                   }
                   if (sizeofSide && countSide) {
-                    auto allocTy = trQualType(sizeofSide->getArgumentType(),
+                    auto allocTy = trQualType(sizeofSide->getTypeOfArgument(),
                                               sizeofSide->getSourceRange());
                     auto countExpr = trRValue(countSide);
                     return mk_malloc_array(std::move(loc), std::move(allocTy),
@@ -891,23 +1447,19 @@ public:
             if (callee->getName() == "calloc" && call->getNumArgs() == 2) {
               auto *countArg = call->getArg(0)->IgnoreParenImpCasts();
               auto *sizeArg = call->getArg(1)->IgnoreParenImpCasts();
-              if (auto *sizeofExpr =
-                      dyn_cast<UnaryExprOrTypeTraitExpr>(sizeArg)) {
-                if (sizeofExpr->getKind() == UETT_SizeOf &&
-                    sizeofExpr->isArgumentType()) {
-                  auto allocTy = trQualType(sizeofExpr->getArgumentType(),
-                                            sizeofExpr->getSourceRange());
-                  // calloc(1, sizeof(T)) → single ref
-                  if (auto *intLit = dyn_cast<IntegerLiteral>(countArg)) {
-                    if (intLit->getValue() == 1) {
-                      return mk_calloc(std::move(loc), std::move(allocTy));
-                    }
+              if (auto *sizeofExpr = asSizeof(sizeArg)) {
+                auto allocTy = trQualType(sizeofExpr->getTypeOfArgument(),
+                                          sizeofExpr->getSourceRange());
+                // calloc(1, sizeof(T)) → single ref
+                if (auto *intLit = dyn_cast<IntegerLiteral>(countArg)) {
+                  if (intLit->getValue() == 1) {
+                    return mk_calloc(std::move(loc), std::move(allocTy));
                   }
-                  // calloc(n, sizeof(T)) → array
-                  auto countExpr = trRValue(countArg);
-                  return mk_calloc_array(std::move(loc), std::move(allocTy),
-                                         std::move(countExpr));
                 }
+                // calloc(n, sizeof(T)) → array
+                auto countExpr = trRValue(countArg);
+                return mk_calloc_array(std::move(loc), std::move(allocTy),
+                                       std::move(countExpr));
               }
               // Flexible array member allocation:
               //   calloc(1, sizeof(struct foo) + n * sizeof(elem))
@@ -922,11 +1474,8 @@ public:
                     if (binOp->getOpcode() == BO_Add) {
                       auto structSizeofSide =
                           [&](Expr *e) -> const UnaryExprOrTypeTraitExpr * {
-                        auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(
-                            e->IgnoreParenImpCasts());
-                        if (s && s->getKind() == UETT_SizeOf &&
-                            s->isArgumentType() &&
-                            s->getArgumentType()->isRecordType())
+                        auto *s = asSizeof(e);
+                        if (s && s->getTypeOfArgument()->isRecordType())
                           return s;
                         return nullptr;
                       };
@@ -938,8 +1487,9 @@ public:
                         arrayTerm = binOp->getLHS();
                       }
                       if (structSide) {
-                        auto allocTy = trQualType(structSide->getArgumentType(),
-                                                  structSide->getSourceRange());
+                        auto allocTy =
+                            trQualType(structSide->getTypeOfArgument(),
+                                       structSide->getSourceRange());
                         // Extract `n` from the trailing array term so the
                         // zeroed flexible tail is sized `n`.
                         if (Expr *countSide = flexArrayCountSide(arrayTerm)) {
@@ -963,29 +1513,19 @@ public:
                 if (intLit->getValue() == 1) {
                   if (auto *binOp = dyn_cast<BinaryOperator>(sizeArg)) {
                     if (binOp->getOpcode() == BO_Mul) {
-                      auto *lhs = binOp->getLHS()->IgnoreParenImpCasts();
-                      auto *rhs = binOp->getRHS()->IgnoreParenImpCasts();
                       const UnaryExprOrTypeTraitExpr *sizeofSide = nullptr;
                       Expr *countSide = nullptr;
-                      if (auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(lhs)) {
-                        if (s->getKind() == UETT_SizeOf &&
-                            s->isArgumentType()) {
-                          sizeofSide = s;
-                          countSide = binOp->getRHS();
-                        }
-                      }
-                      if (!sizeofSide) {
-                        if (auto *s = dyn_cast<UnaryExprOrTypeTraitExpr>(rhs)) {
-                          if (s->getKind() == UETT_SizeOf &&
-                              s->isArgumentType()) {
-                            sizeofSide = s;
-                            countSide = binOp->getLHS();
-                          }
-                        }
+                      if (auto *s = asSizeof(binOp->getLHS())) {
+                        sizeofSide = s;
+                        countSide = binOp->getRHS();
+                      } else if (auto *s = asSizeof(binOp->getRHS())) {
+                        sizeofSide = s;
+                        countSide = binOp->getLHS();
                       }
                       if (sizeofSide && countSide) {
-                        auto allocTy = trQualType(sizeofSide->getArgumentType(),
-                                                  sizeofSide->getSourceRange());
+                        auto allocTy =
+                            trQualType(sizeofSide->getTypeOfArgument(),
+                                       sizeofSide->getSourceRange());
                         auto countExpr = trRValue(countSide);
                         return mk_calloc_array(std::move(loc),
                                                std::move(allocTy),
@@ -1138,8 +1678,24 @@ public:
         }
 
         // BitCast (e.g., T* → void*): pass through after malloc/calloc
-        // detection. F* functions like memcpy are type-polymorphic.
+        // detection. F* functions like memcpy are type-polymorphic. A cast
+        // *to* a different object pointer type is kept, though: it changes
+        // what a dereference reads (`*(uint32_t *)base` is a 4-byte read,
+        // not a read of `void` or of a byte).
         if (ic->getCastKind() == CK_BitCast) {
+          auto from = ic->getSubExpr()->getType();
+          auto to = ic->getType();
+          if (from->isPointerType() && to->isPointerType()) {
+            auto fromPt =
+                from->getPointeeType().getCanonicalType().getUnqualifiedType();
+            auto toPt =
+                to->getPointeeType().getCanonicalType().getUnqualifiedType();
+            if (!toPt->isVoidType() && !toPt->isFunctionType() &&
+                !toPt->isIncompleteType() && fromPt != toPt) {
+              return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
+                                    trQualType(to, e->getSourceRange()));
+            }
+          }
           return trRValue(ic->getSubExpr());
         }
 
@@ -1168,35 +1724,7 @@ public:
                         mk_bigint(toStr(std::to_string(cl->getValue()))),
                         std::move(ty));
     } else if (auto sl = dyn_cast<StringLiteral>(e)) {
-      if (sl->getKind() != StringLiteralKind::Ordinary ||
-          sl->getCharByteWidth() != 1) {
-        reportUnsupported(e->getSourceRange(), loc,
-                          "unsupported non-narrow string literal", "");
-        return mk_rvalue_err(std::move(loc),
-                             trQualType(e->getType(), e->getSourceRange()));
-      }
-      auto charIsSigned = astCtx->getLangOpts().CharIsSigned;
-      auto charWidth = astCtx->getTargetInfo().getCharWidth();
-      auto mkCharTy = [&]() {
-        return mk_int_type(loc.clone(), charIsSigned, charWidth);
-      };
-      auto mkCharLit = [&](unsigned char ch) {
-        long long value = ch;
-        if (charIsSigned && charWidth > 0 &&
-            value >= (1LL << (charWidth - 1))) {
-          value -= 1LL << charWidth;
-        }
-        return mk_int_lit(loc.clone(), mk_bigint(toStr(std::to_string(value))),
-                          mkCharTy());
-      };
-      auto elems = Vec<Rc<ir::Expr>>::new_();
-      for (unsigned char ch : sl->getBytes()) {
-        elems.push(mkCharLit(ch));
-      }
-      elems.push(mkCharLit(0));
-      auto elemTy = mkCharTy();
-      return mk_array_init(std::move(loc), std::move(elemTy), std::move(elems),
-                           true);
+      return trStringLiteral(sl, std::move(loc));
     } else if (auto uo = dyn_cast<UnaryOperator>(e)) {
       switch (uo->getOpcode()) {
       case UO_AddrOf:
@@ -1206,7 +1734,7 @@ public:
         if (auto *dre = dyn_cast<DeclRefExpr>(
                 uo->getSubExpr()->IgnoreParenImpCasts())) {
           if (auto *fd = dyn_cast<FunctionDecl>(dre->getDecl())) {
-            auto id = ctx.mk_ident(toStr(fd->getName()), loc.clone());
+            auto id = symbolIdent(fd, loc.clone());
             return mk_rvalue_fnref(std::move(loc), std::move(id));
           }
         }
@@ -1219,6 +1747,9 @@ public:
       case UO_Not:
         return mk_rvalue_unop(std::move(loc), ir::UnOp::BitNot(),
                               trRValue(uo->getSubExpr()));
+
+      case UO_Plus:
+        return trRValue(uo->getSubExpr());
 
       case UO_Minus:
         return mk_rvalue_unop(std::move(loc), ir::UnOp::Neg(),
@@ -1237,6 +1768,14 @@ public:
         // continue to error case
       }
     } else if (auto *bo = dyn_cast<BinaryOperator>(e)) {
+      // `a && b` and `a || b` evaluate `b` only if `a` does not decide the
+      // answer, so a statement expression in `b` must not hoist out.
+      auto shortCircuit = [&](BinaryOperator *op_e, auto &l, ir::BinOp op) {
+        auto lhs = trRValue(op_e->getLHS());
+        NoHoist noHoist(&hoistTarget);
+        return mk_rvalue_binop(std::move(l), std::move(op), std::move(lhs),
+                               trRValue(op_e->getRHS()));
+      };
       auto m = [&](ir::BinOp op) {
         return mk_rvalue_binop(std::move(loc), std::move(op),
                                trRValue(bo->getLHS()), trRValue(bo->getRHS()));
@@ -1253,7 +1792,7 @@ public:
       case clang::BO_Rem:
         return m(ir::BinOp::Mod());
       case clang::BO_LAnd:
-        return m(ir::BinOp::LogAnd());
+        return shortCircuit(bo, loc, ir::BinOp::LogAnd());
       case clang::BO_EQ:
         return m(ir::BinOp::Eq());
       case clang::BO_NE: {
@@ -1272,7 +1811,7 @@ public:
         return mk_rvalue_binop(std::move(loc), ir::BinOp::LEq(),
                                trRValue(bo->getRHS()), trRValue(bo->getLHS()));
       case clang::BO_LOr:
-        return m(ir::BinOp::LogOr());
+        return shortCircuit(bo, loc, ir::BinOp::LogOr());
       case clang::BO_And:
         return m(ir::BinOp::BitAnd());
       case clang::BO_Or:
@@ -1333,11 +1872,129 @@ public:
                               std::move(result));
       }
 
+      case clang::BO_Comma: {
+        // The comma operator in rvalue position.
+        //
+        // `(a, b)` evaluates `a`, discards it, then yields `b`.  PAL's
+        // expression IR has nowhere to put `a`: there is no statement
+        // sequencing inside an rvalue, and hoisting it out would move it
+        // across the surrounding expression's other operands, which C's
+        // sequencing rules do not permit in general.
+        //
+        // So this is translated only when `a` cannot be observed at all --
+        // when Clang can tell us it has no side effects.  Then `(a, b)` and
+        // `b` are the same program and the arm is a pure simplification.
+        //
+        // This is not a corner case.  Generated RPC-stub macros can all be
+        // of the form
+        //
+        //   #define f(...) ((void)sizeof(f(__VA_ARGS__)),
+        //   (uint64_t)invoke_N(...))
+        //
+        // where the left operand is a compile-time prototype check whose
+        // operand is unevaluated.  Refusing it made every such call site an
+        // `admit()`, discarding the surrounding obligations along with
+        // it.
+        //
+        // A left operand that *does* have side effects still reaches the
+        // unsupported diagnostic below, deliberately: silently dropping it
+        // would change the program.
+        if (!bo->getLHS()->HasSideEffects(*astCtx)) {
+          return trRValue(bo->getRHS());
+        }
+        break;
+      }
+
       default:;
         // continue to error case
       }
     } else if (auto *c = dyn_cast<CallExpr>(e)) {
       if (auto fd = c->getDirectCallee()) {
+        if (fd->getName() == "__builtin_mul_overflow" && c->getNumArgs() == 3) {
+          auto lhsType = c->getArg(0)->getType();
+          auto rhsType = c->getArg(1)->getType();
+          auto outputType = c->getArg(2)->getType()->getPointeeType();
+          if (lhsType->isUnsignedIntegerType() &&
+              rhsType->isUnsignedIntegerType() &&
+              astCtx->getTypeSize(lhsType) <= 64 &&
+              astCtx->getTypeSize(rhsType) <= 64 && !outputType.isNull() &&
+              outputType->isUnsignedIntegerType() &&
+              astCtx->getTypeSize(outputType) == 32 &&
+              !outputType.isVolatileQualified()) {
+            auto prim = ctx.mk_ident(
+                toStr(StringRef("__pal_mul_overflow_u64_u32")), loc.clone());
+            auto primArgs = Vec<Rc<ir::Expr>>::new_();
+            for (unsigned i = 0; i < 2; ++i) {
+              primArgs.push(mk_rvalue_cast(
+                  loc.clone(), trRValue(c->getArg(i)),
+                  trQualType(astCtx->UnsignedLongLongTy, e->getSourceRange())));
+            }
+            primArgs.push(trRValue(c->getArg(2)));
+            return mk_rvalue_fncall(std::move(loc), std::move(prim),
+                                    std::move(primArgs));
+          }
+          reportUnsupported(e->getSourceRange(), loc,
+                            "unsupported __builtin_mul_overflow operand types",
+                            " (requires unsigned operands up to 64 bits and a "
+                            "nonvolatile uint32 destination)");
+          return mk_rvalue_err(std::move(loc),
+                               trQualType(e->getType(), e->getSourceRange()));
+        }
+        // Byte-reversal builtins. `Pulse.Lib.C.UInt64.bswap64` is a
+        // definition in terms of shifts and masks, not an axiom, so this
+        // assumes nothing -- a caller that needs to reason about the result
+        // can unfold it. Code reaches this through big-endian hardware
+        // descriptors.
+        if (fd->getName() == "__builtin_bswap64" && c->getNumArgs() == 1) {
+          auto prim =
+              ctx.mk_ident(toStr(StringRef("__pal_bswap64")), loc.clone());
+          auto primArgs = Vec<Rc<ir::Expr>>::new_();
+          primArgs.push(trRValue(c->getArg(0)));
+          return mk_rvalue_fncall(std::move(loc), std::move(prim),
+                                  std::move(primArgs));
+        }
+        // GCC/Clang builtins that carry no program meaning.
+        //
+        // Real code reaches these through likely()/unlikely() and assert();
+        // left alone they produce a large share of translation errors, none
+        // of which reflect anything about the C program's behaviour.
+        //
+        //   __builtin_expect(e, c)     is exactly `e`; the second argument is a
+        //                              branch-prediction hint with no
+        //                              semantics.
+        //   __builtin_constant_p(e)    folds to 0. This is the conservative
+        //                              answer -- it selects the general,
+        //                              non-constant code path, which is the one
+        //                              that must be correct for arbitrary
+        //                              input.
+        StringRef bname = fd->getName();
+        if (bname == "__builtin_expect" && c->getNumArgs() == 2) {
+          return trRValue(c->getArg(0));
+        }
+        if (bname == "__builtin_expect_with_probability" &&
+            c->getNumArgs() == 3) {
+          return trRValue(c->getArg(0));
+        }
+        if (bname == "__builtin_constant_p" && c->getNumArgs() == 1) {
+          return mk_int_lit(std::move(loc), mk_bigint("0"_rs),
+                            trQualType(e->getType(), e->getSourceRange()));
+        }
+        // Any other builtin that answers a question about the *program text*
+        // rather than about a value: fold it to the answer clang computed.
+        // See the matching fold at the end of trRValue for the rationale; this
+        // arm is needed as well because a CallExpr never reaches that fallback
+        // -- it translates to a call node, and only a later pass discovers
+        // that the callee has no body to call.
+        if (fd->getBuiltinID() != 0 &&
+            e->getType()->isIntegralOrEnumerationType()) {
+          Expr::EvalResult builtinRes;
+          if (e->EvaluateAsInt(builtinRes, *astCtx, Expr::SE_NoSideEffects)) {
+            SmallString<32> digits;
+            builtinRes.Val.getInt().toString(digits, 10, /*Signed=*/true);
+            return mk_int_lit(std::move(loc), mk_bigint(toStr(digits.str())),
+                              trQualType(e->getType(), e->getSourceRange()));
+          }
+        }
         // Detect free(ptr)
         if (fd->getName() == "free" && c->getNumArgs() == 1) {
           auto arg = c->getArg(0);
@@ -1349,17 +2006,39 @@ public:
           }
           return mk_free(std::move(loc), trRValue(arg));
         }
-        // Detect memset(ptr, 0, ...). Only a zero fill value is supported:
-        // C `memset` writes raw bytes, and the only fill we can faithfully
-        // model for arbitrary types is the all-zero one. Two shapes are
-        // recognized:
+        // Detect memset with a constant byte fill. The native emitter checks
+        // whether the element type has a supported representation of it.
+        // Zero additionally supports a whole-object write:
         //   * memset(ptr, 0, sizeof(T))      — zero a single object of type T
         //     (struct, scalar, ...), emitted as a whole-object write of
         //     `zero_default`.
         //   * memset(ptr, 0, sizeof(T) * n)  — zero an array of byte-sized
         //     element type (e.g. uint8_t, char).
-        // Non-zero fill values are rejected with a clear diagnostic.
-        if (fd->getName() == "memset" && c->getNumArgs() == 3) {
+        // A platform's zeroing wrapper is the memset intrinsic under another
+        // name and a shorter argument list: `zero_memory(ptr, size)`,
+        // `RtlZeroMemory(ptr, size)`, `bzero(ptr, size)`. Declaring it
+        // `_memset_zero` routes it through the same recognizer, with the fill
+        // value supplied rather than read from the call. Without this the
+        // wrapper translates to an uninterpreted stub, which silently makes
+        // every postcondition about the zeroed object vacuous.
+        bool isMemsetAlias = false;
+        for (auto *attr : fd->attrs()) {
+          if (auto *ann = dyn_cast<AnnotateAttr>(attr);
+              ann && ann->getAnnotation() == "pal-memset-zero" &&
+              ann->args_size() == 0) {
+            isMemsetAlias = true;
+          }
+        }
+        if (isMemsetAlias && c->getNumArgs() != 2) {
+          reportUnsupported(e->getSourceRange(), loc,
+                            "a _memset_zero function must take exactly two "
+                            "arguments (destination, size); ",
+                            fd->getName().str());
+          return mk_rvalue_err(std::move(loc),
+                               trQualType(c->getType(), c->getSourceRange()));
+        }
+        if ((fd->getName() == "memset" && c->getNumArgs() == 3) ||
+            isMemsetAlias) {
           auto *ptrArg = c->getArg(0);
           // Strip implicit void* cast
           if (auto *ic = dyn_cast<ImplicitCastExpr>(ptrArg)) {
@@ -1367,18 +2046,25 @@ public:
               ptrArg = ic->getSubExpr();
             }
           }
-          auto *valArg = c->getArg(1);
-          auto *sizeArg = c->getArg(2)->IgnoreParenImpCasts();
+          auto *valArg = isMemsetAlias ? nullptr : c->getArg(1);
+          auto *sizeArg =
+              c->getArg(isMemsetAlias ? 1 : 2)->IgnoreParenImpCasts();
           Expr::EvalResult valRes;
-          bool valIsZero = valArg->EvaluateAsInt(valRes, *astCtx) &&
-                           valRes.Val.isInt() && valRes.Val.getInt() == 0;
-          if (!valIsZero) {
+          if (!isMemsetAlias && (!valArg->EvaluateAsInt(valRes, *astCtx) ||
+                                 !valRes.Val.isInt())) {
             reportUnsupported(e->getSourceRange(), loc,
-                              "memset is only supported with a zero fill value",
+                              "memset requires a constant fill value",
                               std::string());
             return mk_rvalue_err(std::move(loc),
                                  trQualType(c->getType(), c->getSourceRange()));
           }
+          const uint64_t fillByte =
+              isMemsetAlias ? 0
+                            : valRes.Val.getInt().zextOrTrunc(8).getZExtValue();
+          const bool valIsZero = fillByte == 0;
+          auto fillExpr = mk_int_lit(
+              loc.clone(), mk_bigint(toStr(std::to_string(fillByte))),
+              trQualType(astCtx->UnsignedCharTy, e->getSourceRange()));
           // Zeroing a single object: memset(ptr, 0, sizeof(T)) where the size
           // is a bare sizeof (no multiplication) whose type matches the
           // pointee of `ptr`. Works for any type with a `has_zero_default`
@@ -1388,13 +2074,59 @@ public:
             if (szof->getKind() == UETT_SizeOf) {
               auto objQt = szof->getTypeOfArgument();
               auto pointeeQt = ptrArg->getType()->getPointeeType();
-              if (!pointeeQt.isNull() &&
+              if (valIsZero && !pointeeQt.isNull() &&
                   astCtx->hasSameUnqualifiedType(objQt, pointeeQt)) {
                 auto objTy = trQualType(pointeeQt, szof->getSourceRange());
                 return mk_memset_zero(std::move(loc), std::move(objTy),
                                       trRValue(ptrArg));
               }
             }
+          }
+          // Filling a whole array: `f(arr, N)` where `arr` is an array-typed
+          // lvalue that decays to the pointer argument and `N` is its size in
+          // bytes. The extent lives in the array's own type, so nothing has to
+          // be inferred from the way the count was spelled: `sizeof(s->field)`
+          // and a literal are both accepted, and both are checked against the
+          // type rather than trusted. This is the shape a platform zeroing
+          // wrapper takes on a fixed-size trailing `Reserved` member, which
+          // `memset(ptr, 0, sizeof(T) * n)` below cannot express because a
+          // wrapper taking `void *` has no element type to name.
+          {
+            auto *destObj = c->getArg(0)->IgnoreParenImpCasts();
+            auto destQt = destObj->getType();
+            if (const auto *arrTy = astCtx->getAsConstantArrayType(destQt)) {
+              auto elemQt = arrTy->getElementType();
+              Expr::EvalResult szRes;
+              const bool complete =
+                  !elemQt->isIncompleteType() && !elemQt->isDependentType() &&
+                  astCtx->getTypeSizeInChars(elemQt).getQuantity() > 0;
+              const auto arrBytes =
+                  astCtx->getTypeSizeInChars(destQt).getQuantity();
+              if (complete && sizeArg->EvaluateAsInt(szRes, *astCtx) &&
+                  szRes.Val.isInt() && szRes.Val.getInt() == arrBytes) {
+                auto elemTy = trQualType(elemQt, destObj->getSourceRange());
+                llvm::SmallString<20> countStr;
+                arrTy->getSize().toStringUnsigned(countStr);
+                auto countExpr = mk_int_lit(
+                    loc.clone(), mk_bigint(toStr(StringRef(countStr))),
+                    trQualType(astCtx->getSizeType(), e->getSourceRange()));
+                return mk_memset(std::move(loc), std::move(elemTy),
+                                 trRValue(ptrArg), std::move(fillExpr),
+                                 std::move(countExpr));
+              }
+            }
+          }
+          // Keep an unrecognized wrapper call from falling through to an
+          // uninterpreted stub.
+          if (isMemsetAlias) {
+            reportUnsupported(
+                e->getSourceRange(), loc,
+                "a _memset_zero call is only supported in the form "
+                "f(ptr, sizeof(*ptr)) or f(arr, sizeof(arr)) for a "
+                "fixed-size array with a supported element type; ",
+                fd->getName().str());
+            return mk_rvalue_err(std::move(loc),
+                                 trQualType(c->getType(), c->getSourceRange()));
           }
           if (auto *binOp = dyn_cast<BinaryOperator>(sizeArg)) {
             if (binOp->getOpcode() == BO_Mul) {
@@ -1426,7 +2158,7 @@ public:
                       trQualType(elemQt, sizeofSide->getSourceRange());
                   auto countExpr = trRValue(countSide);
                   return mk_memset(std::move(loc), std::move(elemTy),
-                                   trRValue(ptrArg), trRValue(valArg),
+                                   trRValue(ptrArg), std::move(fillExpr),
                                    std::move(countExpr));
                 }
                 reportUnsupported(
@@ -1440,11 +2172,36 @@ public:
               }
             }
           }
+          if (!valIsZero) {
+            reportUnsupported(
+                e->getSourceRange(), loc,
+                "nonzero memset requires a whole fixed-size array or "
+                "a byte array with an explicit element count",
+                std::string());
+            return mk_rvalue_err(std::move(loc),
+                                 trQualType(c->getType(), c->getSourceRange()));
+          }
         }
-        auto fn = ctx.mk_ident(toStr(fd->getName()),
-                               getRange(c->getCallee()->getSourceRange()));
+        auto fn = symbolIdent(fd, getRange(c->getCallee()->getSourceRange()));
         auto args = Vec<Rc<ir::Expr>>::new_();
-        for (auto arg : c->arguments()) {
+        for (unsigned i = 0; i < c->getNumArgs(); ++i) {
+          auto *arg = c->getArg(i);
+          if (fd->isVariadic() && i >= fd->getNumParams()) {
+            if (!canOmitVariadicArgument(arg) && !hoistedVarargs.count(arg)) {
+              reportUnsupported(
+                  arg->getSourceRange(), getRange(arg->getSourceRange()),
+                  "unsupported ignored variadic argument: one that is "
+                  "evaluated only conditionally (in a `?:` arm or on the "
+                  "right of `&&`/`||`) must be a literal, a non-volatile "
+                  "local value or address, or wrapping integer arithmetic "
+                  "over those",
+                  "");
+              return mk_rvalue_err(
+                  std::move(loc),
+                  trQualType(c->getType(), c->getSourceRange()));
+            }
+            continue;
+          }
           args.push(trRValue(arg));
         }
         return mk_rvalue_fncall(std::move(loc), std::move(fn), std::move(args));
@@ -1452,6 +2209,15 @@ public:
         // Indirect call through a function-pointer value: `fptr(a, b, ...)`.
         // Clang gives no direct callee; the callee is an rvalue of
         // function-pointer type.
+        if (auto *ptr = c->getCallee()->getType()->getAs<PointerType>()) {
+          if (auto *proto = ptr->getPointeeType()->getAs<FunctionProtoType>();
+              proto && proto->isVariadic()) {
+            reportUnsupported(c->getSourceRange(), loc,
+                              "indirect variadic calls are not supported", "");
+            return mk_rvalue_err(std::move(loc),
+                                 trQualType(c->getType(), c->getSourceRange()));
+          }
+        }
         auto callee = trRValue(c->getCallee());
         auto args = Vec<Rc<ir::Expr>>::new_();
         for (auto arg : c->arguments()) {
@@ -1472,8 +2238,29 @@ public:
     } else if (auto *init = dyn_cast<InitListExpr>(e)) {
       return trInitList(init, e->getSourceRange(), std::move(loc));
     } else if (auto *co = dyn_cast<ConditionalOperator>(e)) {
-      return mk_cond(std::move(loc), trRValue(co->getCond()),
+      if (auto *arm = constantCondArm(co)) {
+        return trRValue(arm);
+      }
+      // The condition is evaluated unconditionally and may hoist; the two arms
+      // are not, so a statement expression in either must stay where it is.
+      auto cond = trRValue(co->getCond());
+      NoHoist noHoist(&hoistTarget);
+      return mk_cond(std::move(loc), std::move(cond),
                      trRValue(co->getTrueExpr()), trRValue(co->getFalseExpr()));
+    } else if (auto *bco = dyn_cast<BinaryConditionalOperator>(e)) {
+      // GNU `a ?: b`: `a` if it is nonzero, else `b`, with `a` evaluated
+      // once.
+      // TODO: The current encoding will evaluate `b` unconditionally; can be
+      // fix by translating to an if-statement?
+      if (bco->getFalseExpr()->HasSideEffects(*astCtx)) {
+        reportUnsupported(e->getSourceRange(), loc,
+                          "GNU ?: with an effectful right operand", "");
+        return mk_rvalue_err(std::move(loc),
+                             trQualType(e->getType(), e->getSourceRange()));
+      }
+      return mk_rvalue_binop(std::move(loc), ir::BinOp::Elvis(),
+                             trRValue(bco->getCommon()),
+                             trRValue(bco->getFalseExpr()));
     } else if (auto *dre = dyn_cast<DeclRefExpr>(e)) {
       if (auto *ecd = dyn_cast<EnumConstantDecl>(dre->getDecl())) {
         const auto val = ecd->getInitVal();
@@ -1485,11 +2272,37 @@ public:
       // A bare reference to a function (function-to-pointer decay): produce a
       // function reference, identical to `&func`.
       if (auto *fd = dyn_cast<FunctionDecl>(dre->getDecl())) {
-        auto id = ctx.mk_ident(toStr(fd->getName()), loc.clone());
+        auto id = symbolIdent(fd, loc.clone());
         return mk_rvalue_fnref(std::move(loc), std::move(id));
       }
       // Other DeclRefExpr in rvalue context: treat as lvalue read
       return mk_rvalue_lvalue(std::move(loc), trLValue(e));
+    } else if (auto *m = dyn_cast<MemberExpr>(e)) {
+      // A member of a structure *value* -- `f(x).field`, or a field of a
+      // compound literal -- is itself an rvalue in C, so there is no lvalue to
+      // project from and trLValue cannot be used. Translate the base as a value
+      // and project the field out of it; ExprT::Member is neutral, and emit
+      // already renders a value base as a record field selection rather than a
+      // reference projection.
+      auto *md = m->getMemberDecl();
+      std::string nameStr;
+      if (auto *fd = dyn_cast<FieldDecl>(md))
+        nameStr = fieldNameStr(fd);
+      else
+        nameStr = md->getName().str();
+      auto id = ctx.mk_ident(toStr(nameStr), loc.clone());
+      // When the base was hoisted out of the enclosing statement, project from
+      // the temporary rather than re-translating the call.
+      auto hoisted = hoistedRValues.find(m->getBase()->IgnoreParenImpCasts());
+      if (hoisted != hoistedRValues.end()) {
+        auto tmp = ctx.mk_ident(toStr(StringRef(hoisted->second)), loc.clone());
+        auto tmpRef = mk_lvalue_var(loc.clone(), std::move(tmp));
+        return mk_lvalue_member(std::move(loc), std::move(tmpRef),
+                                std::move(id));
+      }
+      auto base = m->isArrow() ? mk_deref(loc.clone(), trRValue(m->getBase()))
+                               : trRValue(m->getBase());
+      return mk_lvalue_member(std::move(loc), std::move(base), std::move(id));
     } else if (auto *u = dyn_cast<UnaryExprOrTypeTraitExpr>(e)) {
       auto kind = u->getKind();
       if (kind == UETT_SizeOf || kind == UETT_AlignOf ||
@@ -1509,6 +2322,157 @@ public:
         } else {
           return mk_alignof(std::move(loc), std::move(ty));
         }
+      }
+    } else if (auto *ooe = dyn_cast<OffsetOfExpr>(e)) {
+      // `offsetof(T, designator)` is an integer constant that clang has
+      // already computed from the target ABI -- the same layout PAL records
+      // for `sizeof` and the `struct_T_offsetof_f` constants -- so it becomes
+      // a literal. This also covers nested and array designators
+      // (`offsetof(T, a.b[2])`) whenever they are constant. Clang types the
+      // expression as the canonical integer behind `size_t`, so the literal
+      // is given `size_t` explicitly.
+      Expr::EvalResult res;
+      if (ooe->EvaluateAsInt(res, *astCtx)) {
+        auto ty = mk_sizet(loc.clone());
+        return mk_int_lit(std::move(loc), toBigInt(res.Val.getInt()),
+                          std::move(ty));
+      }
+      reportUnsupported(e->getSourceRange(), loc,
+                        "offsetof with a non-constant designator", "");
+      return mk_rvalue_err(std::move(loc),
+                           trQualType(e->getType(), e->getSourceRange()));
+    }
+
+    // __builtin_choose_expr(c, a, b) is `a` or `b` -- decided by the compiler,
+    // not at run time -- and, crucially, the branch not chosen is not even
+    // type-checked.  So the choice must be made here rather than translated:
+    // the other operand may not be a well-typed expression at all.  Clang has
+    // already made it.
+    //
+    // A ROUND_UP macro can use the builtin to pick a width-appropriate
+    // rounding expression from the argument's size.
+    if (auto *ce = dyn_cast<ChooseExpr>(e)) {
+      return trRValue(ce->getChosenSubExpr());
+    }
+
+    // A statement expression whose body reduces to a single expression.
+    //
+    // `({ e; })` is exactly `e`.  PAL cannot translate the general form --
+    // `({ s1; s2; e; })` has statements in it, and an rvalue has nowhere to
+    // put them; hoisting them out would move them across the surrounding
+    // expression's other operands, which C's sequencing rules do not permit --
+    // but the degenerate form is common, because the GNU idiom is how C
+    // writes a macro that must not evaluate its argument twice or must not be
+    // usable as an lvalue, and many such macros wrap a single expression.
+    //
+    // Statements are skipped ahead of the final expression only when they
+    // cannot affect it: a null statement, and a declaration group consisting
+    // entirely of static assertions (which macros use for argument type
+    // checking).  A
+    // declaration that introduces a variable, or any other statement, still
+    // reaches the unsupported diagnostic -- dropping it would change the
+    // program, and keeping it is the hoisting problem above.
+    //
+    // In statement position no restriction is needed; see trStmt.
+    if (auto *se = dyn_cast<StmtExpr>(e)) {
+      if (auto *comp = dyn_cast<CompoundStmt>(se->getSubStmt())) {
+        Expr *value = nullptr;
+        bool reducible = comp->size() > 0;
+        for (auto *s : comp->body()) {
+          if (value != nullptr) {
+            // The value-yielding expression must be last.
+            reducible = false;
+            break;
+          }
+          if (isa<NullStmt>(s)) {
+            continue;
+          }
+          if (auto *ds = dyn_cast<DeclStmt>(s)) {
+            bool allStaticAsserts = true;
+            for (auto *d : ds->decls()) {
+              if (!isa<StaticAssertDecl>(d)) {
+                allStaticAsserts = false;
+              }
+            }
+            if (allStaticAsserts) {
+              continue;
+            }
+            reducible = false;
+            break;
+          }
+          if (auto *sub = dyn_cast<Expr>(s)) {
+            value = sub;
+            continue;
+          }
+          reducible = false;
+          break;
+        }
+        if (reducible && value != nullptr) {
+          return trRValue(value);
+        }
+        // Otherwise the body has statements in it. If this position has
+        // somewhere to put them -- see hoistTarget -- run them there, ahead of
+        // the value.
+        //
+        // This is the shape most GNU macros actually have: a local bound to
+        // the argument so it is evaluated once, a check on it, then the
+        // result. A typical ROUND_UP is exactly that, and so is
+        // DIV_ROUND_UP.
+        //
+        // Sound because hoistTarget is set only where the statements'
+        // new position and their old one are separated by nothing that C
+        // evaluates: a declaration's initializer and an assignment
+        // statement's right-hand side have no other operands to cross, and
+        // both are evaluated exactly once. Every conditionally-evaluated
+        // operand clears it again. What is NOT attempted is hoisting out of
+        // an operand with siblings -- `f(g(), ({...}))` -- where the
+        // statements would move across `g()`.
+        if (hoistTarget != nullptr && comp->size() > 0) {
+          auto *last = *(comp->body_end() - 1);
+          if (auto *lastValue = dyn_cast<Expr>(last)) {
+            for (auto *s : comp->body()) {
+              if (s == last) {
+                break;
+              }
+              trStmt(*hoistTarget, s);
+            }
+            return trRValue(lastValue);
+          }
+        }
+      }
+    }
+
+    // Last resort, before giving up: an expression that asks a question about
+    // the *program text* rather than about a value, and that clang has already
+    // answered.
+    //
+    // These are the type-level predicates -- __builtin_classify_type,
+    // __builtin_types_compatible_p, and their relatives -- which C code uses to
+    // select between branches at compile time. Translating such a test
+    // faithfully is not merely hard, it is wrong: the branch not taken is
+    // typically an error stub that has no definition, so only the folded value
+    // describes the program that is actually compiled.
+    //
+    // Three things make this safe to do here rather than as a general
+    // simplification:
+    //   * it is reached only where PAL was about to emit `(admit())` for the
+    //     whole enclosing expression, so it cannot displace any translation
+    //     PAL would otherwise perform, and cannot weaken any obligation --
+    //     an admit() discards them all;
+    //   * SE_NoSideEffects makes clang decline the fold if evaluating the
+    //     expression could do anything observable;
+    //   * an integral result type, since that is all mk_int_lit can carry.
+    //
+    // Generated RPC-stub headers reach this by wrapping every call argument
+    // in a CHECK_SCALAR test that rejects struct and union arguments at
+    // compile time. See test/classify_type.
+    if (e->getType()->isIntegralOrEnumerationType()) {
+      Expr::EvalResult constRes;
+      if (e->EvaluateAsInt(constRes, *astCtx, Expr::SE_NoSideEffects)) {
+        SmallString<32> digits;
+        constRes.Val.getInt().toString(digits, 10, /*Signed=*/true);
+        return mk_int_lit(std::move(loc), mk_bigint(toStr(digits.str())),
+                          trQualType(e->getType(), e->getSourceRange()));
       }
     }
 
@@ -1537,8 +2501,157 @@ public:
     return stmts;
   }
 
+  /// Structure-valued call results bound ahead of the statement that projects
+  /// from them, keyed by the call expression.
+  std::map<const Expr *, std::string> hoistedRValues;
+  std::map<const Expr *, std::string> hoistedCompoundLiterals;
+  int rvalueHoistCounter = 0;
+  /// Variadic arguments evaluated ahead of their statement; see
+  /// `hoistRValueMembers`. The call itself then drops them.
+  std::set<const Expr *> hoistedVarargs;
+
+  /// Bind a structure-valued call that a member projection reads from to a
+  /// uniquely named local, ahead of the statement that contains it.
+  ///
+  /// `f(x).field` has no lvalue to project from, so the call's result has to
+  /// live somewhere before the field can be read. Pulse will hoist it on its
+  /// own, but its hoisted binders are named from a counter that does not
+  /// survive leaving a statement, so two of them can end up sharing a name; a
+  /// branch-local one then captures a same-named binder introduced before the
+  /// branch, and the branch postcondition becomes ill-typed. Naming the
+  /// temporary here keeps the names unique by construction and makes the
+  /// emitted Pulse say what the C says.
+  ///
+  /// Only unconditionally evaluated positions are hoisted: moving a call out
+  /// of a `?:` arm or the right operand of `&&`/`||` would evaluate it when C
+  /// would not.
+  void hoistRValueMembers(Vec<Rc<ir::Stmt>> &stmts, Expr *e) {
+    if (!e)
+      return;
+    e = e->IgnoreParens();
+    if (auto *co = dyn_cast<ConditionalOperator>(e)) {
+      hoistRValueMembers(stmts, co->getCond());
+      return;
+    }
+    if (auto *bo = dyn_cast<BinaryOperator>(e)) {
+      // The right operand of a comma runs after the left, and `trStmt`
+      // translates it as a statement of its own, which hoists it there.
+      if (bo->getOpcode() == BO_LAnd || bo->getOpcode() == BO_LOr ||
+          bo->getOpcode() == BO_Comma) {
+        hoistRValueMembers(stmts, bo->getLHS());
+        return;
+      }
+    }
+    for (auto *child : e->children()) {
+      if (auto *ce = dyn_cast_or_null<Expr>(child)) {
+        hoistRValueMembers(stmts, ce);
+      }
+    }
+    // A variadic argument has no parameter to be passed to, so its value is
+    // dropped. What evaluating it obliges -- ownership of a field it reads,
+    // no overflow in arithmetic -- is not dropped with it: an argument that is
+    // not trivially inert is bound to a local ahead of the statement, which
+    // is where those obligations are checked. C evaluates every argument
+    // before the call, in an unspecified order, so this is one of the orders
+    // it allows.
+    if (auto *call = dyn_cast<CallExpr>(e)) {
+      auto *fd = call->getDirectCallee();
+      if (fd && fd->isVariadic()) {
+        for (unsigned i = fd->getNumParams(); i < call->getNumArgs(); ++i) {
+          auto *arg = call->getArg(i);
+          if (canOmitVariadicArgument(arg) || hoistedVarargs.count(arg))
+            continue;
+          auto argLoc = getRange(arg->getSourceRange());
+          auto ty = trQualType(arg->getType(), arg->getSourceRange());
+          auto name = "__pal_vararg_" + std::to_string(rvalueHoistCounter++);
+          auto id = ctx.mk_ident(toStr(StringRef(name)), argLoc.clone());
+          auto rval = trRValue(arg);
+          stmts.push(mk_let_stmt(argLoc.clone(), std::move(id), std::move(ty),
+                                 std::move(rval)));
+          hoistedVarargs.insert(arg);
+        }
+      }
+    }
+    auto *m = dyn_cast<MemberExpr>(e);
+    if (!m || m->isArrow()) {
+      return;
+    }
+    auto *base = m->getBase()->IgnoreParenImpCasts();
+    if (!base->isPRValue() || !isa<CallExpr>(base)) {
+      return;
+    }
+    if (hoistedRValues.count(base)) {
+      return;
+    }
+    auto baseLoc = getRange(base->getSourceRange());
+    auto ty = trQualType(base->getType(), base->getSourceRange());
+    auto name = "__pal_rvalue_" + std::to_string(rvalueHoistCounter++);
+    auto id = ctx.mk_ident(toStr(StringRef(name)), baseLoc.clone());
+    auto rval = trRValue(base);
+    stmts.push(mk_let_stmt(baseLoc.clone(), std::move(id), std::move(ty),
+                           std::move(rval)));
+    hoistedRValues[base] = name;
+  }
+
+  void hoistAddressedCompoundLiterals(Vec<Rc<ir::Stmt>> &stmts, Expr *e) {
+    if (!e)
+      return;
+    e = e->IgnoreParens();
+    if (auto *co = dyn_cast<ConditionalOperator>(e)) {
+      hoistAddressedCompoundLiterals(stmts, co->getCond());
+      return;
+    }
+    if (auto *bo = dyn_cast<BinaryOperator>(e)) {
+      if (bo->getOpcode() == BO_LAnd || bo->getOpcode() == BO_LOr) {
+        hoistAddressedCompoundLiterals(stmts, bo->getLHS());
+        return;
+      }
+    }
+    if (auto *uo = dyn_cast<UnaryOperator>(e);
+        uo && uo->getOpcode() == UO_AddrOf) {
+      auto *base = uo->getSubExpr()->IgnoreParenImpCasts();
+      if (auto *cl = dyn_cast<CompoundLiteralExpr>(base)) {
+        if (!hoistedCompoundLiterals.count(base)) {
+          auto baseLoc = getRange(base->getSourceRange());
+          auto ty = trQualType(base->getType(), base->getSourceRange());
+          auto name = "__pal_compound_" + std::to_string(rvalueHoistCounter++);
+          auto id = ctx.mk_ident(toStr(StringRef(name)), baseLoc.clone());
+          stmts.push(mk_var_decl(baseLoc.clone(), id.clone(), ty.clone()));
+          stmts.push(mk_assign(baseLoc.clone(),
+                               mk_lvalue_var(baseLoc.clone(), id.clone()),
+                               trRValue(cl)));
+          hoistedCompoundLiterals[base] = name;
+        }
+        return;
+      }
+    }
+    for (auto *child : e->children()) {
+      if (auto *ce = dyn_cast_or_null<Expr>(child)) {
+        hoistAddressedCompoundLiterals(stmts, ce);
+      }
+    }
+  }
+
   rust::Unit trStmt(Vec<Rc<ir::Stmt>> &stmts, Stmt *stmt) {
     auto loc = getRange(stmt->getSourceRange());
+
+    if (auto *e = dyn_cast<Expr>(stmt)) {
+      hoistAddressedCompoundLiterals(stmts, e);
+      hoistRValueMembers(stmts, e);
+    } else if (auto *ret = dyn_cast<ReturnStmt>(stmt)) {
+      hoistAddressedCompoundLiterals(stmts, ret->getRetValue());
+      hoistRValueMembers(stmts, ret->getRetValue());
+    } else if (auto *ifs = dyn_cast<IfStmt>(stmt)) {
+      hoistAddressedCompoundLiterals(stmts, ifs->getCond());
+      hoistRValueMembers(stmts, ifs->getCond());
+    } else if (auto *ds = dyn_cast<DeclStmt>(stmt)) {
+      for (auto *d : ds->decls()) {
+        if (auto *vd = dyn_cast<VarDecl>(d)) {
+          hoistAddressedCompoundLiterals(stmts, vd->getInit());
+          hoistRValueMembers(stmts, vd->getInit());
+        }
+      }
+    }
 
     if (auto *bo = dyn_cast<BinaryOperator>(stmt)) {
       switch (bo->getOpcode()) {
@@ -1705,14 +2818,21 @@ public:
       auto enss = Vec<Rc<ir::Expr>>::new_();
       std::string flagName;
       std::string condName;
+      // Whether the user wrote any loop annotation on this do-while. The Vec
+      // bridge exposes only new_/push, so emptiness is tracked here rather
+      // than queried afterwards.
+      bool sawLoopAnnot = false;
       if (auto attrBody = dyn_cast<AttributedStmt>(body)) {
         for (auto attr : attrBody->getAttrs()) {
           if (auto inv = isUnaryAttrOf(attr, "pal-invariant")) {
             invs.push(std::move(inv.value()));
+            sawLoopAnnot = true;
           } else if (auto req = isUnaryAttrOf(attr, "pal-requires")) {
             reqs.push(std::move(req.value()));
+            sawLoopAnnot = true;
           } else if (auto ens = isUnaryAttrOf(attr, "pal-ensures")) {
             enss.push(std::move(ens.value()));
+            sawLoopAnnot = true;
           } else if (auto ann = dyn_cast<AnnotateAttr>(attr)) {
             if (ann->getAnnotation() == "pal-do-while-first" &&
                 ann->args_size() == 1) {
@@ -1730,6 +2850,43 @@ public:
           }
         }
         body = attrBody->getSubStmt();
+      }
+
+      // `do { ... } while (0)` is not a loop. It is C's standard idiom for
+      // giving a multi-statement macro a single-statement body (C FAQ 10.4),
+      // and BUG_ON and assert-style macros are built from it.
+      //
+      // Desugaring it like any other do-while is semantically correct but
+      // destroys the facts it establishes: the body becomes a Pulse `while`,
+      // and the *only* thing that survives a loop is its invariant. The
+      // auto-generated invariant relates the two loop-control flags and says
+      // nothing about program state, so
+      //
+      //     BUG_ON(i >= n);   // do { if (i >= n) abort(); } while (0)
+      //
+      // taught the solver nothing about `i` afterwards -- even though
+      // _pal_abort ensures `pure False`, so the `if` really does establish
+      // `i < n` on the path that continues. Every bounds check written this
+      // way was invisible, which for a codebase whose validation idiom *is*
+      // BUG_ON means essentially all of its input validation was invisible.
+      //
+      // When the guard is a constant zero the body runs exactly once, so
+      // emitting it straight-line is not an optimisation but the faithful
+      // translation. Guarded conservatively:
+      //   * a top-level `break` or `continue` in the body targets this
+      //     do-while (both exit it, since the guard is false); inlining would
+      //     silently re-bind them to an enclosing loop, or to nothing;
+      //   * any user annotation means the user is treating this as a loop, so
+      //     honour that and take the general path.
+      {
+        auto condVal = d->getCond()->getIntegerConstantExpr(*astCtx);
+        bool isZeroGuard = !d->getCond()->HasSideEffects(*astCtx) &&
+                           condVal.has_value() && *condVal == 0;
+        if (isZeroGuard && !sawLoopAnnot && flagName.empty() &&
+            condName.empty() && !hasTopLevelBreak(body) &&
+            !hasTopLevelContinue(body)) {
+          return trStmt(stmts, body);
+        }
       }
 
       // First-iteration flag: named by _do_while_first, else auto-generated.
@@ -1966,6 +3123,11 @@ public:
             currentGroup->caseValues.push_back(innerCs->getLHS());
             caseBody = innerCs->getSubStmt();
           }
+          if (auto *ds = dyn_cast_or_null<DefaultStmt>(caseBody)) {
+            seenDefault = true;
+            currentGroup->isDefault = true;
+            caseBody = ds->getSubStmt();
+          }
           if (caseBody)
             currentGroup->body.push_back(caseBody);
         } else if (auto *ds = dyn_cast<DefaultStmt>(child)) {
@@ -2012,15 +3174,33 @@ public:
           break;
       }
 
-      if (hasOnlyTerminalBreaks && !cases.empty() && !switchEnss.empty()) {
-        auto makeBody = [&](SwitchGroup &group) {
-          auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
-          size_t bodySize = group.body.size() - 1;
-          for (size_t i = 0; i < bodySize; i++)
-            trStmt(bodyStmts, group.body[i]);
-          return bodyStmts;
-        };
+      auto makeBody = [&](SwitchGroup &group) {
+        auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
+        size_t bodySize = group.body.size() - 1;
+        for (size_t i = 0; i < bodySize; i++)
+          trStmt(bodyStmts, group.body[i]);
+        return bodyStmts;
+      };
 
+      // One case group is one choice, not a sequence of partial updates.
+      // Keep both arms together so their output initialization can join.
+      if (hasOnlyTerminalBreaks && cases.size() == 1 && switchEnss.empty()) {
+        auto cond = mk_bool_lit(loc.clone(), false);
+        for (auto *caseValue : cases.front()->caseValues) {
+          auto eq = mk_rvalue_binop(loc.clone(), ir::BinOp::Eq(),
+                                    mk_lvalue_var(loc.clone(), scrutId.clone()),
+                                    trRValue(caseValue->IgnoreParenImpCasts()));
+          cond = mk_rvalue_binop(loc.clone(), ir::BinOp::LogOr(),
+                                 std::move(cond), std::move(eq));
+        }
+        auto defaultBody =
+            defaultGroup ? makeBody(*defaultGroup) : Vec<Rc<ir::Stmt>>::new_();
+        stmts.push(mk_if(loc.clone(), std::move(cond), makeBody(*cases.front()),
+                         std::move(defaultBody), Vec<Rc<ir::Expr>>::new_()));
+        return {};
+      }
+
+      if (hasOnlyTerminalBreaks && !cases.empty() && !switchEnss.empty()) {
         bool canUseMatch = true;
         for (auto *group : cases) {
           for (auto *caseValue : group->caseValues) {
@@ -2271,6 +3451,12 @@ public:
       for (auto d : ds->decls()) {
         auto dloc = getRange(d->getSourceRange());
         if (auto vd = dyn_cast<VarDecl>(d)) {
+          if (vd->isStaticLocal()) {
+            ctx.report_diag(dloc.clone(), true,
+                            "block-scope static storage is not supported"_rs);
+            stmts.push(mk_stmt_err(dloc.clone()));
+            continue;
+          }
           auto id = ctx.mk_ident(toStr(vd->getName()), dloc.clone());
           auto qt = vd->getType();
           if (auto *vat =
@@ -2285,14 +3471,32 @@ public:
             auto ty = trTypeAttrs(
                 vd->getAttrs(),
                 trQualType(vd->getType(), vd->getSourceRange(), nullptr,
-                           findFnProtoTypeLoc(vd->getTypeSourceInfo())));
+                           findFnProtoTypeLoc(vd->getTypeSourceInfo())),
+                vd->getType(), vd->getSourceRange());
             stmts.push(mk_var_decl(dloc.clone(), id.clone(), std::move(ty)));
             if (vd->hasInit()) {
+              // The initializer is evaluated exactly once, with nothing else
+              // in the expression to cross, so a statement expression in it
+              // may put its statements here -- between the declaration and
+              // the assignment.
+              auto savedHoist = hoistTarget;
+              hoistTarget = &stmts;
+              auto init = trRValue(vd->getInit());
+              hoistTarget = savedHoist;
               stmts.push(mk_assign(dloc.clone(),
                                    mk_lvalue_var(dloc.clone(), id.clone()),
-                                   trRValue(vd->getInit())));
+                                   std::move(init)));
             }
           }
+        } else if (auto fd = dyn_cast<FunctionDecl>(d); fd && !fd->hasBody()) {
+          // C allows declaring a function in block scope: the K&R-era idiom of
+          // declaring a library function locally instead of including its
+          // header. The declared function is the same entity as one declared
+          // at file scope, and the statement itself has no runtime effect, so
+          // hoist the declaration out of the body. A body here would be a GNU
+          // nested function, which can capture enclosing locals and hence
+          // cannot be hoisted; that falls through to the error below.
+          HandleDecl(fd);
         } else {
           reportUnsupported(d->getSourceRange(), dloc,
                             "unsupported variable declaration ",
@@ -2353,6 +3557,20 @@ public:
           }
         }
       }
+      // Any other statement expression, used where its value is discarded.
+      //
+      // `({ s1; s2; e; });` as a statement is exactly `{ s1; s2; e; }`: the
+      // only thing a statement expression adds over a compound statement is
+      // that it has a value, and in statement position that value is thrown
+      // away.  So this arm is general -- it needs no restriction on the body
+      // at all -- and it is where the GNU idiom mostly appears:
+      // do-something-and-check macros expanded for their effect.
+      //
+      // The value-carrying case is handled in trRValue, where it does need a
+      // restriction, because an rvalue has nowhere to put s1 and s2.
+      return trStmt(stmts, se->getSubStmt());
+    } else if (auto *attr = dyn_cast<AttributedStmt>(stmt)) {
+      return trStmt(stmts, attr->getSubStmt());
     } else if (auto *cse = dyn_cast<CStyleCastExpr>(stmt)) {
       if (cse->getType()->isVoidType()) {
         // (void)expr — translate the sub-expression as a statement to
@@ -2360,8 +3578,46 @@ public:
         // ((void)0) will naturally produce no IR.
         return trStmt(stmts, cse->getSubExpr());
       }
+    } else if (auto *co = dyn_cast<ConditionalOperator>(stmt)) {
+      if (auto *arm = constantCondArm(co)) {
+        return trStmt(stmts, arm);
+      }
+      // `c ? a : b;` as a statement: the value is discarded, but a and b may
+      // still do something, so this is an if/else -- not a no-op, and not an
+      // rvalue, which is why it cannot go through trRValue.
+      //
+      // C code writes this when both arms are calls, which is how some
+      // assert() implementations expand.  Each arm is translated in
+      // statement position, so an arm that computes a discarded pure value
+      // drops out on its own.
+      auto thenStmts = Vec<Rc<ir::Stmt>>::new_();
+      trStmt(thenStmts, co->getTrueExpr());
+      auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
+      trStmt(elseStmts, co->getFalseExpr());
+      return stmts.push(mk_if(std::move(loc), trRValue(co->getCond()),
+                              std::move(thenStmts), std::move(elseStmts),
+                              Vec<Rc<ir::Expr>>::new_()));
     } else if (dyn_cast<NullStmt>(stmt) || dyn_cast<IntegerLiteral>(stmt)) {
       return rust::Unit();
+    }
+
+    // An expression evaluated for a value that is then discarded, where
+    // computing the value does nothing observable, is a no-op -- so drop it
+    // rather than reporting it unsupported.
+    //
+    // C admits such statements (with a warning), and the GNU statement
+    // expression makes them unavoidable: `({ s1; e; });` in statement
+    // position *always* ends in one, because `e` is the construct's value and
+    // the surrounding statement throws it away.  Without this, the general
+    // statement-position arm above could not translate anything.
+    //
+    // `HasSideEffects` is clang's own answer, and it is conservative: a call,
+    // an assignment, an increment, or a volatile read all count, and any of
+    // them still reaches the diagnostic below.
+    if (auto *ex = dyn_cast<Expr>(stmt)) {
+      if (!ex->HasSideEffects(*astCtx)) {
+        return rust::Unit();
+      }
     }
 
     reportUnsupported(stmt->getSourceRange(), loc, "unsupported statement ",
@@ -2511,6 +3767,26 @@ public:
         return {};
       }
 
+      // A `_memset_zero` wrapper is an intrinsic, not a function: every call
+      // to it is rewritten to a whole-object zeroing, so emitting a module for
+      // it would only add an uninterpreted stub that nothing calls. A
+      // definition still translates normally -- the marker only claims what
+      // calls mean, and a body present in this translation unit is code to be
+      // verified like any other.
+      {
+        bool memsetZero = false;
+        for (auto *attr : FD->getAttrs()) {
+          if (auto *ann = dyn_cast<AnnotateAttr>(attr);
+              ann && ann->getAnnotation() == "pal-memset-zero" &&
+              ann->args_size() == 0) {
+            memsetZero = true;
+          }
+        }
+        if (memsetZero && !FD->hasBody()) {
+          return {};
+        }
+      }
+
       // Regular function decl
       auto ident = getDeclName(FD);
       auto builder =
@@ -2526,10 +3802,29 @@ public:
                         ? ir::ParamMode::Out()
                         : [&]() {
                             auto qt = param->getType().IgnoreParens();
-                            if (qt.isConstQualified())
+                            if (hasCoreRefAttr(param->getAttrs()) ||
+                                isCoreRefQualType(param->getType()))
+                              return ir::ParamMode::Regular();
+                            // A top-level `const` on a parameter passed by
+                            // value says nothing about ownership: the callee
+                            // gets its own copy, and the qualifier only
+                            // forbids reassigning the local. Reading it as a
+                            // borrow gives the parameter a permission
+                            // implicit, and for a scalar -- whose ownership
+                            // predicate is `emp` -- nothing at the call site
+                            // can ever solve it, so the call does not
+                            // elaborate. Only an indirection can be borrowed.
+                            if (qt.getCanonicalType()->isPointerType() &&
+                                qt.getCanonicalType().isConstQualified())
                               return ir::ParamMode::Const();
-                            if (auto ptr = dyn_cast<PointerType>(qt)) {
-                              if (ptr->getPointeeType().isConstQualified())
+                            // `getAs` desugars through typedefs, so a
+                            // parameter declared with a pointer-to-const
+                            // typedef (`PCFOO`) is recognized just
+                            // like one that writes `const T *` through.
+                            if (auto ptr = qt->getAs<PointerType>()) {
+                              if (ptr->getPointeeType()
+                                      .getCanonicalType()
+                                      .isConstQualified())
                                 return ir::ParamMode::Const();
                             }
                             return ir::ParamMode::Regular();
@@ -2545,7 +3840,8 @@ public:
       }
       builder.return_type(trTypeAttrs(
           FD->getAttrs(),
-          trQualType(FD->getReturnType(), FD->getReturnTypeSourceRange())));
+          trQualType(FD->getReturnType(), FD->getReturnTypeSourceRange()),
+          FD->getReturnType(), FD->getReturnTypeSourceRange()));
       for (auto attr : FD->getAttrs()) {
         if (FD->hasBody() && attr->isInherited())
           continue;
@@ -2577,9 +3873,16 @@ public:
                               snippets);
         }
       }
-      if (FD->hasBody()) {
+      if (FD->hasBody() && ctx.selects_function_body(toStr(FD->getName()))) {
         return ctx.add_fn_defn(std::move(builder), trStmts(FD->getBody()));
       } else {
+        if (FD->doesThisDeclarationHaveABody()) {
+          std::string message =
+              "--only-function excludes body of `" + FD->getName().str() +
+              "`; only its external declaration is translated";
+          ctx.report_diag(getRange(FD->getSourceRange()), false,
+                          toStr(message));
+        }
         return ctx.add_fn_decl(std::move(builder));
       }
     } else if (auto *TD = dyn_cast<TypedefDecl>(D)) {
@@ -2590,6 +3893,8 @@ public:
           trQualType(TD->getUnderlyingType(), TD->getSourceRange(), &anon,
                      findFnProtoTypeLoc(TD->getTypeSourceInfo()));
       type = trTypeAttrs(TD->getAttrs(), std::move(type));
+      recordTypeLayout(kLayoutTypedef, TD->getName(),
+                       astCtx->getTypedefType(TD));
       bool isPointerView = false;
       if (TD->hasAttrs()) {
         for (auto *attr : TD->getAttrs()) {
@@ -2615,12 +3920,24 @@ public:
       return {};
     } else if (auto *VD = dyn_cast<VarDecl>(D)) {
       auto loc = getRange(VD->getSourceRange());
-      auto id = ctx.mk_ident(toStr(VD->getName()), loc.clone());
+      auto id = symbolIdent(VD, loc.clone(), false);
       auto ty = trQualType(VD->getType(), VD->getSourceRange(), nullptr,
                            findFnProtoTypeLoc(VD->getTypeSourceInfo()));
       OptExpr init = VD->hasInit() ? OptExpr::Some(trRValue(VD->getInit()))
                                    : OptExpr::None();
-      bool is_pure = VD->getType().isConstQualified() && VD->hasInit();
+      // Purity is immutability, which is a property of the type alone. Whether
+      // the value is *known here* is a separate question, answered by `init`
+      // and `is_extern` below.
+      bool is_pure = VD->getType().isConstQualified();
+      // Whether the object is defined in another translation unit. Asked of
+      // the whole redeclaration chain in this one, so an `extern` declaration
+      // that this file also defines is not external. This is what separates
+      // `extern const T g;`, whose value is unknown, from the tentative
+      // definition `const T g;`, which is initialized as if by 0 (C17
+      // 6.9.2p2); neither carries an initializer. Files that only declare the
+      // object report it as external, and `merge` combines that with the file
+      // that defines it, if the build has one.
+      bool is_extern = VD->hasDefinition(*astCtx) == VarDecl::DeclarationOnly;
       bool opaque_to_smt = false;
       for (auto attr : VD->getAttrs()) {
         if (auto ann = dyn_cast<AnnotateAttr>(attr);
@@ -2635,14 +3952,51 @@ public:
         }
       }
       return ctx.add_global_var(std::move(loc), std::move(id), std::move(ty),
-                                std::move(init), is_pure, opaque_to_smt);
-    } else if (dyn_cast<EnumDecl>(D)) {
-      // Enum declarations need no IR representation;
-      // constants are inlined as integer literals at use sites.
+                                std::move(init), is_pure, is_extern,
+                                opaque_to_smt,
+                                /*is_enum_constant=*/false);
+    } else if (auto *ED = dyn_cast<EnumDecl>(D)) {
+      // Enum declarations need no IR representation of their own; Clang inlines
+      // enumerators as integer literals wherever they appear in a *body*.
+      //
+      // Contracts are different: they are raw source snippets that PAL parses
+      // itself, so Clang never sees those uses and an enumerator there is just
+      // an unresolved name. Publish each enumerator as a pure global constant
+      // so contracts can name it rather than repeat its value. Enumerators
+      // reached through a header are dropped again by the pruner unless a
+      // contract actually mentions them.
+      for (auto *ecd : ED->enumerators()) {
+        auto ecdLoc = getRange(ecd->getSourceRange());
+        auto ecdId = ctx.mk_ident(toStr(ecd->getName()), ecdLoc.clone());
+        auto ecdQt = ecd->getType();
+        if (ecdQt.isNull())
+          continue;
+        auto ecdTy = trQualType(ecdQt, ecd->getSourceRange());
+        const auto val = ecd->getInitVal();
+        SmallString<20> valStr;
+        val.toString(valStr, 10, val.isSigned());
+        auto lit =
+            mk_int_lit(ecdLoc.clone(), mk_bigint(toStr(StringRef(valStr))),
+                       trQualType(ecdQt, ecd->getSourceRange()));
+        ctx.add_global_var(std::move(ecdLoc), std::move(ecdId),
+                           std::move(ecdTy), OptExpr::Some(std::move(lit)),
+                           /*is_pure=*/true,
+                           // An enumerator is defined right here, never in
+                           // another translation unit.
+                           /*is_extern=*/false,
+                           /*opaque_to_smt=*/false,
+                           /*is_enum_constant=*/true);
+      }
+      return {};
+    } else if (dyn_cast<EmptyDecl>(D)) {
       return {};
     } else if (dyn_cast<StaticAssertDecl>(D)) {
       // _Static_assert / static_assert — compile-time check already
       // enforced by Clang; no Pulse representation needed.
+      return {};
+    } else if (dyn_cast<FileScopeAsmDecl>(D)) {
+      reportUnsupported(D->getSourceRange(), getRange(D->getSourceRange()),
+                        "file-scope assembly is not translated", "");
       return {};
     }
 
@@ -2868,6 +4222,31 @@ static void parse_file(RefMut<Ctx> ctx) {
     compDB = std::make_unique<FixedCompilationDatabase>(".", argsForCompDB);
   }
 
+  const auto commands = compDB->getCompileCommands(fileName);
+  if (commands.size() != 1) {
+    ctx.report_diag(
+        mk_original_location(ctx.intern_str(toStr(fileName)), 1, 1, 1, 1), true,
+        "missing or ambiguous compilation commands for selected translation unit"_rs);
+    return;
+  }
+  const auto &command = commands.front();
+  std::string context = command.Directory;
+  bool output = false;
+  for (const auto &arg : command.CommandLine) {
+    if (output) {
+      output = false;
+      continue;
+    }
+    if (arg == "-o") {
+      output = true;
+      continue;
+    }
+    if (arg == fileName || arg == command.Filename || arg == "-c")
+      continue;
+    context += "\n" + arg;
+  }
+  ctx.set_linkage_context(toStr(context));
+
   ClangTool Tool(*compDB, sourcePathList,
                  std::make_shared<PCHContainerOperations>(), CtxVFS::make(ctx));
 
@@ -2877,21 +4256,55 @@ static void parse_file(RefMut<Ctx> ctx) {
 
   // Tool.appendArgumentsAdjuster(OptionsParser->getArgumentsAdjuster());
 
+  // On macOS, _FORTIFY_SOURCE is set to 2 by default, hence all libc functions
+  // will be rewritten into calls the translator does not model.
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
-      {"-DC2PULSE", "-fno-builtin"}, ArgumentInsertPosition::BEGIN));
+      {"-DC2PULSE", "-fno-builtin", "-D_FORTIFY_SOURCE=0"},
+      ArgumentInsertPosition::BEGIN));
+  Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
+      {"-Wno-unused-but-set-variable", "-Wno-unused-variable"},
+      ArgumentInsertPosition::END));
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
 
-  // Add user-specified include paths
+  // Preserve platform preincludes from the compilation database before
+  // applying the caller's annotation headers, in their requested order.
+  size_t includeFileCount = ctx.get_include_file_count();
+  for (size_t i = 0; i < includeFileCount; ++i) {
+    std::string header = toString(ctx.get_include_file(i));
+    Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
+        {"-include", header.c_str()}, ArgumentInsertPosition::END));
+  }
+
+  // Add user-specified include paths and preprocessor definitions.
+  //
+  // Each adjuster inserts at BEGIN, so applying them in forward order would
+  // reverse the user's ordering and make the *last* -I win. Include path order
+  // is significant -- it is what lets a caller shadow a project header -- so we
+  // walk backwards, leaving the final argv in the order the user gave.
+  //
+  // Defines are inserted before the include paths are prepended, so they end up
+  // after them in argv; -D and -I do not interact, so relative order is
+  // immaterial. What matters is that both precede the source file.
+  size_t defineCount = ctx.get_define_count();
+  for (size_t i = defineCount; i-- > 0;) {
+    std::string def = "-D" + toString(ctx.get_define(i));
+    Tool.appendArgumentsAdjuster(
+        getInsertArgumentAdjuster(def.c_str(), ArgumentInsertPosition::BEGIN));
+  }
+
   size_t includePathCount = ctx.get_include_path_count();
-  for (size_t i = 0; i < includePathCount; i++) {
+  for (size_t i = includePathCount; i-- > 0;) {
     std::string incPath = "-I" + toString(ctx.get_include_path(i));
     Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
         incPath.c_str(), ArgumentInsertPosition::BEGIN));
   }
 
   PALActionFactory factory(ctx, rangeMap);
-  Tool.run(&factory);
+  if (Tool.run(&factory) != 0)
+    ctx.report_diag(
+        mk_original_location(ctx.intern_str(toStr(fileName)), 1, 1, 1, 1), true,
+        "failed to parse selected translation unit"_rs);
 }
 
 namespace rust::exported_functions {

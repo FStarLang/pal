@@ -1,0 +1,5 @@
+conflicting external definitions of duplicate
+incompatible C declarations for incompatible
+conflicting external definitions of repeated_object
+incompatible C declarations for collision
+incompatible C declarations for collision_alias

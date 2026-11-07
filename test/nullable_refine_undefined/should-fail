@@ -1,0 +1,2 @@
+Failed to prove pure property
+Failed to prove: FStar.UInt32.v var_divisor <> 0

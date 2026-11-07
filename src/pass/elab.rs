@@ -216,6 +216,16 @@ impl<'a> Elaborator<'a> {
             TypeT::Pointer(to, kind) => {
                 self.elab_type(env, Rc::make_mut(to));
                 match kind {
+                    // A `void *` has no pointee type to be parametric in, so it
+                    // becomes a raw `core_ref` rather than a `ref unit`: `unit`
+                    // is a real inhabited type, and `ref unit` would be
+                    // incompatible with every typed pointer. Defaulting here
+                    // rather than in the frontend keeps the explicit `_array`,
+                    // `_arrayptr` and `_core_ref` annotations winning, since
+                    // they set a non-`Unknown` kind earlier.
+                    PointerKind::Unknown if matches!(to.val, TypeT::Void) => {
+                        *kind = PointerKind::Core
+                    }
                     PointerKind::Unknown => *kind = PointerKind::Ref,
                     PointerKind::Ref => {}
                     PointerKind::Array => {}
@@ -318,7 +328,9 @@ impl<'a> Elaborator<'a> {
                     self.elab_type(env, Rc::make_mut(ty));
                     env.push_var_decl(ident, ty.clone(), LocalDeclKind::RValue);
                 }
-                InlinePulseToken::Verbatim(_) | InlinePulseToken::FieldAntiquot { .. } => {}
+                InlinePulseToken::Verbatim(_)
+                | InlinePulseToken::FieldAntiquot { .. }
+                | InlinePulseToken::WitnessAntiquot(_) => {}
                 InlinePulseToken::AuxFnAntiquot { ty, .. } => self.elab_type(env, Rc::make_mut(ty)),
             }
         }
@@ -697,6 +709,25 @@ impl<'a> Elaborator<'a> {
                     }
                 }
                 match bin_op {
+                    BinOp::Elvis => {
+                        // The result type of `a ?: b` is cast to the meet of the two operands.
+                        if let Some(meet_type) = env.meet_type(lhs_ty.clone(), rhs_ty.clone()) {
+                            if !env.vtype_eq(lhs_ty, meet_type.clone()) {
+                                cast_to(lhs, meet_type.clone().to_rc())
+                            }
+                            if !env.vtype_eq(rhs_ty, meet_type.clone()) {
+                                cast_to(rhs, meet_type.to_rc())
+                            }
+                        } else {
+                            self.report(
+                                format!(
+                                    "cannot apply ?: to arguments of type {} and {}",
+                                    lhs_ty, rhs_ty
+                                ),
+                                &rval.loc,
+                            );
+                        }
+                    }
                     BinOp::LogAnd | BinOp::LogOr | BinOp::Implies => {
                         // For SLProp operands, use meet_type casts (&&→**, etc.)
                         // For non-SLProp operands, cast to Bool (handles int→bool)
@@ -730,17 +761,11 @@ impl<'a> Elaborator<'a> {
                     | BinOp::BitAnd
                     | BinOp::BitOr
                     | BinOp::BitXor => {
-                        // Pointer arithmetic: array/arrayptr ± integer → cast integer to SizeT
+                        // Pointer arithmetic: pointer ± integer → cast integer to SizeT
                         let lhs_w = env.vtype_whnf(lhs_ty.clone());
                         let rhs_w = env.vtype_whnf(rhs_ty.clone());
-                        let lhs_is_ptr = matches!(
-                            &lhs_w.val,
-                            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                        );
-                        let rhs_is_ptr = matches!(
-                            &rhs_w.val,
-                            TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                        );
+                        let lhs_is_ptr = env.is_arith_ptr(&lhs_w);
+                        let rhs_is_ptr = env.is_arith_ptr(&rhs_w);
                         if lhs_is_ptr && !rhs_is_ptr && matches!(bin_op, BinOp::Add | BinOp::Sub) {
                             let rhs_w = env.vtype_whnf(rhs_ty.clone());
                             if !matches!(rhs_w.val, TypeT::SizeT) {
@@ -1060,9 +1085,18 @@ impl<'a> Elaborator<'a> {
     /// pointer kind (e.g. `int *a = malloc(sizeof(int) * 10)` → Array), and
     /// update the Decl's type before it is pushed to the environment.
     fn refine_decl_pointer_kind(env: &Env, stmts: &mut Vec<Rc<Stmt>>, decl_idx: usize) {
-        let StmtT::Decl(decl_name, _) = &stmts[decl_idx].val else {
+        let StmtT::Decl(decl_name, decl_ty) = &stmts[decl_idx].val else {
             return;
         };
+        // A `void *` local is always a raw `core_ref`, whatever it is assigned
+        // from: it has no pointee type to be refined to. Without this guard the
+        // initializer's kind wins here, before `elab_type` runs, and the local
+        // is pinned to `Ref` — i.e. `ref unit`.
+        if let TypeT::Pointer(to, _) = &decl_ty.val
+            && matches!(to.val, TypeT::Void)
+        {
+            return;
+        }
         let var_name = &decl_name.val;
         for j in (decl_idx + 1)..stmts.len() {
             let StmtT::Assign(x, v) = &stmts[j].val else {
@@ -1112,20 +1146,64 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Lower complex expressions at the top of statements.
-    /// - `Cond` in Assign/Return/Call → If statement
+    /// - `Cond` in Return/Call → If statement (an assignment's is left to
+    ///   the emitter, which knows whether the value is a number)
     fn lower_expr(stmt: &mut Rc<Stmt>) -> bool {
         let s = Rc::make_mut(stmt);
         let loc = s.loc.clone();
         match &s.val {
             StmtT::Assign(lhs, rhs) => {
-                if let ExprT::Cond(c, a, b) = &rhs.val {
-                    let (c, a, b, lhs) = (c.clone(), a.clone(), b.clone(), lhs.clone());
+                if let Some((name, fields, outer_cast)) = match &rhs.val {
+                    ExprT::StructInit(name, fields) => Some((name, fields, None)),
+                    ExprT::Cast(inner, ty) => match &inner.val {
+                        ExprT::StructInit(name, fields) => Some((name, fields, Some(ty.clone()))),
+                        _ => None,
+                    },
+                    _ => None,
+                } {
+                    let conditional =
+                        fields
+                            .iter()
+                            .enumerate()
+                            .find_map(|(idx, (_, value))| match &value.val {
+                                ExprT::Cond(c, a, b) => {
+                                    Some((idx, c.clone(), a.clone(), b.clone()))
+                                }
+                                ExprT::Cast(inner, ty) => match &inner.val {
+                                    ExprT::Cond(c, a, b) => Some((
+                                        idx,
+                                        c.clone(),
+                                        ExprT::Cast(a.clone(), ty.clone())
+                                            .with_loc(value.loc.clone()),
+                                        ExprT::Cast(b.clone(), ty.clone())
+                                            .with_loc(value.loc.clone()),
+                                    )),
+                                    _ => None,
+                                },
+                                _ => None,
+                            });
+                    let Some((idx, c, a, b)) = conditional else {
+                        return false;
+                    };
+                    let branch_rhs = |field_value: Rc<Expr>| {
+                        let mut branch_fields = fields.clone();
+                        branch_fields[idx].1 = field_value;
+                        let struct_init = ExprT::StructInit(name.clone(), branch_fields)
+                            .with_loc(rhs.loc.clone());
+                        match &outer_cast {
+                            Some(ty) => {
+                                ExprT::Cast(struct_init, ty.clone()).with_loc(rhs.loc.clone())
+                            }
+                            None => struct_init,
+                        }
+                    };
+                    let lhs = lhs.clone();
                     s.val = StmtT::If {
                         cond: c,
                         then_branch: Rc::new(vec![
-                            StmtT::Assign(lhs.clone(), a).with_loc(loc.clone()),
+                            StmtT::Assign(lhs.clone(), branch_rhs(a)).with_loc(loc.clone()),
                         ]),
-                        else_branch: Rc::new(vec![StmtT::Assign(lhs, b).with_loc(loc)]),
+                        else_branch: Rc::new(vec![StmtT::Assign(lhs, branch_rhs(b)).with_loc(loc)]),
                         ensures: Rc::new(vec![]),
                     };
                     return true;
@@ -1295,7 +1373,9 @@ impl<'a> Elaborator<'a> {
                 ty,
                 init,
                 is_pure: _,
+                is_extern: _,
                 opaque_to_smt: _,
+                is_enum_constant: _,
             }) => {
                 self.elab_type(env, Rc::make_mut(ty));
                 if let Some(init) = init {

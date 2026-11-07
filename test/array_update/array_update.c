@@ -1,4 +1,5 @@
 #include "pal.h"
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -58,12 +59,100 @@ void set_elem_fields(_array struct entry *a, uint32_t i, uint64_t v, uint64_t t)
 // Like set_x, but instead of taking the whole array it takes an _arrayptr that
 // already points at the struct to update. The field is written through the
 // pointer (p->x), borrowing write permission from the parent array `arr`.
-void set_x_via_ptr(_arrayptr struct point *p, int val)
-  _preserves(_inline_pulse(arrayptr_pts_to $(p) $`arr))
-  _requires(_inline_pulse(array_pts_to_full $`arr 1.0R $`v))
-  _requires((bool) _inline_pulse(0 <= offset_of $(p) - offset_of $`arr
-    /\ offset_of $(p) - offset_of $`arr < array_spec_len $`v))
-  _ensures(_inline_pulse(exists* v_new. array_pts_to $`arr 1.0R v_new))
+// An interior pointer is an address like any other here, and there is no
+// separate `arrayptr` predicate relating it to the array it came out of: what
+// the caller lends is a run of cells starting at this address, which it split
+// off and will put back. So the Palow contract is the ordinary array one, and
+// the only thing it has to say is that the run is not empty.
+void set_x_via_ptr(_array struct point *p, int val)
+  _requires(p._length > 0)
 {
   p->x = val;
+}
+
+void rebind_array_local(_array struct point *a, _array struct point *b)
+  _requires(a._length > 0 && b._length > 0)
+  _preserves_value(a._length)
+  _preserves_value(b._length)
+  _ensures(a[0].x == 10 && b[0].x == 20)
+{
+  _array struct point *p = NULL;
+  p = a;
+  p[0].x = 10;
+  p = b;
+  p[0].x = 20;
+}
+
+union point_array {
+  _array struct point *points;
+  uintptr_t bits;
+};
+
+void read_union_array(_array struct point *a)
+  _requires(a._length > 0)
+  _preserves_value(a._length)
+  _ensures(a[0].x == 42)
+{
+  union point_array u;
+  u.points = a;
+  u.points[0].x = 42;
+}
+
+/* The byte offset of element `i`, reduced the way pointer addition reduces it.
+   `4sz `SizeT.mul` i` would only be well-typed where 4 * 2^32 fits in a
+   `size_t`, and an interface is checked for every target. */
+#define _byte_offset(es, i) \
+  (SizeT.uint_to_t ((es * UInt32.v i) % Pulse.Lib.C.Palow.Target.addr_limit))
+
+_plain uint32_t *array_address(_plain _array uint32_t *a, uint32_t i)
+  _ensures(_inline_pulse(
+    pure ($(return) == $(a) +! _byte_offset(4, $(i)))))
+{
+  return &a[i];
+}
+
+_plain struct point *union_array_address(_plain _array struct point *a, uint32_t i)
+  _ensures(_inline_pulse(
+    pure ($(return) == $(a) +! _byte_offset(8, $(i)))))
+{
+  union point_array u;
+  u.points = a;
+  return &u.points[i];
+}
+
+bool uninitialized_array_end(void)
+  _ensures(return == true)
+{
+  uint32_t a[4];
+  _plain uint32_t *end = &a[4];
+  return end == &a[4];
+}
+
+uint64_t read_entry(const struct entry *e)
+  _ensures(return == e->value)
+{
+  return e->value;
+}
+
+uint64_t read_index(_array struct entry *a, uint32_t i)
+  _requires(i < a._length)
+  _ensures(return == a[i].value)
+{
+  return read_entry(&a[i]);
+}
+
+uint64_t read_index_alias(_array struct entry *a, uint32_t i)
+  _requires(i < a._length)
+  _ensures(return == a[i].value)
+{
+  const struct entry *e = &a[i];
+  return read_entry(e);
+}
+
+uint64_t read_index_callback(_array struct entry *a, uint32_t i)
+  _requires(i < a._length)
+  _ensures(return == a[i].value)
+{
+  uint64_t (*read)(const struct entry *) = read_entry;
+  return read(&a[i]);
 }

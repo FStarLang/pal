@@ -62,7 +62,7 @@ it passes, the implementation satisfies the spec. More availabe at [`examples/`]
 | LLVM dev headers | 20.x | `llvm-config`, `libclang-cpp20-dev`, `libclang-20-dev` |
 | g++ | recent | builds the C++ FFI ([`cpp/impl.cpp`](cpp/impl.cpp)) |
 | Rust | 2024 edition | compiles the PAL binary |
-| F\*/Pulse | nightly 2026-08-12 | verifies generated `.fst` output |
+| F\*/Pulse | nightly 2026-11-06 | verifies generated `.fst` output |
 
 ### Setup (Ubuntu / Debian)
 
@@ -90,11 +90,13 @@ calls it to find LLVM libraries.
 ### Build & verify
 
 ```bash
-make               # Rust binary + Pulse support library
-make test -j8      # translate every test case, verify with F*
+make                    # Rust binary + Pulse support library
+make test -j8           # translate every test case, verify with F*
 cd test/swap && make                       # one test
 cargo run -- --print-ir test/swap/swap.c   # just the IR
 ```
+
+PAL emits code against the [Palow](palow.md) memory model.
 
 82 test directories, each a C file that PAL translates and F\*/Pulse
 verifies. Create a new one with `./test/new.sh my_test`.
@@ -114,11 +116,46 @@ pal [OPTIONS] <FILES>...
 
   -o, --outdir <DIR>     where to write .fst output
   -I <PATH>              extra include search paths
+      --include <FILE>   preinclude a header (repeatable, in order)
+      --only-function <NAME>  select a function body (repeatable)
       --print-ir         print IR and exit
       --time-passes      show per-pass timing
   -q, --quiet            suppress diagnostics on stderr
       --tmpdir <DIR>     directory for intermediates
 ```
+
+Without `--only-function`, all input function bodies are translated. With it,
+every selected name must have a definition; excluded bodies are reported as
+warnings and become external declarations, not verified implementations.
+Selected bodies still undergo the normal strict translation checks. This lets
+a verification build check an actual dependency implementation with an
+annotation header supplied by `--include`, without copying its C body.
+Preincluded headers follow any platform headers in the compilation database.
+A selected definition in an included header remains a proof root even when
+none of the input sources call it.
+
+---
+
+## Reviewing pull requests
+
+Changes to the translator are easiest to judge by looking at the F\* code they
+produce. Every pull request therefore gets an automatic comment showing a diff
+of the output `pal` generates for the whole test suite, base versus head. The
+full diff is also attached to the workflow run as the `pal-output-diff`
+artifact.
+
+Comment `!diff` on a pull request to regenerate the report on demand; the
+"PR Output Diff" workflow can also be started manually from the Actions tab
+for any pull request number. On-demand reports take a few minutes, since the
+command waits for the run it started before posting.
+
+The workflows live in [`.github/workflows/`](.github/workflows):
+`pr-output-diff.yml` builds both revisions and computes the diff (via
+[`.github/scripts/pal-snapshot.sh`](.github/scripts/pal-snapshot.sh)),
+`pr-output-diff-comment.yml` posts it, and `pr-output-diff-command.yml`
+handles the `!diff` command. Configure a `PAL_GIST_TOKEN` repository secret
+(a token with the `gist` scope) to additionally publish each full diff as a
+gist; without it the comment links to the artifact instead.
 
 ---
 
@@ -129,7 +166,7 @@ Detailed references live in [`doc/`](doc/):
 | Document | Covers |
 |----------|--------|
 | [Surface syntax](doc/pal_surface_syntax.md) | Full annotation reference: contracts, ownership, refinements, ghost code, Pulse interop |
-| [Structs](doc/structs.md) | What PAL emits per `struct` and `union`: generated types, predicates, fold/unfold, field projections |
+| [Palow](palow.md) | The memory model: design, how C data is represented, implementation log |
 | [Internals](doc/internals.md) | Pipeline passes, IR design, Zngur FFI, diagnostics, output structure, Pulse support library |
 | [doc/README.md](doc/README.md) | Documentation index: how to write specs, how C data is modeled in Pulse |
 

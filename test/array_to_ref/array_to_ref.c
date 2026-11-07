@@ -1,4 +1,5 @@
 #include "pal.h"
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -23,10 +24,7 @@ void caller(_array int *a, size_t i)
   _requires(i < a._length)
 {
     int *p = &a[i];
-    _ghost_stmt(array_cell_read $(a) $(i));
     write_to(p);
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some (array_cell_ref $(a) (SizeT.v $(i))));
-    _ghost_stmt(array_return_cell $(a));
 }
 
 // `init_cell` takes an `_out int *` — an *uninitialized* `ref`
@@ -46,10 +44,7 @@ void caller_out(_array int *a, size_t i)
   _requires(i < a._length)
 {
     int *p = &a[i];
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.forget_maybe $(p));
     init_cell(p);
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some (array_cell_ref $(a) (SizeT.v $(i))));
-    _ghost_stmt(array_return_cell $(a));
 }
 
 // Borrow a *genuinely uninitialized* array cell and write through it.
@@ -63,9 +58,101 @@ void fill_first(_out _array int *a)
   _requires(a._length == 1)
 {
     int *p = &a[0];
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.forget_maybe $(p));
     init_cell(p);
-    _ghost_stmt(Pulse.Lib.C.MaybeUninit.intro_maybe_some (array_cell_ref $(a) (SizeT.v 0sz)));
-    _ghost_stmt(array_return_cell $(a));
 }
 
+
+typedef struct {
+  int lo;
+  int hi;
+} pair;
+
+// Handing a *field* to an `_out` parameter. The field is opened for the
+// length of the call exactly as an array element is, and since `p` already
+// holds a value the field gives it up before the callee writes through it.
+//
+// Palow only: PAL models a field of a live struct as something that has to be
+// unfolded to raw storage by hand before it can be handed out as a write-only
+// `ref`, so the same source needs explicit unfold/fold ghost steps there.
+// Palow's field focus is that step, so the call stands on its own.
+void init_field(pair *p)
+  _requires(_live(*p))
+  _ensures(p->hi == 42)
+{
+    init_cell(&p->hi);
+}
+
+// Palow: a local array handed to an `_out _array` parameter. PAL's model has
+// no uninitialised-array view, so the whole `_out _array` mode is Palow's.
+void fill_two(_out _array int *a)
+  _preserves(a._length == 2)
+{
+  a[0] = 1;
+  a[1] = 2;
+}
+
+void use_fill_two(void)
+{
+  int buf[2];
+  fill_two(buf);
+}
+
+void inspect_array_parameter(int *const *p)
+{
+}
+
+void fill_addressed_array(_array int *a, bool inspect)
+  _requires(a._length == 2)
+  _preserves_value(a._length)
+{
+  if (inspect) {
+    inspect_array_parameter(&a);
+  }
+  fill_two(a);
+}
+
+void fill_addressed_output(_out _array int *a, bool inspect)
+  _requires(a._length == 2)
+  _ensures(_forall(size_t j, j < 2 ==> a[j] == 42))
+{
+  if (inspect) {
+    inspect_array_parameter(&a);
+  }
+  for (size_t i = 0; i < 2; i++)
+    _invariant(i <= 2)
+    _invariant(_forall(size_t j, j < i ==> a[j] == 42))
+  {
+    a[i] = 42;
+  }
+}
+
+int read_retargeted_array(_array const int *a, _array const int *b, bool replace)
+  _requires(a._length == 1 && b._length == 1)
+  _ensures(return == (replace ? _old(b[0]) : _old(a[0])))
+{
+  int result;
+  if (replace) {
+    a = b;
+    result = a[0];
+  } else {
+    result = a[0];
+  }
+  return result;
+}
+
+// The array behind a struct's `_array` pointer field. Its ownership lives in
+// the struct's deep predicate, so handing it to a callee borrows that
+// predicate for the length of the statement.
+struct holder {
+  _array int *cells;
+  size_t n;
+};
+
+int sum_cells(_array const int *c, size_t n)
+  _requires(c._length == n);
+
+int sum_holder(const struct holder *h)
+  _requires(h->cells._length == h->n)
+{
+  return sum_cells(h->cells, h->n);
+}

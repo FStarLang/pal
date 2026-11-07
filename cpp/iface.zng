@@ -137,6 +137,7 @@ mod crate::ir {
         constructor BitXor;
         constructor Shl;
         constructor Shr;
+        constructor Elvis;
     }
 
     type ParamMode {
@@ -187,7 +188,25 @@ mod crate::clang {
         fn get_include_path_count(&self) -> usize;
         fn get_include_path(&self, usize) -> &str;
 
+        fn get_include_file_count(&self) -> usize;
+        fn get_include_file(&self, usize) -> &str;
+        fn selects_function_body(&self, &str) -> bool;
+
+        fn get_define_count(&self) -> usize;
+        fn get_define(&self, usize) -> &str;
+
         fn set_target_int_widths(&mut self, TargetIntWidths);
+        fn set_pointer_size(&mut self, u64);
+        fn set_little_endian(&mut self, bool);
+        fn set_max_align(&mut self, u64);
+
+        fn set_type_layout(&mut self, u32, &str, u64, u64);
+        fn set_field_offset(&mut self, u32, &str, &str, u64);
+        fn set_field_bit_offset(&mut self, u32, &str, &str, u64);
+
+        fn set_linkage_context(&mut self, &str);
+        fn add_c_symbol(&mut self, &str, u32, &str, bool, bool, bool, Rc<SourceInfo>);
+        fn mk_symbol_ident(&mut self, &str, bool, Rc<SourceInfo>) -> Rc<Ident>;
 
         fn intern_str(&mut self, &str) -> Rc<str>;
 
@@ -199,7 +218,7 @@ mod crate::clang {
         fn add_struct(&mut self, DeclBuilder);
         fn add_struct_decl(&mut self, Rc<SourceInfo>, Rc<Ident>);
         fn add_union(&mut self, DeclBuilder);
-        fn add_global_var(&mut self, Rc<SourceInfo>, Rc<Ident>, Rc<Type>, Option<Rc<Expr>>, bool, bool);
+        fn add_global_var(&mut self, Rc<SourceInfo>, Rc<Ident>, Rc<Type>, Option<Rc<Expr>>, bool, bool, bool, bool);
         fn add_include(&mut self, Rc<SourceInfo>, &str, u32, &SnippetMap);
         fn add_let_decl(&mut self, Rc<SourceInfo>, bool, u32, u32, &SnippetMap);
         fn add_letimpure_decl(&mut self, Rc<SourceInfo>, u32, u32, &SnippetMap);
@@ -252,6 +271,8 @@ mod crate::clang {
     fn mk_array_init(Rc<SourceInfo>, Rc<Type>, Vec<Rc<Expr>>, bool) -> Rc<Expr>;
 
     fn str_from_parts(*const u8, usize) -> &str;
+
+    fn ident_name(&Rc<Ident>) -> &str;
 
     fn mk_original_location(Rc<str>, u32, u32, u32, u32) -> Rc<SourceInfo>;
     fn mk_fallback_sourceinfo(&Rc<SourceInfo>) -> Rc<SourceInfo>;

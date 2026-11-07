@@ -1,8 +1,11 @@
+pub mod builtins;
 pub mod check;
 pub mod decay;
 pub mod elab;
 pub mod elim_cis;
-pub mod emit;
+pub mod emit_palow;
+pub mod linkage;
 pub mod merge;
+pub mod normalize_casts;
 pub mod prune;
 pub mod restructure_goto;

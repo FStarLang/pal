@@ -1,0 +1,267 @@
+/* Test: how PAL emits pure global variables -- their value and their address
+ * machinery (`var_g`, `addr_var_g`, `addr_var_g_not_null`, `acquire_var_g`).
+ *
+ * A global is pure when it is `const`, or annotated `_pure`. `_pure` forces
+ * purity outright, so `const` adds nothing under it.
+ *
+ * Value and purity belong to the object, not to one declaration, so a global
+ * declared several times is emitted once and takes its value from whichever
+ * declaration carries the initializer. With no initializer anywhere it is a
+ * tentative definition and reads as 0 (C17 6.9.2p2).
+ *
+ * Cases are grouped by payload type, since emission differs: struct globals
+ * get the full address machinery, array globals get none, and pointer globals
+ * are null unless they point at another global.
+ */
+
+#include "pal.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+
+/* ===========================================================================
+ * Part 1 -- integers
+ * ======================================================================== */
+
+/* 1.1 `const` with an initializer, implicitly pure. */
+const uint32_t i_const_init = 11;
+
+uint32_t read_i_const_init(void) _ensures(return == 11) {
+  const uint32_t *p = &i_const_init;
+  return *p;
+}
+
+/* 1.2 `_pure` with an initializer, on a type that is not `const`. */
+_pure uint32_t i_pure_init = 22;
+
+uint32_t read_i_pure_init(void) _ensures(return == 22) {
+  const uint32_t *p = &i_pure_init;
+  return *p;
+}
+
+/* 1.3 A tentative definition: no initializer and no storage-class specifier,
+ * so it is initialized as if by 0 (C17 6.9.2p2). */
+_pure uint32_t i_pure_tentative;
+
+uint32_t read_i_pure_tentative(void) _ensures(return == 0) {
+  const uint32_t *p = &i_pure_tentative;
+  return *p;
+}
+
+/* 1.4 The same plus `const`, which must change nothing. */
+_pure const uint32_t i_pure_const_tentative;
+
+uint32_t read_i_pure_const_tentative(void) _ensures(return == 0) {
+  const uint32_t *p = &i_pure_const_tentative;
+  return *p;
+}
+
+/* 1.5 Declaration, then definition: one object, emitted once. */
+const uint32_t i_decl_then_def;
+const uint32_t i_decl_then_def = 33;
+
+uint32_t read_i_decl_then_def(void) _ensures(return == 33) {
+  const uint32_t *p = &i_decl_then_def;
+  return *p;
+}
+
+/* 1.6 The same with `extern` on the declaration. */
+extern const uint32_t i_extern_then_def;
+const uint32_t i_extern_then_def = 44;
+
+uint32_t read_i_extern_then_def(void) _ensures(return == 44) {
+  const uint32_t *p = &i_extern_then_def;
+  return *p;
+}
+
+/* --- The same object declared more than once. ----------------------------- */
+
+/* 1.7 Definition, then a bare re-declaration -- the mirror of 1.5. */
+const uint32_t i_def_then_decl = 55;
+const uint32_t i_def_then_decl;
+
+uint32_t read_i_def_then_decl(void) _ensures(return == 55) {
+  const uint32_t *p = &i_def_then_decl;
+  return *p;
+}
+
+/* 1.8 The same under `_pure`, which must not lose the initializer. */
+_pure uint32_t i_pure_def_then_decl = 66;
+_pure uint32_t i_pure_def_then_decl;
+
+uint32_t read_i_pure_def_then_decl(void) _ensures(return == 66) {
+  const uint32_t *p = &i_pure_def_then_decl;
+  return *p;
+}
+
+/* 1.9 A bare `const` with no initializer anywhere: a tentative definition as
+ * in 1.3, so it reads as 0 without needing `_pure`. */
+const uint32_t i_bare_const;
+
+uint32_t read_i_bare_const(void) _ensures(return == 0) {
+  const uint32_t *p = &i_bare_const;
+  return *p;
+}
+
+/* ===========================================================================
+ * Part 2 -- structs, which get the same address machinery as a scalar
+ * ======================================================================== */
+
+struct point {
+  int32_t x;
+  int32_t y;
+};
+
+/* 2.1 `const` with an initializer, read through its address. */
+const struct point s_const_init = {.x = 3, .y = 4};
+
+int32_t read_s_const_init(void) _ensures(return == 4) {
+  const struct point *p = &s_const_init;
+  return p->y;
+}
+
+/* 2.2 A tentative definition, so every field reads as 0. */
+_pure struct point s_pure_tentative;
+
+int32_t read_s_pure_tentative(void) _ensures(return == 0) {
+  const struct point *p = &s_pure_tentative;
+  return p->x;
+}
+
+/* 2.3 A declaration before the definition, as in 1.5. */
+const struct point s_decl_then_def;
+const struct point s_decl_then_def = {.x = 5, .y = 6};
+
+int32_t read_s_decl_then_def(void) _ensures(return == 5) {
+  const struct point *p = &s_decl_then_def;
+  return p->x;
+}
+
+/* --- Reads that do not fold. ---------------------------------------------
+ *
+ * Selecting a field of a pure global is resolved at emit time, so each reader
+ * above is emitted as its answer -- `read_s_const_init` is just `4l` -- and
+ * none of them names the emitted `var_s_*` at all. They pin the folding, not
+ * the value. Copying the whole object does name it, because the copy needs
+ * storage to write into, so these are what pin the struct value itself.
+ * ======================================================================== */
+
+/* 2.4 The value of 2.1, read through a copy. */
+int32_t copy_s_const_init(void) _ensures(return == 4) {
+  struct point q = s_const_init;
+  return q.y;
+}
+
+/* 2.5 The value of 2.2, which is zero in every field. */
+int32_t copy_s_pure_tentative(void) _ensures(return == 0) {
+  struct point q = s_pure_tentative;
+  return q.x;
+}
+
+/* 2.6 The value of 2.3, which comes from the second declaration. */
+int32_t copy_s_decl_then_def(void) _ensures(return == 5) {
+  struct point q = s_decl_then_def;
+  return q.x;
+}
+
+/* ===========================================================================
+ * Part 3 -- arrays
+ *
+ * An array global is emitted as a spec rather than as storage, so it is read
+ * with `array_spec_idx` and gets no address machinery.
+ * ======================================================================== */
+
+/* 3.1 `const` with an initializer. */
+const uint32_t a_const_init[3] = {10, 20, 30};
+
+uint32_t read_a_const_init(void) _ensures(return == 20) { return a_const_init[1]; }
+
+/* 3.2 A tentative definition, so every element reads as 0. */
+_pure const uint32_t a_pure_tentative[3];
+
+uint32_t read_a_pure_tentative(void) _ensures(return == 0) { return a_pure_tentative[1]; }
+
+/* 3.3 A declaration before the definition, as in 1.5. */
+const uint32_t a_decl_then_def[3];
+const uint32_t a_decl_then_def[3] = {7, 8, 9};
+
+uint32_t read_a_decl_then_def(void) _ensures(return == 8) { return a_decl_then_def[1]; }
+
+/* --- Reads that do not fold. ---------------------------------------------
+ *
+ * A constant subscript folds just as a field selection does, so 3.1-3.3 are
+ * emitted as their answer and never name the emitted `var_a_*`. An index that
+ * is only known at run time cannot fold, so these are what pin the element
+ * values; the precondition keeps the expected answer a single number.
+ * ======================================================================== */
+
+/* 3.4 The elements of 3.1. */
+uint32_t index_a_const_init(size_t i) _requires(i == 1) _ensures(return == 20) {
+  return a_const_init[i];
+}
+
+/* 3.5 The elements of 3.2, which are all zero. */
+uint32_t index_a_pure_tentative(size_t i) _requires(i == 1) _ensures(return == 0) {
+  return a_pure_tentative[i];
+}
+
+/* 3.6 The elements of 3.3, which come from the second declaration. */
+uint32_t index_a_decl_then_def(size_t i) _requires(i == 1) _ensures(return == 8) {
+  return a_decl_then_def[i];
+}
+
+/* ===========================================================================
+ * Part 4 -- pointers
+ *
+ * Only a top-level `const` makes the object const, so `T *const p` is pure
+ * while `const T *p` is not, and PAL rejects the latter as non-pure. A
+ * pointer with no initializer is a tentative definition, so it is null. Each
+ * case is read by the same predicate, "is this pointer null?", returning 1
+ * for yes and 0 for no.
+ * ======================================================================== */
+
+/* 4.1 Top-level `const`, so pure. */
+uint32_t *const p_const_null = NULL;
+
+uint32_t read_p_const_null(void) _ensures(return == 1) {
+  uint32_t *const *pp = &p_const_null;
+  uint32_t *v = *pp;
+  return (v == NULL) ? (uint32_t)1 : (uint32_t)0;
+}
+
+/* 4.2 Both `const`s; the top-level one is what makes it pure. */
+const uint32_t *const p_const_both = NULL;
+
+uint32_t read_p_const_both(void) _ensures(return == 1) {
+  const uint32_t *const *pp = &p_const_both;
+  const uint32_t *v = *pp;
+  return (v == NULL) ? (uint32_t)1 : (uint32_t)0;
+}
+
+/* 4.3 A tentative definition, so null. */
+_pure uint32_t *p_pure_tentative;
+
+uint32_t read_p_pure_tentative(void) _ensures(return == 1) {
+  uint32_t *const *pp = &p_pure_tentative;
+  uint32_t *v = *pp;
+  return (v == NULL) ? (uint32_t)1 : (uint32_t)0;
+}
+
+/* 4.4 `_pure` forces purity on an object that is not itself `const`. */
+_pure const uint32_t *p_pure_const_pointee;
+
+uint32_t read_p_pure_const_pointee(void) _ensures(return == 1) {
+  const uint32_t *const *pp = &p_pure_const_pointee;
+  const uint32_t *v = *pp;
+  return (v == NULL) ? (uint32_t)1 : (uint32_t)0;
+}
+
+/* 4.5 Pointing at another global gives that address, not null. */
+uint32_t *const p_addr_of_global = (uint32_t *)&i_pure_init;
+
+uint32_t read_p_addr_of_global(void) _ensures(return == 0) {
+  uint32_t *const *pp = &p_addr_of_global;
+  uint32_t *v = *pp;
+  return (v == NULL) ? (uint32_t)1 : (uint32_t)0;
+}
+

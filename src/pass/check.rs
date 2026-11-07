@@ -198,7 +198,7 @@ impl<'a> Checker<'a> {
                     self.check_type(env, ty);
                     env.push_var_decl(ident, ty.clone(), LocalDeclKind::RValue);
                 }
-                InlinePulseToken::Verbatim(_) => {}
+                InlinePulseToken::Verbatim(_) | InlinePulseToken::WitnessAntiquot(_) => {}
                 InlinePulseToken::FieldAntiquot { .. } => {
                     // TODO: check that field exists
                 }
@@ -349,6 +349,7 @@ impl<'a> Checker<'a> {
                     };
                     match bin_op {
                         BinOp::Eq => check_eq(self),
+                        BinOp::Elvis => check_eq(self),
                         BinOp::LogAnd | BinOp::LogOr | BinOp::Implies => {
                             check_eq(self);
                             match &env.vtype_whnf(lhs_ty.clone().into()).val {
@@ -372,17 +373,11 @@ impl<'a> Checker<'a> {
                         | BinOp::BitAnd
                         | BinOp::BitOr
                         | BinOp::BitXor => {
-                            // Allow pointer arithmetic: array/arrayptr ± integer
+                            // Allow pointer arithmetic: pointer ± integer
                             let lhs_w = env.vtype_whnf(lhs_ty.clone().into());
                             let rhs_w = env.vtype_whnf(rhs_ty.clone().into());
                             let is_ptr_arith = matches!(bin_op, BinOp::Add | BinOp::Sub)
-                                && (matches!(
-                                    &lhs_w.val,
-                                    TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                                ) || matches!(
-                                    &rhs_w.val,
-                                    TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                                ));
+                                && (env.is_arith_ptr(&lhs_w) || env.is_arith_ptr(&rhs_w));
                             if !is_ptr_arith {
                                 check_eq(self)
                             }
@@ -407,6 +402,13 @@ impl<'a> Checker<'a> {
             ExprT::FnCall(f, args) => {
                 for arg in args {
                     self.check_rvalue(env, arg)
+                }
+                if crate::prims::is_prim(&f.val) {
+                    // A PAL primitive stands for a Pulse library function, so
+                    // there is no C declaration to look up and no argument
+                    // types to check against one. The front end only ever emits
+                    // these at the arity the library function has.
+                    return;
                 }
                 let Some(fn_decl) = env.lookup_fn(f) else {
                     self.report(format!("unknown function {}", f.val), &rval.loc);
@@ -546,9 +548,20 @@ impl<'a> Checker<'a> {
                                 );
                             }
                         }
+                        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+                            let Some(u) = env.lookup_union(n) else {
+                                return self.report(format!("unknown union {}", n), &rval.loc);
+                            };
+                            if u.get_field(field).is_none() {
+                                return self.report(
+                                    format!("no field {} in union {}", field, n),
+                                    &rval.loc,
+                                );
+                            }
+                        }
                         t => {
                             return self.report(
-                                format!("_container_of expects a struct type, got {}", t),
+                                format!("_container_of expects a struct or union type, got {}", t),
                                 &struct_ty.loc,
                             );
                         }
@@ -598,7 +611,9 @@ impl<'a> Checker<'a> {
         match env.lookup_var(n) {
             None => match env.lookup_global_var(n) {
                 Some(_) => {
-                    if needs_lvalue {
+                    // A mutable global is storage (see `mutable_global_lvalue`);
+                    // a `_pure` one is a plain value and cannot be assigned to.
+                    if needs_lvalue && env.mutable_global_lvalue(n).is_none() {
                         self.report(
                             format!("need lvalue, but global {} is rvalue", n.val),
                             &n.loc,
@@ -866,7 +881,9 @@ impl<'a> Checker<'a> {
                 ty,
                 init,
                 is_pure: _,
+                is_extern: _,
                 opaque_to_smt: _,
+                is_enum_constant: _,
             }) => {
                 self.check_type(env, ty);
                 if let Some(init) = init {

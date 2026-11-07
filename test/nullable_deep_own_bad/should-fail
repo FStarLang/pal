@@ -1,0 +1,3 @@
+Failed to prove:
+FStar.Seq.Base.length own_it.own_items
+at out/Func_opt_past_end.fst(
