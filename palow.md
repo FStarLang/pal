@@ -6670,3 +6670,19 @@ new facts about memory.
     after the parameter is walked down by a loop;
     `test/label_old_param_bad` claims the walked parameter is unchanged;
     `test/label_old_param_shadowed` is the refusal.
+
+48. **A postcondition that determines the result.** `_ensures(return == E)`,
+    with `E` free of `return`, is emitted as `rewrites_to ret E` rather than
+    `pure (ret == E)`. It is the same fact, but `rewrites_to` is the form
+    Pulse's prover reads as a substitution, which is what a conditional needs:
+    a call in a branch binds its result to a branch-local name, and with an
+    ordinary equality that name would survive into the branch's
+    postcondition under an `exists*` the join cannot get past. `rewrites_to`
+    is F\* equality, so only a result whose `==` is F\* equality qualifies --
+    machine integers, `_Bool`, and struct values, which C cannot compare and
+    a contract compares as records. Floats (IEEE `==`), pointers (possibly
+    behind a nullness guard) and an `E` whose translation carries a side
+    condition keep the ordinary clause. A struct initialiser is now also a
+    contract term -- the record, with unnamed fields zeroed, as in a body --
+    so a `_pure` function can build a struct. `test/rvalue_member_branch`
+    projects a call result twice, once inside a null-guarded branch.
