@@ -6686,3 +6686,22 @@ new facts about memory.
     contract term -- the record, with unnamed fields zeroed, as in a body --
     so a `_pure` function can build a struct. `test/rvalue_member_branch`
     projects a call result twice, once inside a null-guarded branch.
+
+49. **A determined call in an assertion.** `_ensures(return ==
+    (_Bool)_inline_pulse(f $(A) $(B)))` is a `rewrites_to` too: inline Pulse
+    reaches `return` only through its antiquotations, so those are all that
+    is checked. That is the only way to say "this function decides that
+    predicate", and it lets an `_assert` name such a call. The rule that
+    nothing is lifted out of an assertion still holds, but Pulse reads a
+    call whose postcondition is a `rewrites_to` as the term it names,
+    without running it, so the call is left in the assertion as a read is.
+    Pulse does not check the callee's precondition when it does this, so the
+    exception is limited to callees whose whole emitted precondition is
+    trivial: no `_requires`, only by-value scalar or struct parameters (no
+    pointer, `_nullable`, `_out`, `_consumes` or refinement), no implicit
+    binders, and nothing but `requires emp` in the signature. Any other call
+    in an assertion is still refused. Divergence is not a precondition: the
+    assertion is about the term `E`, which is what the call would return if
+    it returned. `test/ensures_determines_result` asserts a determined call;
+    `test/ensures_determines_result_requires` is the refusal, for a callee
+    with a `_requires` and for one with a pointer parameter.

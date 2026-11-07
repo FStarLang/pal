@@ -2328,6 +2328,15 @@ struct FnSurface {
     /// the source says, and in particular cannot discharge an overflow
     /// obligation -- see `Body::signed_ok`.
     contract: bool,
+    /// Whether the emitted postcondition determines the result with a
+    /// `rewrites_to`, which is what lets Pulse read a call to this function
+    /// in a specification as a term.
+    determined: bool,
+    /// Whether the emitted precondition is trivial: no `preserves`, every
+    /// `requires` is `emp`, and no implicit binders. Pulse reads a call in a
+    /// specification without checking the callee's precondition, so only a
+    /// callee with nothing to check may be read that way.
+    trivial_pre: bool,
     /// The `__fp` wrapper, when this function can be decayed to a code
     /// pointer: the flat, explicitly-quantified form `of_fn_div` needs.
     fp: Option<String>,
@@ -6451,6 +6460,13 @@ fn emit_fn(
         );
     }
 
+    let trivial_pre = perms.is_empty()
+        && ghosts.is_empty()
+        && out.lines().all(|l| {
+            let l = l.trim_start();
+            !l.starts_with("preserves ") && (!l.starts_with("requires ") || l == "requires emp")
+        });
+
     Ok(FnSurface {
         olens,
         ret_spliced: contract_ok && !(ret_slprops.is_empty() && ret_valued.is_empty()),
@@ -6470,6 +6486,8 @@ fn emit_fn(
         spliced_own: contract_ok
             && (!(req_slprops.is_empty() && ens_slprops.is_empty()) || refine_own_spliced.take()),
         contract: contract_ok,
+        determined: !post_rewrites.is_empty(),
+        trivial_pre,
         fp,
         fp_wits: wits.len(),
         implicits: perms
@@ -11155,6 +11173,27 @@ pub fn emit_palow(
                 },
                 void: matches!(tds.resolve(&fndecl.ret_type).val, TypeT::Void),
                 contract: sig.contract,
+                // Pulse reads such a call in a specification as the term its
+                // `rewrites_to` names, and checks none of the callee's
+                // precondition while doing so. So the callee must have none:
+                // no `_requires`, and only by-value parameters whose types
+                // carry nothing -- no pointer (ownership, liveness, array
+                // length, nullness), no `_out`/`_consumes`, no refinement.
+                spec_call: sig.determined
+                    && sig.trivial_pre
+                    && fndecl.requires.is_empty()
+                    && fndecl.args.iter().all(|a| {
+                        matches!(a.mode, ParamMode::Regular | ParamMode::Const)
+                            && matches!(
+                                tds.resolve(&a.ty).val,
+                                TypeT::Bool
+                                    | TypeT::Int { .. }
+                                    | TypeT::Float { .. }
+                                    | TypeT::SizeT
+                                    | TypeT::PtrdiffT
+                                    | TypeT::TypeRef(TypeRefKind::Struct(_))
+                            )
+                    }),
                 fp: sig.fp.is_some(),
                 fp_wits: sig.fp_wits,
                 implicits: sig.implicits.clone(),
@@ -11958,6 +11997,9 @@ struct Callee {
     /// were not its specification says only what memory comes back, and a
     /// caller that has a contract of its own has nothing to prove it with.
     contract: bool,
+    /// Whether a call to this function may stand in a specification. See
+    /// `Body::inline`.
+    spec_call: bool,
     /// Whether a `__fp` wrapper was emitted, so the function can be decayed
     /// to a code pointer.
     fp: bool,
@@ -15404,6 +15446,11 @@ impl<'a> Body<'a> {
     /// `rewrites_to`, which is exactly what lets Pulse use it in a
     /// specification; an ordinary call has no such postcondition, and putting
     /// one in an `assert` is refused with "cannot find rewrites_to in post".
+    /// The exception is a call whose contract determines its result
+    /// (`_ensures(return == E)`, emitted as `rewrites_to`) and has no
+    /// `_requires`: Pulse reads such a call in a specification as `E`, without
+    /// running it, and with no precondition to skip that is exactly what the
+    /// source means by naming the call.
     ///
     /// Nor may the call be lifted out and the name used instead. An `_assert`
     /// is a specification: it does not run, and it must not make the program
@@ -15463,10 +15510,17 @@ impl<'a> Body<'a> {
             let Some((n, d)) = rest.split_once(" = ") else {
                 return Ok(v);
             };
+            let head = d.split_whitespace().next().unwrap_or("");
             let inlinable = self.in_guard
-                || d.split_whitespace()
-                    .next()
-                    .is_some_and(|h| h.ends_with("_read"));
+                || head.ends_with("_read")
+                // A ghost statement keeps its loads as statements, and this
+                // one must not run.
+                || !self.keep_reads
+                    && head
+                    .trim_start_matches('(')
+                    .strip_prefix("func_")
+                    .and_then(|f| self.callees.get(f))
+                    .is_some_and(|c| c.spec_call);
             bound.push((n.to_string(), format!("({})", d), inlinable));
         }
         for i in (0..bound.len()).rev() {
@@ -22869,6 +22923,16 @@ fn mentions_return(e: &Expr) -> bool {
         ExprT::Cond(a, b, c) => mentions_return(a) || mentions_return(b) || mentions_return(c),
         ExprT::FnCall(_, args) => args.iter().any(|a| mentions_return(a)),
         ExprT::StructInit(_, inits) => inits.iter().any(|(_, a)| mentions_return(a)),
+        // Inline Pulse can only reach `return` through an antiquotation; the
+        // verbatim tokens around them cannot reintroduce it. Looking inside is
+        // what lets `_ensures(return == (_Bool)_inline_pulse(f $(A) $(B)))`,
+        // the only way to say "this function decides that predicate", be a
+        // `rewrites_to` as well.
+        ExprT::InlinePulse(code, _) => code.tokens.iter().any(|tok| match tok {
+            InlinePulseToken::RValueAntiquot { expr, .. }
+            | InlinePulseToken::LValueAntiquot { expr, .. } => mentions_return(expr),
+            _ => false,
+        }),
         _ => true,
     }
 }
