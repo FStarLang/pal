@@ -405,8 +405,21 @@ pub fn prepare(units: &mut [(TranslationUnit, UnitSymbols)], diags: &mut Diagnos
                 _ => None,
             };
             if let Some(key) = key {
-                if let Some((previous_unit, previous)) = definitions.get(&key) {
-                    if (*previous_unit != index || key.0 <= 2) && *previous != &decl.val {
+                // A typedef is compared by the type it denotes: glibc's
+                // <stdio.h> declares `va_list` as `__gnuc_va_list` while
+                // clang's <stdarg.h> uses `__builtin_va_list`, the same type.
+                let alias = match &decl.val {
+                    DeclT::Typedef(d) => Some((
+                        d.is_pointer_view,
+                        normalize_type(&d.body, &aliases, &mut Bound::new()),
+                    )),
+                    _ => None,
+                };
+                if let Some((previous_unit, previous, previous_alias)) = definitions.get(&key) {
+                    if (*previous_unit != index || key.0 <= 2)
+                        && *previous != &decl.val
+                        && (alias.is_none() || *previous_alias != alias)
+                    {
                         error(
                             diags,
                             &decl.loc,
@@ -414,7 +427,7 @@ pub fn prepare(units: &mut [(TranslationUnit, UnitSymbols)], diags: &mut Diagnos
                         );
                     }
                 } else {
-                    definitions.insert(key, (index, &decl.val));
+                    definitions.insert(key, (index, &decl.val, alias));
                 }
             }
         }
