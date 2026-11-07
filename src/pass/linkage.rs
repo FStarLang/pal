@@ -320,9 +320,9 @@ pub fn prepare(units: &mut [(TranslationUnit, UnitSymbols)], diags: &mut Diagnos
         }
     }
     for (tu, symbols) in units.iter_mut() {
-        if multiple {
-            let prefix = &symbols.identity.prefix;
-            let names: HashMap<_, _> = symbols
+        let prefix = &symbols.identity.prefix;
+        let names: HashMap<_, _> = if multiple {
+            symbols
                 .symbols
                 .iter()
                 .filter(|s| s.internal)
@@ -332,18 +332,33 @@ pub fn prepare(units: &mut [(TranslationUnit, UnitSymbols)], diags: &mut Diagnos
                         Rc::<str>::from(format!("{prefix}{}", s.name)),
                     )
                 })
-                .collect();
-            let mut renamer = Renamer {
-                names: &names,
-                diags,
-                raw_reference: false,
-                shadowed: Bound::new(),
-                shadow_reference: false,
-                in_pulse: false,
-            };
-            for decl in &mut tu.decls {
-                renamer.decl(decl);
-            }
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        // An antiquotation `$(f)` parses as a variable; C resolves a function
+        // name to the function, so the annotation does too.
+        let functions: HashSet<Rc<str>> = tu
+            .decls
+            .iter()
+            .filter_map(|d| match &d.val {
+                DeclT::FnDefn(d) => Some(d.decl.name.val.clone()),
+                DeclT::FnDecl(d) => Some(d.name.val.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut renamer = Renamer {
+            names: &names,
+            functions: &functions,
+            reserve: multiple,
+            diags,
+            raw_reference: false,
+            shadowed: Bound::new(),
+            shadow_reference: false,
+            in_pulse: false,
+        };
+        for decl in &mut tu.decls {
+            renamer.decl(decl);
         }
     }
     // Named type/Pulse definitions cannot safely be chosen by input order.
@@ -473,6 +488,8 @@ type Bound = HashSet<Rc<str>>;
 
 struct Renamer<'a> {
     names: &'a HashMap<Rc<str>, Rc<str>>,
+    functions: &'a HashSet<Rc<str>>,
+    reserve: bool,
     diags: &'a mut Diagnostics,
     raw_reference: bool,
     shadowed: Bound,
@@ -482,7 +499,7 @@ struct Renamer<'a> {
 
 impl Renamer<'_> {
     fn bind(&mut self, scope: &mut Bound, name: &Ident) {
-        if name.val.starts_with("__pal_tu_") {
+        if self.reserve && name.val.starts_with("__pal_tu_") {
             error(
                 self.diags,
                 &name.loc,
@@ -584,7 +601,14 @@ impl Renamer<'_> {
     }
 
     fn expr(&mut self, expr: &mut Rc<Expr>, bound: &Bound) {
-        match &mut Rc::make_mut(expr).val {
+        let e = Rc::make_mut(expr);
+        if let ExprT::Var(n) = &e.val {
+            let target = self.names.get(&n.val).unwrap_or(&n.val);
+            if !bound.contains(&n.val) && self.functions.contains(target) {
+                e.val = ExprT::FnRef(n.clone());
+            }
+        }
+        match &mut e.val {
             ExprT::Var(n) | ExprT::FnRef(n) => self.name(n, bound),
             ExprT::FnCall(n, args) => {
                 self.name(n, bound);
