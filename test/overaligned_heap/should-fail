@@ -1,0 +1,3 @@
+Error 19 at out/Func_initialize_heap.fst
+FStar.SizeT.v Pulse.Lib.C.Palow.Ptr.max_align %
+FStar.SizeT.v Struct_overaligned_record.struct_overaligned_record_alignof

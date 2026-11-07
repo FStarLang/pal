@@ -198,7 +198,7 @@ impl<'a> Checker<'a> {
                     self.check_type(env, ty);
                     env.push_var_decl(ident, ty.clone(), LocalDeclKind::RValue);
                 }
-                InlinePulseToken::Verbatim(_) => {}
+                InlinePulseToken::Verbatim(_) | InlinePulseToken::WitnessAntiquot(_) => {}
                 InlinePulseToken::FieldAntiquot { .. } => {
                     // TODO: check that field exists
                 }
@@ -373,17 +373,11 @@ impl<'a> Checker<'a> {
                         | BinOp::BitAnd
                         | BinOp::BitOr
                         | BinOp::BitXor => {
-                            // Allow pointer arithmetic: array/arrayptr ± integer
+                            // Allow pointer arithmetic: pointer ± integer
                             let lhs_w = env.vtype_whnf(lhs_ty.clone().into());
                             let rhs_w = env.vtype_whnf(rhs_ty.clone().into());
                             let is_ptr_arith = matches!(bin_op, BinOp::Add | BinOp::Sub)
-                                && (matches!(
-                                    &lhs_w.val,
-                                    TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                                ) || matches!(
-                                    &rhs_w.val,
-                                    TypeT::Pointer(_, PointerKind::Array | PointerKind::ArrayPtr)
-                                ));
+                                && (env.is_arith_ptr(&lhs_w) || env.is_arith_ptr(&rhs_w));
                             if !is_ptr_arith {
                                 check_eq(self)
                             }

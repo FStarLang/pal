@@ -1,0 +1,4 @@
+Error 228
+Cannot prove:
+array_pts_to int32_t_repr
+var_b

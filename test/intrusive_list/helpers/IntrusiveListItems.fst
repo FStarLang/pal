@@ -8,7 +8,7 @@ open Pulse.Lib.C
 open FStar.List.Tot
 #lang-pulse
 
-module R = Pulse.Lib.Reference
+module R = IntrusiveListNodeRef
 module N = Struct_list_node
 module X = IntrusiveListIndexed
 module C = IntrusiveListContext
@@ -101,7 +101,7 @@ fn find_end (#a: Type0) (p: X.ipayload a) (m: X.matcher a)
             (head pos: X.lref) (es: X.entries a)
   requires find_inv p m head pos es ** pure (pos == head)
   ensures X.is_list_ring_ix p head 1.0R es **
-    pure (X.first_match_entry m es == None) ** pure (X.first_match m es == null)
+    pure (X.first_match_entry m es == None) ** pure (X.first_match m es == R.null)
 {
   unfold (find_inv p m head pos es);
   with front back. assert (X.split p head pos front back);
@@ -115,7 +115,7 @@ fn find_end (#a: Type0) (p: X.ipayload a) (m: X.matcher a)
 let pop_post (#a: Type0) (p: X.ipayload a) (head: X.lref)
              (es: X.entries a) (result: X.lref) : slprop =
   match es with
-  | [] -> X.is_list_ring_ix p head 1.0R [] ** pure (result == null)
+  | [] -> X.is_list_ring_ix p head 1.0R [] ** pure (result == R.null)
   | e :: rest ->
     X.is_list_ring_ix p head 1.0R rest **
     (exists* (v: N.struct_list_node). R.pts_to (fst e) v) **
@@ -124,11 +124,11 @@ let pop_post (#a: Type0) (p: X.ipayload a) (head: X.lref)
 ghost
 fn pop_empty (#a: Type0) (p: X.ipayload a) (head: X.lref) (es: X.entries a)
   requires X.is_list_ring_ix p head 1.0R es ** pure (es == [])
-  ensures pop_post p head es null
+  ensures pop_post p head es R.null
 {
   rewrite (X.is_list_ring_ix p head 1.0R es) as (X.is_list_ring_ix p head 1.0R []);
-  fold (pop_post p head [] null);
-  rewrite (pop_post p head [] null) as (pop_post p head es null);
+  fold (pop_post p head [] R.null);
+  rewrite (pop_post p head [] R.null) as (pop_post p head es R.null);
 }
 
 ghost

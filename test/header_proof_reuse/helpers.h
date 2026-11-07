@@ -24,7 +24,7 @@ static inline int32_t shared_read(int32_t *p) _ensures(return == *p) {
 
 static inline int32_t shared_ghost(_plain int32_t *p)
     _ghost_arg(int32_t v)
-    _preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) #1.0R $(v)))
+    _preserves(_inline_pulse(int32_t_pts_to $(p) 1.0R $(v)))
     _ensures(return == v)
 {
     return *p;

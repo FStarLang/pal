@@ -66,15 +66,13 @@ promotions, pointer conversions), and fills in default ownership
 annotations for function parameters that lack explicit `_plain`,
 `_consumes`, or `_out` markers.
 
-- **Emit.** [`src/pass/emit.rs`](../src/pass/emit.rs) lowers the fully elaborated IR into Pulse
-source code. Each top-level declaration produces its own `.fst` module
-(and optionally a `.fsti` interface). The emitter uses the `pretty`
-crate for layout and tracks source range mappings so that positions
-in the generated Pulse can be traced back to the original C.
-Variable emission resolves parameters and locals before globals, matching
-the environment's type lookup in both contracts and function bodies.
-Address-taking follows the same rule: a shadowing local uses its own storage,
-not the same-named global's address.
+- **Emit.** [`src/pass/emit_palow.rs`](../src/pass/emit_palow.rs) lowers the fully elaborated IR into
+Pulse source code against the [Palow](../palow.md) memory model. Each
+top-level declaration produces its own `.fst` module (and optionally a
+`.fsti` interface), and `source_range_info.json` maps each module back to
+the declaration it came from. Anything the emitter cannot translate is an
+error; `--palow-permissive` turns those into comments in the generated file
+instead, for measuring coverage (`make palow-check`).
 
 ---
 
@@ -263,7 +261,7 @@ emits:
 out/
   Func_swap.fst             function implementation
   Func_swap.fsti            function interface (signature + contract)
-  Struct_point.fst          struct type, predicates, fold/unfold, field accessors
+  Struct_point.fst          struct layout, points-to predicate, field accessors
   TranslationErrors.fst     asserts False if any translation errors occurred
   diagnostics.json          LSP-compatible diagnostics
   source_range_info.json    Pulse-to-C position mapping
@@ -280,30 +278,26 @@ translation problems without requiring a separate error-checking step.
 
 ## 6. The Pulse Support Library
 
-Generated code depends on a set of F*/Pulse modules in [`pulse/`](../pulse/) that
-define C interop types. These are not generated -- they are
-hand-written library code that ships with PAL.
+Generated code depends on a set of F*/Pulse modules in [`pulse/`](../pulse/).
+These are not generated -- they are hand-written library code that ships with
+PAL, and they define the Palow memory model. [`palow.md`](../palow.md) is the
+design document.
 
 | Module | What it provides |
 |--------|-----------------|
-| `Pulse.Lib.C.Ref` | mutable reference (`ref T`) with `pts_to` |
-| `Pulse.Lib.C.Array` | arrays with `array_pts_to`, `array_pts_to_full`, `arrayptr_pts_to` |
-| `Pulse.Lib.C.Int32` | `Int32.t` arithmetic |
-| `Pulse.Lib.C.UInt32` | `UInt32.t` arithmetic |
-| `Pulse.Lib.C.SizeT` | `size_t` operations |
-| `Pulse.Lib.C.PtrdiffT` | `ptrdiff_t` operations |
-| `Pulse.Lib.C.Casts` | safe casts between numeric types |
-| `Pulse.Lib.C.Casts.Bool` | bool-to-integer casts |
-| `Pulse.Lib.C.UnaryOps` | negation, bitwise not |
-| `Pulse.Lib.C.Sizeof` | compile-time `sizeof` |
-| `Pulse.Lib.C.Inhabited` | inhabitedness proofs (needed for memory allocation) |
-| `Pulse.Lib.C.BitField` | `mask_uW` truncation helpers for unsigned bit-field writes |
-| `Pulse.Lib.C.Assumptions` | axioms bridging C semantics and F* |
-
-The top-level module `Pulse.Lib.C` re-exports the core subset:
-`Inhabited`, `Int32`, `Ref`, `Array`, `Casts`, `UnaryOps`, and `Sizeof`.
-Modules like `UInt32`, `SizeT`, `PtrdiffT`, and `Assumptions` must be
-opened individually when needed.
+| `Pulse.Lib.C.Palow.Ptr` | pointers: an address plus a provenance, pointer arithmetic |
+| `Pulse.Lib.C.Palow.Bytes` | the byte representation of memory contents |
+| `Pulse.Lib.C.Palow` | `mem_pts_to`, byte-level fractional ownership |
+| `Pulse.Lib.C.Palow.Scalar`, `.CTypes`, `.Float`, `.Encoding` | typed points-to predicates for C scalars, defined on top of `mem_pts_to` |
+| `Pulse.Lib.C.Palow.Array`, `.Local` | arrays, and automatic storage for them |
+| `Pulse.Lib.C.Palow.Bits` | bit-fields inside their storage unit |
+| `Pulse.Lib.C.Palow.Etype` | effective types |
+| `Pulse.Lib.C.Palow.Machine` | the primitives: typed loads and stores, stack allocation, `memcpy` |
+| `Pulse.Lib.C.Palow.Alloc` | `malloc`/`free` |
+| `Pulse.Lib.C.Palow.Nullable` | `unless_null`, resources guarded by a nullness test |
+| `Pulse.Lib.C.Palow.FnPtr` | function pointers |
+| `Pulse.Lib.C.Palow.Expose` | pointer/integer casts (address exposure) |
+| `Pulse.Lib.C.UInt8` ... `UInt64`, `Pulse.Lib.C.Casts.Bool` | integer arithmetic helpers used by generated code |
 
 ---
 
@@ -312,8 +306,8 @@ opened individually when needed.
 | Document | Covers |
 |----------|--------|
 | [Surface syntax](pal_surface_syntax.md) | Full annotation reference: contracts, ownership, refinements, ghost code, Pulse interop |
-| [Structs](structs.md) | What PAL emits per `struct` and `union`: generated types, predicates, fold/unfold, field projections |
+| [Palow](../palow.md) | The memory model: design, how C data is represented, implementation log |
 | [doc/README.md](README.md) | Documentation index: how to write specs, how C data is modeled in Pulse |
 
 For a code-level starting point: [`src/main.rs`](../src/main.rs) (pipeline orchestration)
-and [`src/pass/emit.rs`](../src/pass/emit.rs) (the authoritative lowering when in doubt).
+and [`src/pass/emit_palow.rs`](../src/pass/emit_palow.rs) (the authoritative lowering when in doubt).

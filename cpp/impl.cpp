@@ -282,7 +282,54 @@ public:
     ctx.set_target_int_widths(
         TargetIntWidths(TI.getCharWidth(), TI.getShortWidth(), TI.getIntWidth(),
                         TI.getLongWidth(), TI.getLongLongWidth()));
+    ctx.set_pointer_size(TI.getPointerWidth(LangAS::Default) / 8);
+    ctx.set_little_endian(TI.isLittleEndian());
+    // `max_align_t` is clang's `struct { long long; long double; }` (or
+    // `double` where `long double` is `double`), each member at its preferred
+    // alignment.
+    ctx.set_max_align(
+        std::max(
+            Context.getPreferredTypeAlign(Context.LongLongTy.getTypePtr()),
+            Context.getPreferredTypeAlign(Context.LongDoubleTy.getTypePtr())) /
+        TI.getCharWidth());
     ctx.set_linkage_context(toStr(StringRef(TI.getDataLayoutString())));
+  }
+
+  // Layout `kind` tags shared with `Ctx::set_type_layout` on the Rust side.
+  static constexpr uint32_t kLayoutTypedef = 0;
+  static constexpr uint32_t kLayoutStruct = 1;
+  static constexpr uint32_t kLayoutUnion = 2;
+
+  // Report the target-ABI size and alignment of `qt` under the name PAL uses
+  // for it, so that the emitter can turn `sizeof`/`_Alignof` into concrete
+  // `SizeT` literals rather than opaque `c_sizeof` applications.
+  void recordTypeLayout(uint32_t kind, StringRef name, QualType qt) {
+    if (qt.isNull() || qt->isIncompleteType() || qt->isDependentType() ||
+        qt->isVariableArrayType())
+      return;
+    ctx.set_type_layout(kind, toStr(name),
+                        astCtx->getTypeSizeInChars(qt).getQuantity(),
+                        astCtx->getTypeAlignInChars(qt).getQuantity());
+  }
+
+  // Report the offset of every field of `decl`. A bit-field has no byte
+  // offset of its own -- several of them share one storage unit -- so it is
+  // reported in bits instead, and the emitter works out which bytes the unit
+  // covers.
+  void recordFieldOffsets(uint32_t kind, StringRef name, RecordDecl *decl) {
+    auto const &layout = astCtx->getASTRecordLayout(decl);
+    for (auto *f : decl->fields()) {
+      auto bitOffset = layout.getFieldOffset(f->getFieldIndex());
+      if (f->isBitField()) {
+        ctx.set_field_bit_offset(kind, toStr(name), toStr(fieldNameStr(f)),
+                                 bitOffset);
+        continue;
+      }
+      if (bitOffset % astCtx->getCharWidth() != 0)
+        continue;
+      ctx.set_field_offset(kind, toStr(name), toStr(fieldNameStr(f)),
+                           bitOffset / astCtx->getCharWidth());
+    }
   }
 
   bool isLinkerAlias(const Decl *d) {
@@ -529,6 +576,9 @@ public:
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/false);
       }
+      recordTypeLayout(kLayoutStruct, toStringRef(ident_name(ident)),
+                       astCtx->getRecordType(decl));
+      recordFieldOffsets(kLayoutStruct, toStringRef(ident_name(ident)), decl);
       ctx.add_struct(std::move(builder));
     } else if (decl->getTagKind() == TagTypeKind::Union) {
       // Process nested record declarations (inner structs/unions)
@@ -546,6 +596,8 @@ public:
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/true);
       }
+      recordTypeLayout(kLayoutUnion, toStringRef(ident_name(ident)),
+                       astCtx->getRecordType(decl));
       ctx.add_union(std::move(builder));
     } else {
       reportUnsupported(decl->getSourceRange(), loc, "unsupported record kind",
@@ -1094,6 +1146,28 @@ public:
     return nullptr;
   }
 
+  // The size in bytes of a record's flexible array member's element type, or 0
+  // if the record has no flexible array member. `malloc(sizeof(S) + n)` is an
+  // allocation of `n` elements exactly when that size is 1, which is the usual
+  // shape for a byte pool.
+  uint64_t flexElemSize(QualType qt) {
+    const auto *rt = qt->getAsStructureType();
+    if (!rt)
+      return 0;
+    const RecordDecl *rd = rt->getDecl()->getDefinition();
+    if (!rd)
+      return 0;
+    const FieldDecl *last = nullptr;
+    for (const auto *f : rd->fields())
+      last = f;
+    if (!last)
+      return 0;
+    const auto *arr = astCtx->getAsIncompleteArrayType(last->getType());
+    if (!arr)
+      return 0;
+    return astCtx->getTypeSizeInChars(arr->getElementType()).getQuantity();
+  }
+
   // Whether an ignored variadic argument can be dropped without losing a
   // proof obligation: evaluating it must have no side effects, read no memory
   // other than non-volatile locals, and have no undefined behavior.
@@ -1326,9 +1400,24 @@ public:
                       return mk_malloc_flex(std::move(loc), std::move(allocTy),
                                             std::move(countExpr));
                     }
-                    // Unrecognized array term: fall back to an empty flexible
-                    // tail (plain struct malloc).
-                    return mk_malloc(std::move(loc), std::move(allocTy));
+                    // `malloc(sizeof(S) + n)` with a byte-sized tail: the term
+                    // is the count, since the elements are bytes.
+                    if (flexElemSize(structSide->getTypeOfArgument()) == 1) {
+                      auto countExpr = trRValue(arrayTerm);
+                      return mk_malloc_flex(std::move(loc), std::move(allocTy),
+                                            std::move(countExpr));
+                    }
+                    // Anything else would have to be dropped to be translated,
+                    // and a smaller allocation than the C asked for is not a
+                    // weaker translation of it but a different program.
+                    reportUnsupported(
+                        e->getSourceRange(), loc,
+                        "unsupported flexible-array allocation size",
+                        "the trailing term must be `n * sizeof(elem)`, or the "
+                        "element type must be a byte");
+                    return mk_rvalue_err(
+                        std::move(loc),
+                        trQualType(e->getType(), e->getSourceRange()));
                   }
                 }
               }
@@ -1589,8 +1678,24 @@ public:
         }
 
         // BitCast (e.g., T* → void*): pass through after malloc/calloc
-        // detection. F* functions like memcpy are type-polymorphic.
+        // detection. F* functions like memcpy are type-polymorphic. A cast
+        // *to* a different object pointer type is kept, though: it changes
+        // what a dereference reads (`*(uint32_t *)base` is a 4-byte read,
+        // not a read of `void` or of a byte).
         if (ic->getCastKind() == CK_BitCast) {
+          auto from = ic->getSubExpr()->getType();
+          auto to = ic->getType();
+          if (from->isPointerType() && to->isPointerType()) {
+            auto fromPt =
+                from->getPointeeType().getCanonicalType().getUnqualifiedType();
+            auto toPt =
+                to->getPointeeType().getCanonicalType().getUnqualifiedType();
+            if (!toPt->isVoidType() && !toPt->isFunctionType() &&
+                !toPt->isIncompleteType() && fromPt != toPt) {
+              return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
+                                    trQualType(to, e->getSourceRange()));
+            }
+          }
           return trRValue(ic->getSubExpr());
         }
 
@@ -1805,6 +1910,36 @@ public:
       }
     } else if (auto *c = dyn_cast<CallExpr>(e)) {
       if (auto fd = c->getDirectCallee()) {
+        if (fd->getName() == "__builtin_mul_overflow" && c->getNumArgs() == 3) {
+          auto lhsType = c->getArg(0)->getType();
+          auto rhsType = c->getArg(1)->getType();
+          auto outputType = c->getArg(2)->getType()->getPointeeType();
+          if (lhsType->isUnsignedIntegerType() &&
+              rhsType->isUnsignedIntegerType() &&
+              astCtx->getTypeSize(lhsType) <= 64 &&
+              astCtx->getTypeSize(rhsType) <= 64 && !outputType.isNull() &&
+              outputType->isUnsignedIntegerType() &&
+              astCtx->getTypeSize(outputType) == 32 &&
+              !outputType.isVolatileQualified()) {
+            auto prim = ctx.mk_ident(
+                toStr(StringRef("__pal_mul_overflow_u64_u32")), loc.clone());
+            auto primArgs = Vec<Rc<ir::Expr>>::new_();
+            for (unsigned i = 0; i < 2; ++i) {
+              primArgs.push(mk_rvalue_cast(
+                  loc.clone(), trRValue(c->getArg(i)),
+                  trQualType(astCtx->UnsignedLongLongTy, e->getSourceRange())));
+            }
+            primArgs.push(trRValue(c->getArg(2)));
+            return mk_rvalue_fncall(std::move(loc), std::move(prim),
+                                    std::move(primArgs));
+          }
+          reportUnsupported(e->getSourceRange(), loc,
+                            "unsupported __builtin_mul_overflow operand types",
+                            " (requires unsigned operands up to 64 bits and a "
+                            "nonvolatile uint32 destination)");
+          return mk_rvalue_err(std::move(loc),
+                               trQualType(e->getType(), e->getSourceRange()));
+        }
         // Byte-reversal builtins. `Pulse.Lib.C.UInt64.bswap64` is a
         // definition in terms of shifts and masks, not an axiom, so this
         // assumes nothing -- a caller that needs to reason about the result
@@ -1871,16 +2006,14 @@ public:
           }
           return mk_free(std::move(loc), trRValue(arg));
         }
-        // Detect memset(ptr, 0, ...). Only a zero fill value is supported:
-        // C `memset` writes raw bytes, and the only fill we can faithfully
-        // model for arbitrary types is the all-zero one. Two shapes are
-        // recognized:
+        // Detect memset with a constant byte fill. The native emitter checks
+        // whether the element type has a supported representation of it.
+        // Zero additionally supports a whole-object write:
         //   * memset(ptr, 0, sizeof(T))      — zero a single object of type T
         //     (struct, scalar, ...), emitted as a whole-object write of
         //     `zero_default`.
         //   * memset(ptr, 0, sizeof(T) * n)  — zero an array of byte-sized
         //     element type (e.g. uint8_t, char).
-        // Non-zero fill values are rejected with a clear diagnostic.
         // A platform's zeroing wrapper is the memset intrinsic under another
         // name and a shorter argument list: `zero_memory(ptr, size)`,
         // `RtlZeroMemory(ptr, size)`, `bzero(ptr, size)`. Declaring it
@@ -1917,16 +2050,21 @@ public:
           auto *sizeArg =
               c->getArg(isMemsetAlias ? 1 : 2)->IgnoreParenImpCasts();
           Expr::EvalResult valRes;
-          bool valIsZero =
-              isMemsetAlias || (valArg->EvaluateAsInt(valRes, *astCtx) &&
-                                valRes.Val.isInt() && valRes.Val.getInt() == 0);
-          if (!valIsZero) {
+          if (!isMemsetAlias && (!valArg->EvaluateAsInt(valRes, *astCtx) ||
+                                 !valRes.Val.isInt())) {
             reportUnsupported(e->getSourceRange(), loc,
-                              "memset is only supported with a zero fill value",
+                              "memset requires a constant fill value",
                               std::string());
             return mk_rvalue_err(std::move(loc),
                                  trQualType(c->getType(), c->getSourceRange()));
           }
+          const uint64_t fillByte =
+              isMemsetAlias ? 0
+                            : valRes.Val.getInt().zextOrTrunc(8).getZExtValue();
+          const bool valIsZero = fillByte == 0;
+          auto fillExpr = mk_int_lit(
+              loc.clone(), mk_bigint(toStr(std::to_string(fillByte))),
+              trQualType(astCtx->UnsignedCharTy, e->getSourceRange()));
           // Zeroing a single object: memset(ptr, 0, sizeof(T)) where the size
           // is a bare sizeof (no multiplication) whose type matches the
           // pointee of `ptr`. Works for any type with a `has_zero_default`
@@ -1936,7 +2074,7 @@ public:
             if (szof->getKind() == UETT_SizeOf) {
               auto objQt = szof->getTypeOfArgument();
               auto pointeeQt = ptrArg->getType()->getPointeeType();
-              if (!pointeeQt.isNull() &&
+              if (valIsZero && !pointeeQt.isNull() &&
                   astCtx->hasSameUnqualifiedType(objQt, pointeeQt)) {
                 auto objTy = trQualType(pointeeQt, szof->getSourceRange());
                 return mk_memset_zero(std::move(loc), std::move(objTy),
@@ -1944,7 +2082,7 @@ public:
               }
             }
           }
-          // Zeroing a whole array: `f(arr, N)` where `arr` is an array-typed
+          // Filling a whole array: `f(arr, N)` where `arr` is an array-typed
           // lvalue that decays to the pointer argument and `N` is its size in
           // bytes. The extent lives in the array's own type, so nothing has to
           // be inferred from the way the count was spelled: `sizeof(s->field)`
@@ -1959,39 +2097,33 @@ public:
             if (const auto *arrTy = astCtx->getAsConstantArrayType(destQt)) {
               auto elemQt = arrTy->getElementType();
               Expr::EvalResult szRes;
-              const bool byteSized =
+              const bool complete =
                   !elemQt->isIncompleteType() && !elemQt->isDependentType() &&
-                  astCtx->getTypeSizeInChars(elemQt).getQuantity() == 1;
+                  astCtx->getTypeSizeInChars(elemQt).getQuantity() > 0;
               const auto arrBytes =
                   astCtx->getTypeSizeInChars(destQt).getQuantity();
-              if (byteSized && sizeArg->EvaluateAsInt(szRes, *astCtx) &&
+              if (complete && sizeArg->EvaluateAsInt(szRes, *astCtx) &&
                   szRes.Val.isInt() && szRes.Val.getInt() == arrBytes) {
                 auto elemTy = trQualType(elemQt, destObj->getSourceRange());
                 llvm::SmallString<20> countStr;
-                llvm::APInt(64, arrBytes, true).toStringSigned(countStr);
+                arrTy->getSize().toStringUnsigned(countStr);
                 auto countExpr = mk_int_lit(
                     loc.clone(), mk_bigint(toStr(StringRef(countStr))),
                     trQualType(astCtx->getSizeType(), e->getSourceRange()));
-                auto zeroExpr =
-                    mk_int_lit(loc.clone(), mk_bigint("0"_rs),
-                               trQualType(elemQt, destObj->getSourceRange()));
                 return mk_memset(std::move(loc), std::move(elemTy),
-                                 trRValue(ptrArg), std::move(zeroExpr),
+                                 trRValue(ptrArg), std::move(fillExpr),
                                  std::move(countExpr));
               }
             }
           }
-          // The array shape below reads the fill value out of the call, which
-          // an alias does not carry, and a wrapper taking `void *` cannot name
-          // a byte-sized element type anyway. Rejecting it here keeps an
-          // unrecognized alias call from falling through to an uninterpreted
-          // stub.
+          // Keep an unrecognized wrapper call from falling through to an
+          // uninterpreted stub.
           if (isMemsetAlias) {
             reportUnsupported(
                 e->getSourceRange(), loc,
                 "a _memset_zero call is only supported in the form "
                 "f(ptr, sizeof(*ptr)) or f(arr, sizeof(arr)) for a "
-                "fixed-size array of a byte-sized element type; ",
+                "fixed-size array with a supported element type; ",
                 fd->getName().str());
             return mk_rvalue_err(std::move(loc),
                                  trQualType(c->getType(), c->getSourceRange()));
@@ -2026,7 +2158,7 @@ public:
                       trQualType(elemQt, sizeofSide->getSourceRange());
                   auto countExpr = trRValue(countSide);
                   return mk_memset(std::move(loc), std::move(elemTy),
-                                   trRValue(ptrArg), trRValue(valArg),
+                                   trRValue(ptrArg), std::move(fillExpr),
                                    std::move(countExpr));
                 }
                 reportUnsupported(
@@ -2040,18 +2172,29 @@ public:
               }
             }
           }
+          if (!valIsZero) {
+            reportUnsupported(
+                e->getSourceRange(), loc,
+                "nonzero memset requires a whole fixed-size array or "
+                "a byte array with an explicit element count",
+                std::string());
+            return mk_rvalue_err(std::move(loc),
+                                 trQualType(c->getType(), c->getSourceRange()));
+          }
         }
         auto fn = symbolIdent(fd, getRange(c->getCallee()->getSourceRange()));
         auto args = Vec<Rc<ir::Expr>>::new_();
         for (unsigned i = 0; i < c->getNumArgs(); ++i) {
           auto *arg = c->getArg(i);
           if (fd->isVariadic() && i >= fd->getNumParams()) {
-            if (!canOmitVariadicArgument(arg)) {
+            if (!canOmitVariadicArgument(arg) && !hoistedVarargs.count(arg)) {
               reportUnsupported(
                   arg->getSourceRange(), getRange(arg->getSourceRange()),
-                  "unsupported ignored variadic argument: expected a literal, "
-                  "a non-volatile local value or address, or wrapping "
-                  "integer arithmetic over those",
+                  "unsupported ignored variadic argument: one that is "
+                  "evaluated only conditionally (in a `?:` arm or on the "
+                  "right of `&&`/`||`) must be a literal, a non-volatile "
+                  "local value or address, or wrapping integer arithmetic "
+                  "over those",
                   "");
               return mk_rvalue_err(
                   std::move(loc),
@@ -2180,21 +2323,22 @@ public:
           return mk_alignof(std::move(loc), std::move(ty));
         }
       }
-    } else if (auto *off = dyn_cast<OffsetOfExpr>(e)) {
-      // `offsetof(S, m)` is a ground fact about the ABI, in the same way the
-      // size of a complete record is, and clang has already computed it. Fold
-      // it to its value rather than leaving the whole enclosing function
-      // untranslatable. This shares the layout assumption `c_sizeof` makes:
-      // the layout being proved against is the one this compiler chooses.
-      Expr::EvalResult evalResult;
-      if (off->EvaluateAsInt(evalResult, *astCtx)) {
-        SmallString<32> digits;
-        evalResult.Val.getInt().toString(digits, 10, /*Signed=*/false);
-        return mk_int_lit(std::move(loc), mk_bigint(toStr(digits.str())),
-                          trQualType(e->getType(), e->getSourceRange()));
+    } else if (auto *ooe = dyn_cast<OffsetOfExpr>(e)) {
+      // `offsetof(T, designator)` is an integer constant that clang has
+      // already computed from the target ABI -- the same layout PAL records
+      // for `sizeof` and the `struct_T_offsetof_f` constants -- so it becomes
+      // a literal. This also covers nested and array designators
+      // (`offsetof(T, a.b[2])`) whenever they are constant. Clang types the
+      // expression as the canonical integer behind `size_t`, so the literal
+      // is given `size_t` explicitly.
+      Expr::EvalResult res;
+      if (ooe->EvaluateAsInt(res, *astCtx)) {
+        auto ty = mk_sizet(loc.clone());
+        return mk_int_lit(std::move(loc), toBigInt(res.Val.getInt()),
+                          std::move(ty));
       }
       reportUnsupported(e->getSourceRange(), loc,
-                        "offsetof whose value is not a constant", "");
+                        "offsetof with a non-constant designator", "");
       return mk_rvalue_err(std::move(loc),
                            trQualType(e->getType(), e->getSourceRange()));
     }
@@ -2362,6 +2506,9 @@ public:
   std::map<const Expr *, std::string> hoistedRValues;
   std::map<const Expr *, std::string> hoistedCompoundLiterals;
   int rvalueHoistCounter = 0;
+  /// Variadic arguments evaluated ahead of their statement; see
+  /// `hoistRValueMembers`. The call itself then drops them.
+  std::set<const Expr *> hoistedVarargs;
 
   /// Bind a structure-valued call that a member projection reads from to a
   /// uniquely named local, ahead of the statement that contains it.
@@ -2387,7 +2534,10 @@ public:
       return;
     }
     if (auto *bo = dyn_cast<BinaryOperator>(e)) {
-      if (bo->getOpcode() == BO_LAnd || bo->getOpcode() == BO_LOr) {
+      // The right operand of a comma runs after the left, and `trStmt`
+      // translates it as a statement of its own, which hoists it there.
+      if (bo->getOpcode() == BO_LAnd || bo->getOpcode() == BO_LOr ||
+          bo->getOpcode() == BO_Comma) {
         hoistRValueMembers(stmts, bo->getLHS());
         return;
       }
@@ -2395,6 +2545,31 @@ public:
     for (auto *child : e->children()) {
       if (auto *ce = dyn_cast_or_null<Expr>(child)) {
         hoistRValueMembers(stmts, ce);
+      }
+    }
+    // A variadic argument has no parameter to be passed to, so its value is
+    // dropped. What evaluating it obliges -- ownership of a field it reads,
+    // no overflow in arithmetic -- is not dropped with it: an argument that is
+    // not trivially inert is bound to a local ahead of the statement, which
+    // is where those obligations are checked. C evaluates every argument
+    // before the call, in an unspecified order, so this is one of the orders
+    // it allows.
+    if (auto *call = dyn_cast<CallExpr>(e)) {
+      auto *fd = call->getDirectCallee();
+      if (fd && fd->isVariadic()) {
+        for (unsigned i = fd->getNumParams(); i < call->getNumArgs(); ++i) {
+          auto *arg = call->getArg(i);
+          if (canOmitVariadicArgument(arg) || hoistedVarargs.count(arg))
+            continue;
+          auto argLoc = getRange(arg->getSourceRange());
+          auto ty = trQualType(arg->getType(), arg->getSourceRange());
+          auto name = "__pal_vararg_" + std::to_string(rvalueHoistCounter++);
+          auto id = ctx.mk_ident(toStr(StringRef(name)), argLoc.clone());
+          auto rval = trRValue(arg);
+          stmts.push(mk_let_stmt(argLoc.clone(), std::move(id), std::move(ty),
+                                 std::move(rval)));
+          hoistedVarargs.insert(arg);
+        }
       }
     }
     auto *m = dyn_cast<MemberExpr>(e);
@@ -2999,15 +3174,33 @@ public:
           break;
       }
 
-      if (hasOnlyTerminalBreaks && !cases.empty() && !switchEnss.empty()) {
-        auto makeBody = [&](SwitchGroup &group) {
-          auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
-          size_t bodySize = group.body.size() - 1;
-          for (size_t i = 0; i < bodySize; i++)
-            trStmt(bodyStmts, group.body[i]);
-          return bodyStmts;
-        };
+      auto makeBody = [&](SwitchGroup &group) {
+        auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
+        size_t bodySize = group.body.size() - 1;
+        for (size_t i = 0; i < bodySize; i++)
+          trStmt(bodyStmts, group.body[i]);
+        return bodyStmts;
+      };
 
+      // One case group is one choice, not a sequence of partial updates.
+      // Keep both arms together so their output initialization can join.
+      if (hasOnlyTerminalBreaks && cases.size() == 1 && switchEnss.empty()) {
+        auto cond = mk_bool_lit(loc.clone(), false);
+        for (auto *caseValue : cases.front()->caseValues) {
+          auto eq = mk_rvalue_binop(loc.clone(), ir::BinOp::Eq(),
+                                    mk_lvalue_var(loc.clone(), scrutId.clone()),
+                                    trRValue(caseValue->IgnoreParenImpCasts()));
+          cond = mk_rvalue_binop(loc.clone(), ir::BinOp::LogOr(),
+                                 std::move(cond), std::move(eq));
+        }
+        auto defaultBody =
+            defaultGroup ? makeBody(*defaultGroup) : Vec<Rc<ir::Stmt>>::new_();
+        stmts.push(mk_if(loc.clone(), std::move(cond), makeBody(*cases.front()),
+                         std::move(defaultBody), Vec<Rc<ir::Expr>>::new_()));
+        return {};
+      }
+
+      if (hasOnlyTerminalBreaks && !cases.empty() && !switchEnss.empty()) {
         bool canUseMatch = true;
         for (auto *group : cases) {
           for (auto *caseValue : group->caseValues) {
@@ -3680,9 +3873,16 @@ public:
                               snippets);
         }
       }
-      if (FD->hasBody()) {
+      if (FD->hasBody() && ctx.selects_function_body(toStr(FD->getName()))) {
         return ctx.add_fn_defn(std::move(builder), trStmts(FD->getBody()));
       } else {
+        if (FD->doesThisDeclarationHaveABody()) {
+          std::string message =
+              "--only-function excludes body of `" + FD->getName().str() +
+              "`; only its external declaration is translated";
+          ctx.report_diag(getRange(FD->getSourceRange()), false,
+                          toStr(message));
+        }
         return ctx.add_fn_decl(std::move(builder));
       }
     } else if (auto *TD = dyn_cast<TypedefDecl>(D)) {
@@ -3693,6 +3893,8 @@ public:
           trQualType(TD->getUnderlyingType(), TD->getSourceRange(), &anon,
                      findFnProtoTypeLoc(TD->getTypeSourceInfo()));
       type = trTypeAttrs(TD->getAttrs(), std::move(type));
+      recordTypeLayout(kLayoutTypedef, TD->getName(),
+                       astCtx->getTypedefType(TD));
       bool isPointerView = false;
       if (TD->hasAttrs()) {
         for (auto *attr : TD->getAttrs()) {
@@ -4064,6 +4266,15 @@ static void parse_file(RefMut<Ctx> ctx) {
       ArgumentInsertPosition::END));
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
+
+  // Preserve platform preincludes from the compilation database before
+  // applying the caller's annotation headers, in their requested order.
+  size_t includeFileCount = ctx.get_include_file_count();
+  for (size_t i = 0; i < includeFileCount; ++i) {
+    std::string header = toString(ctx.get_include_file(i));
+    Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
+        {"-include", header.c_str()}, ArgumentInsertPosition::END));
+  }
 
   // Add user-specified include paths and preprocessor definitions.
   //

@@ -1,0 +1,3 @@
+Error 228 at out/Func_address_is_not_ownership.fst
+Cannot prove:
+uint32_t_pts_to

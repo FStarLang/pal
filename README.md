@@ -90,11 +90,13 @@ calls it to find LLVM libraries.
 ### Build & verify
 
 ```bash
-make               # Rust binary + Pulse support library
-make test -j8      # translate every test case, verify with F*
+make                    # Rust binary + Pulse support library
+make test -j8           # translate every test case, verify with F*
 cd test/swap && make                       # one test
 cargo run -- --print-ir test/swap/swap.c   # just the IR
 ```
+
+PAL emits code against the [Palow](palow.md) memory model.
 
 82 test directories, each a C file that PAL translates and F\*/Pulse
 verifies. Create a new one with `./test/new.sh my_test`.
@@ -114,11 +116,23 @@ pal [OPTIONS] <FILES>...
 
   -o, --outdir <DIR>     where to write .fst output
   -I <PATH>              extra include search paths
+      --include <FILE>   preinclude a header (repeatable, in order)
+      --only-function <NAME>  select a function body (repeatable)
       --print-ir         print IR and exit
       --time-passes      show per-pass timing
   -q, --quiet            suppress diagnostics on stderr
       --tmpdir <DIR>     directory for intermediates
 ```
+
+Without `--only-function`, all input function bodies are translated. With it,
+every selected name must have a definition; excluded bodies are reported as
+warnings and become external declarations, not verified implementations.
+Selected bodies still undergo the normal strict translation checks. This lets
+a verification build check an actual dependency implementation with an
+annotation header supplied by `--include`, without copying its C body.
+Preincluded headers follow any platform headers in the compilation database.
+A selected definition in an included header remains a proof root even when
+none of the input sources call it.
 
 ---
 
@@ -152,7 +166,7 @@ Detailed references live in [`doc/`](doc/):
 | Document | Covers |
 |----------|--------|
 | [Surface syntax](doc/pal_surface_syntax.md) | Full annotation reference: contracts, ownership, refinements, ghost code, Pulse interop |
-| [Structs](doc/structs.md) | What PAL emits per `struct` and `union`: generated types, predicates, fold/unfold, field projections |
+| [Palow](palow.md) | The memory model: design, how C data is represented, implementation log |
 | [Internals](doc/internals.md) | Pipeline passes, IR design, Zngur FFI, diagnostics, output structure, Pulse support library |
 | [doc/README.md](doc/README.md) | Documentation index: how to write specs, how C data is modeled in Pulse |
 

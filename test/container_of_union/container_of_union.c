@@ -1,10 +1,7 @@
 // Test: `_container_of` round-trips through a (named) union. Every union
-// member lives at offset 0, so PAL emits a `..._container` inverse (plus the
-// round-trip lemmas and a null-preservation axiom) for every arm, just like
-// for struct fields. Recovering the union from a member pointer yields the
-// same address and does not touch ownership or the active arm.
-//
-// Note: forming `&u->arm` itself requires `arm` to be the active member.
+// member lives at offset 0, so recovering the union from a member pointer is
+// the member pointer itself: no arithmetic, no ownership, and the active arm
+// is untouched. NULL is preserved for the same reason.
 
 #include "pal.h"
 #include <stddef.h>
@@ -32,19 +29,19 @@ void roundtrip_second_arm(Payload *u)
 }
 
 // Ownership of the union is stated on the `_container_of` term itself (spec
-// side), and the body reads the active arm through the recovered pointer.
+// side). The recovered pointer is the member pointer, so focusing the union
+// on its live arm through one hands out the member at the other.
 int32_t read_via_member(_plain int32_t *p)
     _preserves(_inline_pulse(
-      exists* (uv: $type(Payload)).
-        pts_to $(_container_of(p, Payload, number)) #1.0R uv **
-        Union_Payload.union_payload__pred
-          (!$(_container_of(p, Payload, number))) 1.0R))
-    _requires(_container_of(p, Payload, number)->number._active)
-    _ensures(_container_of(p, Payload, number)->number._active)
-    _ensures(return == _container_of(p, Payload, number)->number)
+      exists* (v: Int32.t).
+        Union_Payload.union_Payload_pts_to $(_container_of(p, Payload, number)) 1.0R
+          (Union_Payload.Union_Payload_number v)))
 {
     Payload *u = _container_of(p, Payload, number);
-    return u->number;
+    _ghost_stmt(Union_Payload.union_Payload_focus_number $(u));
+    int32_t r = *p;
+    _ghost_stmt(Union_Payload.union_Payload_unfocus_number $(u));
+    return r;
 }
 
 struct holder {

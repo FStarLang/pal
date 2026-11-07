@@ -25,9 +25,11 @@ struct pair {
 // struct -> first-field pointer: `(int32_t *)p` recovers &p->first. Write the
 // first field through the recovered pointer; ownership of the fields comes from
 // the default struct predicate in the contract.
+// Palow has no per-field getter to name the field through, and needs none:
+// the field is a projection of the value the contract already hands back, so
+// this is ordinary PAL surface syntax.
 void set_first_via_cast(struct pair *p, int32_t v)
-    _ensures(_inline_pulse(
-      pure (!(Struct_pair.struct_pair__get_first $(p)) == $(v))))
+    _ensures(p->first == v)
 {
     int32_t *q = (int32_t *)p;
     *q = v;
@@ -35,8 +37,7 @@ void set_first_via_cast(struct pair *p, int32_t v)
 
 // struct -> first-field pointer, read direction: `(int32_t *)p` == &p->first.
 int32_t get_first_via_cast(struct pair *p)
-    _ensures(_inline_pulse(
-      pure ($(return) == !(Struct_pair.struct_pair__get_first $(p)))))
+    _ensures(return == p->first)
 {
     int32_t *q = (int32_t *)p;
     return *q;
@@ -46,16 +47,19 @@ int32_t get_first_via_cast(struct pair *p)
 // pair from a pointer to its first field, then reads a sibling field. Ownership
 // of the whole pair reachable through `q` is required and handed back, named in
 // the spec with the same `_container_of` intrinsic the cast lowers to.
+// The enclosing pair is owned at the recovered address -- which, the field
+// being the first one, is the same address as `q`, though the translation
+// does not have to know that.
 int32_t read_second_via_cast(_plain int32_t *q)
-    _preserves(_inline_pulse(
+    _requires(_inline_pulse(
       exists* (pv: $type(struct pair)).
-        pts_to $(_container_of(q, struct pair, first)) #1.0R pv **
-        Struct_pair.struct_pair__pred
-          (!$(_container_of(q, struct pair, first))) 1.0R))
+        Struct_pair.struct_pair_pts_to
+          $(_container_of(q, struct pair, first)) 1.0R pv))
     _ensures(_inline_pulse(
-      pure ($(return) ==
-        !(Struct_pair.struct_pair__get_second
-            $(_container_of(q, struct pair, first))))))
+      exists* (pv: $type(struct pair)).
+        Struct_pair.struct_pair_pts_to
+          $(_container_of(q, struct pair, first)) 1.0R pv **
+        pure ($(return) == pv.Struct_pair.fld_second)))
 {
     struct pair *p = (struct pair *)q;
     return p->second;
@@ -95,15 +99,15 @@ void set_point_via_cast(struct boxed_point *b, int32_t nx, int32_t ny)
 // recovers the enclosing boxed_point from a pointer to its embedded point, then
 // reads the sibling `label`.
 int32_t label_via_cast(_plain point_t *pp)
-    _preserves(_inline_pulse(
+    _requires(_inline_pulse(
       exists* (bv: $type(struct boxed_point)).
-        pts_to $(_container_of(pp, struct boxed_point, p)) #1.0R bv **
-        Struct_boxed_point.struct_boxed_point__pred
-          (!$(_container_of(pp, struct boxed_point, p))) 1.0R))
+        Struct_boxed_point.struct_boxed_point_pts_to
+          $(_container_of(pp, struct boxed_point, p)) 1.0R bv))
     _ensures(_inline_pulse(
-      pure ($(return) ==
-        !(Struct_boxed_point.struct_boxed_point__get_label
-            $(_container_of(pp, struct boxed_point, p))))))
+      exists* (bv: $type(struct boxed_point)).
+        Struct_boxed_point.struct_boxed_point_pts_to
+          $(_container_of(pp, struct boxed_point, p)) 1.0R bv **
+        pure ($(return) == bv.Struct_boxed_point.fld_label)))
 {
     struct boxed_point *b = (struct boxed_point *)pp;
     return b->label;

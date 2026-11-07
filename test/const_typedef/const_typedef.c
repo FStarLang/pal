@@ -23,9 +23,9 @@ void read_optional(PCINT _nullable p) {}
 // call elaborates.
 void call_read_optional(void)
 {
-    _ghost_stmt(Pulse.Lib.C.Nullable.intro_unless_null_null (null #Int32.t) (Pulse.Lib.Reference.pts_to (null #Int32.t) #1.0R 0l));
+    _ghost_stmt(intro_unless_null_null null (int32_t_pts_to null 1.0R 0l));
     read_optional(NULL);
-    _ghost_stmt(Pulse.Lib.C.Nullable.elim_unless_null_null (null #Int32.t) _);
+    _ghost_stmt(elim_unless_null_null null _);
 }
 
 int call_read_through_typedef()

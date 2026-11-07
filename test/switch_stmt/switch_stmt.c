@@ -138,8 +138,51 @@ int32_t accumulate_with_fallthrough(int32_t x)
 }
 
 static void write_result(int32_t* _out result)
+    _ensures(*result == 42)
 {
     *result = 42;
+}
+
+void dispatch_output(int32_t version, int32_t* _out result)
+    _requires(version == 1)
+    _ensures(*result == 42)
+{
+    switch (version) {
+    case 1:
+        write_result(result);
+        break;
+    default:
+        _assert(0);
+        break;
+    }
+}
+
+void grouped_outputs(int32_t version, int32_t* _out result)
+    _ensures((version == 1 || version == 2) ==> *result == 42)
+    _ensures((version != 1 && version != 2) ==> *result == 7)
+{
+    switch (version) {
+    case 1:
+    case 2:
+        *result = 42;
+        break;
+    default:
+        *result = 7;
+        break;
+    }
+}
+
+int32_t one_case_without_default(int32_t version)
+    _ensures(version == 1 ==> return == 42)
+    _ensures(version != 1 ==> return == 7)
+{
+    int32_t result = 7;
+    switch (version) {
+    case 1:
+        result = 42;
+        break;
+    }
+    return result;
 }
 
 /* An annotated match preserves resources across a potentially divergent call. */

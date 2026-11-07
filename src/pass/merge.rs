@@ -184,7 +184,7 @@ fn rename_inline_pulse_in_place(code: &mut InlinePulseCode, renames: &HashMap<Rc
             | InlinePulseToken::Declare { ty, .. } => {
                 rename_type_in_place(Rc::make_mut(ty), renames);
             }
-            InlinePulseToken::Verbatim(_) => {}
+            InlinePulseToken::Verbatim(_) | InlinePulseToken::WitnessAntiquot(_) => {}
         }
     }
 }
@@ -593,6 +593,20 @@ const UNION_NS: u8 = 2;
 /// contribute no predicate/spec at emission, so they impose no ordering
 /// constraint and are deliberately not descended into (doing so would create a
 /// false dependency cycle for the recursive structs core_ref exists to break).
+/// Whether an annotation chain wraps a `_plain` pointer -- a bare address
+/// that carries no predicate about what it points at.
+fn is_plain_ptr(ty: &Type) -> bool {
+    match &ty.val {
+        TypeT::Plain(inner) => matches!(&inner.val, TypeT::Pointer(..)),
+        TypeT::Refine(inner, _)
+        | TypeT::RefineAlways(inner, _)
+        | TypeT::RefineUninit(inner, _)
+        | TypeT::RefineValue(inner, _, _, _)
+        | TypeT::Nullable(inner) => is_plain_ptr(inner),
+        _ => false,
+    }
+}
+
 fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
     match &ty.val {
         // See the doc comment: `core_ref` imposes no emission-order dependency.
@@ -613,6 +627,23 @@ fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
             };
             out.push(key);
         }
+        _ => {}
+    }
+}
+
+/// By-value dependencies cannot be broken to order a pointer-reference cycle:
+/// the enclosing aggregate needs their value types and byte representations.
+fn collect_value_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
+    match &ty.val {
+        TypeT::FixedArray(inner, _)
+        | TypeT::FlexArray(inner)
+        | TypeT::Plain(inner)
+        | TypeT::Refine(inner, _)
+        | TypeT::RefineAlways(inner, _)
+        | TypeT::RefineUninit(inner, _)
+        | TypeT::RefineValue(inner, _, _, _)
+        | TypeT::Nullable(inner) => collect_value_type_refs(inner, out),
+        TypeT::TypeRef(_) => collect_type_refs(ty, out),
         _ => {}
     }
 }
@@ -723,7 +754,7 @@ fn collect_refs_inline(code: &InlinePulseCode, out: &mut Vec<TypeKey>) {
             | InlinePulseToken::FieldAntiquot { ty, .. }
             | InlinePulseToken::AuxFnAntiquot { ty, .. }
             | InlinePulseToken::Declare { ty, .. } => collect_type_refs(ty, out),
-            InlinePulseToken::Verbatim(_) => {}
+            InlinePulseToken::Verbatim(_) | InlinePulseToken::WitnessAntiquot(_) => {}
         }
     }
 }
@@ -812,7 +843,22 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
         StmtT::Return(None) | StmtT::Break | StmtT::Continue | StmtT::Goto(_) | StmtT::Error => {}
     }
 }
-/// emitted after the type definitions it references by-value or by-pointer.
+fn in_dependency_cycle(node: usize, prereqs: &[Vec<usize>], done: &[bool]) -> bool {
+    let mut seen = vec![false; prereqs.len()];
+    let mut pending = prereqs[node].clone();
+    while let Some(i) = pending.pop() {
+        if i == node {
+            return true;
+        }
+        if !done[i] && !seen[i] {
+            seen[i] = true;
+            pending.extend(&prereqs[i]);
+        }
+    }
+    false
+}
+
+/// Emit each declaration after the types it references by-value or by-pointer.
 ///
 /// This is required because emission populates the spec-parameter tables for a
 /// type when its predicate is emitted, and a dependent type's predicate reads
@@ -842,9 +888,10 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
 
     // Compute prerequisites: indices that must precede each declaration.
     let mut prereqs: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut value_prereqs: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, d) in tu.decls.iter().enumerate() {
         let mut refs: Vec<TypeKey> = Vec::new();
-        collect_decl_type_refs(d, &mut refs);
+        collect_decl_type_refs(d, true, &mut refs);
         for r in refs {
             if let Some(&j) = node_of_key.get(&r) {
                 if j != i {
@@ -852,17 +899,51 @@ fn reorder_type_deps(tu: &mut TranslationUnit) {
                 }
             }
         }
+        let mut refs = Vec::new();
+        match &d.val {
+            DeclT::Typedef(t) => collect_value_type_refs(&t.body, &mut refs),
+            DeclT::StructDefn(s) => {
+                collect_value_type_refs(&s.refines, &mut refs);
+                for f in &s.fields {
+                    collect_value_type_refs(&f.val.logical_type(&f.loc), &mut refs);
+                }
+            }
+            DeclT::UnionDefn(u) => {
+                for f in &u.fields {
+                    collect_value_type_refs(&f.val.logical_type(&f.loc), &mut refs);
+                }
+            }
+            _ => {
+                value_prereqs[i] = prereqs[i].clone();
+                continue;
+            }
+        }
+        for r in refs {
+            if let Some(&j) = node_of_key.get(&r)
+                && j != i
+            {
+                value_prereqs[i].push(j);
+            }
+        }
     }
 
     // Stable topological sort: repeatedly pick the lowest-indexed declaration
-    // whose prerequisites are already placed. On a dependency cycle (e.g.
-    // mutually pointer-referential structs), fall back to original order to
-    // avoid looping.
+    // whose prerequisites are already placed. Break pointer cycles only after
+    // satisfying by-value dependencies, and only at a node on the cycle:
+    // unrelated owners of that node must still wait for its representation.
+    // Keep a final source-order fallback for malformed cycles.
     let mut done = vec![false; n];
     let mut order: Vec<usize> = Vec::with_capacity(n);
     while order.len() < n {
         let picked = (0..n)
             .find(|&i| !done[i] && prereqs[i].iter().all(|&j| done[j]))
+            .or_else(|| {
+                (0..n).find(|&i| {
+                    !done[i]
+                        && value_prereqs[i].iter().all(|&j| done[j])
+                        && in_dependency_cycle(i, &prereqs, &done)
+                })
+            })
             .or_else(|| (0..n).find(|&i| !done[i]))
             .expect("at least one undone declaration");
         done[picked] = true;
@@ -924,7 +1005,7 @@ fn declare_implicit_structs(tu: &mut TranslationUnit) {
     // emission, so it never names the module and needs no placeholder.
     let mut refs: Vec<TypeKey> = Vec::new();
     for decl in &tu.decls {
-        collect_decl_type_refs(decl, &mut refs);
+        collect_decl_type_refs(decl, false, &mut refs);
     }
 
     let mut missing: Vec<Rc<str>> = Vec::new();
@@ -968,13 +1049,22 @@ fn declare_implicit_structs(tu: &mut TranslationUnit) {
 /// apart. They ask the same question -- which types does this declaration name
 /// -- and a tag missed here becomes a dangling module reference in one pass or
 /// a bad emission order in the other.
-fn collect_decl_type_refs(d: &Decl, refs: &mut Vec<TypeKey>) {
+fn collect_decl_type_refs(d: &Decl, skip_plain_ptrs: bool, refs: &mut Vec<TypeKey>) {
     match &d.val {
         DeclT::Typedef(t) => collect_type_refs(&t.body, refs),
         DeclT::StructDefn(s) => {
             collect_type_refs(&s.refines, refs);
             for f in &s.fields {
-                collect_type_refs(&f.val.logical_type(&f.loc), refs);
+                let fty = f.val.logical_type(&f.loc);
+                // A pointer field's F* type is `ptr`, so the only reason a
+                // struct has to follow the one it points at is the ownership
+                // predicate -- and a `_plain` pointer has none. Dropping the
+                // edge is what lets a pair of mutually referential structs be
+                // emitted at all.
+                if skip_plain_ptrs && is_plain_ptr(&fty) {
+                    continue;
+                }
+                collect_type_refs(&fty, refs);
             }
         }
         DeclT::UnionDefn(u) => {

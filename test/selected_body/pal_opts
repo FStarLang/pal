@@ -1,0 +1,1 @@
+--include first.h --include second.h --only-function selected --only-function secondary --only-function caller --only-function header_selected
