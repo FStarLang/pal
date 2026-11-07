@@ -561,15 +561,14 @@ impl Renamer<'_> {
                 InlinePulseToken::Verbatim(text) => {
                     // Raw F* module names are not C references. Do not silently
                     // bind an old unqualified module to another TU's entity.
-                    for name in self.names.keys() {
-                        if text.text.val.as_ref() == format!("Func_{name}")
-                            || text.text.val.as_ref() == format!("Global_{name}")
-                            || text.text.val.as_ref() == format!("Funcptr_{name}")
-                        {
-                            // Verbatim fragments do not carry a C source range;
-                            // the containing declaration is diagnosed below.
-                            self.raw_reference = true;
-                        }
+                    let text: &str = &text.text.val;
+                    if ["Func_", "Global_", "Funcptr_"].iter().any(|p| {
+                        text.strip_prefix(p)
+                            .is_some_and(|name| self.names.contains_key(name))
+                    }) {
+                        // Verbatim fragments do not carry a C source range;
+                        // the containing declaration is diagnosed below.
+                        self.raw_reference = true;
                     }
                 }
             }
