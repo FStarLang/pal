@@ -1,0 +1,2 @@
+Func_case_12_6_anonymous_and_nested_unions.fst(
+ET.declared_destination (Seq.create (SizeT.v struct_tagged_sizeof) None)

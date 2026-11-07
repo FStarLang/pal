@@ -730,6 +730,7 @@ impl Renamer<'_> {
                     scope = self.pulse(Rc::make_mut(code), &scope);
                 }
                 StmtT::Label { ensures, .. } => self.exprs(Rc::make_mut(ensures), &scope),
+                StmtT::Freeze(x) => self.name(x, &scope),
                 StmtT::GotoBlock { body, ensures, .. } => {
                     self.exprs(Rc::make_mut(ensures), &scope);
                     self.stmts(Rc::make_mut(body), &scope);

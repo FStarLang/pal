@@ -595,10 +595,12 @@ impl Env {
                 TypeT::Int {
                     signed: s1,
                     width: w1,
+                    ..
                 },
                 TypeT::Int {
                     signed: s2,
                     width: w2,
+                    ..
                 },
             ) => {
                 // Pick the wider type; if same width, pick unsigned
@@ -610,7 +612,15 @@ impl Env {
                     // Same width: unsigned wins per C rules
                     (*s1 && *s2, *w1)
                 };
-                Some(TypeT::Int { signed, width }.with_loc(a.loc.clone()).into())
+                Some(
+                    TypeT::Int {
+                        signed,
+                        width,
+                        ident: crate::ir::IntIdent::Std,
+                    }
+                    .with_loc(a.loc.clone())
+                    .into(),
+                )
             }
             both_sides!(TypeT::SLProp) => None,
             both_sides!(TypeT::SizeT) => None,
@@ -688,7 +698,19 @@ impl Env {
         }
     }
 
+    /// Whether `a` and `b` are the same type of *value*. Integer identity
+    /// (`long` vs `long long`, an enum vs its underlying type) does not matter
+    /// for a value, but does for the object a pointer or array designates, so
+    /// below a pointer or array it is compared too.
     pub fn vtype_eq(&self, a: MaybeRc<Type>, b: MaybeRc<Type>) -> bool {
+        self.vtype_eq_at(a, b, false)
+    }
+
+    fn vtype_eq_obj(&self, a: MaybeRc<Type>, b: MaybeRc<Type>) -> bool {
+        self.vtype_eq_at(a, b, true)
+    }
+
+    fn vtype_eq_at(&self, a: MaybeRc<Type>, b: MaybeRc<Type>, object: bool) -> bool {
         match (&self.vtype_whnf(a).val, &self.vtype_whnf(b).val) {
             (TypeT::Void, TypeT::Void) => true,
             (TypeT::Bool, TypeT::Bool) => true,
@@ -696,20 +718,22 @@ impl Env {
                 TypeT::Int {
                     signed: s1,
                     width: w1,
+                    ident: i1,
                 },
                 TypeT::Int {
                     signed: s2,
                     width: w2,
+                    ident: i2,
                 },
-            ) => s1 == s2 && w1 == w2,
+            ) => s1 == s2 && w1 == w2 && (!object || i1 == i2),
             (TypeT::Float { width: w1 }, TypeT::Float { width: w2 }) => w1 == w2,
             (TypeT::SizeT, TypeT::SizeT) => true,
             (TypeT::PtrdiffT, TypeT::PtrdiffT) => true,
             (TypeT::Pointer(t1, k1), TypeT::Pointer(t2, k2)) => {
-                k1 == k2 && self.vtype_eq(t1.clone().into(), t2.clone().into())
+                k1 == k2 && self.vtype_eq_obj(t1.clone().into(), t2.clone().into())
             }
             (TypeT::FixedArray(t1, n1), TypeT::FixedArray(t2, n2)) => {
-                n1 == n2 && self.vtype_eq(t1.clone().into(), t2.clone().into())
+                n1 == n2 && self.vtype_eq_at(t1.clone().into(), t2.clone().into(), object)
             }
             (
                 TypeT::FnPtr {

@@ -19,6 +19,9 @@ open Pulse.Lib.C.Palow.Bytes
 open Pulse.Lib.C.Palow.Ptr
 open Pulse.Lib.C.Palow
 
+module ET = Pulse.Lib.C.Palow.Etype
+module Seq = FStar.Seq
+
 (* The range is given explicitly rather than existentially quantified: the
    caller is a `_conceal` that already knows which (empty) slice of the
    enclosing object it means, and an existential here would not match it. *)
@@ -37,4 +40,29 @@ ghost fn drop_mem_pts_to_nil (a: ptr) (#p: perm) (#b: bytes)
 {
   mem_pts_to_empty a p b;
   rewrite (mem_pts_to a p b) as emp;
+}
+
+ghost fn mem_pts_to_at_nil (a: ptr) (p: perm) (b: bytes) (e: ET.etypes)
+  requires pure (len b == 0 /\ ET.elen e == 0)
+  ensures mem_pts_to_at a p b e
+{
+  mem_pts_to_nil a p b;
+  mem_pts_to_at_eq a p b;
+  rewrite (mem_pts_to a p b)
+    as (exists* e0. mem_pts_to_at a p b e0 ** pure (ET.elen e0 == len b));
+  with e0. assert (mem_pts_to_at a p b e0);
+  Seq.lemma_eq_intro e0 e;
+  assert (pure (e0 == e));
+  rewrite (mem_pts_to_at a p b e0) as (mem_pts_to_at a p b e);
+}
+
+ghost fn drop_mem_pts_to_at_nil (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
+  requires mem_pts_to_at a p b e
+  requires pure (len b == 0 /\ ET.elen e == 0)
+  ensures emp
+{
+  mem_pts_to_at_eq a p b;
+  rewrite (exists* e0. mem_pts_to_at a p b e0 ** pure (ET.elen e0 == len b))
+    as (mem_pts_to a p b);
+  drop_mem_pts_to_nil a;
 }

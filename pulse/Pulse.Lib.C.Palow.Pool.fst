@@ -10,10 +10,8 @@ module Pulse.Lib.C.Palow.Pool
    function, and its correctness comes entirely from `mem_split` plus the
    layer-1 claim operation.
 
-   Under the current model this program cannot even be stated, because a
-   pointer's type is baked into its ownership predicate and there is no way to
-   turn one allocation of N bytes into several independently owned typed
-   objects.
+   The invariant contains only fresh, untyped metadata. A pool cannot recycle
+   arbitrary declared storage by hiding its index and claiming it again.
 
    Note also what the specification does *not* say: nothing here entitles a
    client to pass a pool-allocated pointer to `free`. The pool hands out bare
@@ -32,17 +30,19 @@ open Pulse.Lib.C.Palow.Nullable
 module SZ = FStar.SizeT
 module U32 = FStar.UInt32
 module R = Pulse.Lib.Reference
+module Seq = FStar.Seq
+module ET = Pulse.Lib.C.Palow.Etype
 
 (* The pool's state: the next address to hand out, and how many bytes are left
    there. The resource invariant ties the two together with ownership of
    exactly that many bytes. *)
 let pool_inv (rp: R.ref ptr) (rn: R.ref SZ.t) : slprop =
   exists* (a: ptr) (n: SZ.t) (b: bytes).
-    R.pts_to rp a ** R.pts_to rn n ** mem_pts_to a 1.0R b **
+    R.pts_to rp a ** R.pts_to rn n ** mem_pts_to_at a 1.0R b (Seq.create (SZ.v n) None) **
     pure (len b == SZ.v n /\ aligned a uint32_t_alignof)
 
 ghost fn pool_intro (rp: R.ref ptr) (rn: R.ref SZ.t) (#a: ptr) (#n: SZ.t) (#b: bytes)
-  requires R.pts_to rp a ** R.pts_to rn n ** mem_pts_to a 1.0R b
+  requires R.pts_to rp a ** R.pts_to rn n ** mem_pts_to_at a 1.0R b (Seq.create (SZ.v n) None)
   requires pure (len b == SZ.v n /\ aligned a uint32_t_alignof)
   ensures  pool_inv rp rn
 {
@@ -61,13 +61,17 @@ fn pool_alloc_uint32 (rp: R.ref ptr) (rn: R.ref SZ.t)
   ensures  unless_null res (uint32_t_pts_to_uninit res)
 {
   unfold pool_inv rp rn;
-  with a n b. assert (R.pts_to rp a ** R.pts_to rn n ** mem_pts_to a 1.0R b);
+  with a n b. assert (R.pts_to rp a ** R.pts_to rn n ** mem_pts_to_at a 1.0R b (Seq.create (SZ.v n) None));
   let cur = !rp;
   let rem = !rn;
   if (SZ.gte rem uint32_t_sizeof) {
-    mem_pts_to_not_null cur;
+    mem_pts_to_at_not_null cur;
     assert (pure (not (is_null cur)));
-    mem_split cur uint32_t_sizeof;
+    mem_split_at cur uint32_t_sizeof;
+    Seq.lemma_eq_intro (Seq.slice (Seq.create (SZ.v n) (None #ET.etype_entry)) 0 4)
+      (Seq.create 4 None);
+    Seq.lemma_eq_intro (Seq.slice (Seq.create (SZ.v n) (None #ET.etype_entry)) 4 (SZ.v n))
+      (Seq.create (SZ.v n - 4) None);
     aligned_add cur uint32_t_alignof uint32_t_sizeof;
     rp := cur +! uint32_t_sizeof;
     rn := SZ.sub rem uint32_t_sizeof;

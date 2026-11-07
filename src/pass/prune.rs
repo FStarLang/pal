@@ -86,6 +86,7 @@ fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
         TypeT::Int {
             signed: _,
             width: _,
+            ..
         } => {}
         TypeT::Float { width: _ } => {}
         TypeT::SizeT => {}
@@ -336,7 +337,7 @@ fn scan_stmt(deps: &mut HashSet<DeclName>, stmt: &Stmt) {
             scan_exprs(deps, ensures);
             scan_stmts(deps, body);
         }
-        StmtT::Break | StmtT::Continue => {}
+        StmtT::Break | StmtT::Continue | StmtT::Freeze(_) => {}
         StmtT::Return(v) => {
             if let Some(v) = v {
                 scan_expr(deps, v)

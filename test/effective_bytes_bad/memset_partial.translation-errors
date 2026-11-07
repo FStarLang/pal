@@ -1,0 +1,1 @@
+error: `Func_zero_half`: its body is not translated: a `memset` of part of a declared object

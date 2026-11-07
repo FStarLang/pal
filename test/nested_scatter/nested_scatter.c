@@ -118,10 +118,14 @@ unsigned int alloc_nested(void)
    and nothing is gathered because the body does not write every field. */
 void fill_rest(_plain struct head *h)
 _requires(_inline_pulse(
-	struct_head_padding $(h) 1.0R **
-	struct_lnk_pts_to_uninit ($(h) +! struct_head_offsetof_list) **
-	uint32_t_pts_to_uninit ($(h) +! struct_head_offsetof_qlen) **
-	(exists* (l: Int32.t). int32_t_pts_to ($(h) +! struct_head_offsetof_lock) 1.0R l)))
+	exists* (base: Struct_head.struct_head_index) (l: Int32.t).
+	struct_head_padding_ctx $(h) 1.0R base **
+	struct_lnk_pts_to_uninit_context struct_head_ctype 0 (Seq.slice base 0 16)
+	  ($(h) +! struct_head_offsetof_list) **
+	K.storage struct_head_ctype 16 uint32_t_ctype uint32_t_alignof
+	  ($(h) +! struct_head_offsetof_qlen) (Seq.slice base 16 20) **
+	K.value struct_head_ctype 20 int32_t_ctype int32_t_repr int32_t_alignof
+	  ($(h) +! struct_head_offsetof_lock) 1.0R l (Seq.slice base 20 24)))
 _ensures(_inline_pulse(exists* v. struct_head_pts_to $(h) 1.0R v))
 {
 	_ghost_stmt($scattered(struct head) $(h));
@@ -137,10 +141,14 @@ _ensures(_inline_pulse(exists* v. struct_head_pts_to $(h) 1.0R v))
    and the write that follows focuses the field instead of filling it. */
 void fill_rest_then_use(_plain struct head *h)
 _requires(_inline_pulse(
-	struct_head_padding $(h) 1.0R **
-	struct_lnk_pts_to_uninit ($(h) +! struct_head_offsetof_list) **
-	uint32_t_pts_to_uninit ($(h) +! struct_head_offsetof_qlen) **
-	(exists* (l: Int32.t). int32_t_pts_to ($(h) +! struct_head_offsetof_lock) 1.0R l)))
+	exists* (base: Struct_head.struct_head_index) (l: Int32.t).
+	struct_head_padding_ctx $(h) 1.0R base **
+	struct_lnk_pts_to_uninit_context struct_head_ctype 0 (Seq.slice base 0 16)
+	  ($(h) +! struct_head_offsetof_list) **
+	K.storage struct_head_ctype 16 uint32_t_ctype uint32_t_alignof
+	  ($(h) +! struct_head_offsetof_qlen) (Seq.slice base 16 20) **
+	K.value struct_head_ctype 20 int32_t_ctype int32_t_repr int32_t_alignof
+	  ($(h) +! struct_head_offsetof_lock) 1.0R l (Seq.slice base 20 24)))
 _ensures(_inline_pulse(exists* v. struct_head_pts_to $(h) 1.0R v))
 {
 	_ghost_stmt($scattered(struct head) $(h));
@@ -156,10 +164,14 @@ _ensures(_inline_pulse(exists* v. struct_head_pts_to $(h) 1.0R v))
    value again, so it is gathered. */
 void fill_all(_plain struct head *h)
 _requires(_inline_pulse(
-	struct_head_padding $(h) 1.0R **
-	struct_lnk_pts_to_uninit ($(h) +! struct_head_offsetof_list) **
-	uint32_t_pts_to_uninit ($(h) +! struct_head_offsetof_qlen) **
-	int32_t_pts_to_uninit ($(h) +! struct_head_offsetof_lock)))
+	exists* (base: Struct_head.struct_head_index).
+	struct_head_padding_ctx $(h) 1.0R base **
+	struct_lnk_pts_to_uninit_context struct_head_ctype 0 (Seq.slice base 0 16)
+	  ($(h) +! struct_head_offsetof_list) **
+	K.storage struct_head_ctype 16 uint32_t_ctype uint32_t_alignof
+	  ($(h) +! struct_head_offsetof_qlen) (Seq.slice base 16 20) **
+	K.storage struct_head_ctype 20 int32_t_ctype int32_t_alignof
+	  ($(h) +! struct_head_offsetof_lock) (Seq.slice base 20 24)))
 _ensures(_inline_pulse(exists* v. struct_head_pts_to $(h) 1.0R v))
 {
 	_ghost_stmt($scattered(struct head) $(h));
