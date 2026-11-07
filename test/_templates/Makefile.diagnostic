@@ -24,8 +24,8 @@ all: verify compile
 
 ifneq ($(wildcard compile_commands.json.in),)
 COMPILE_DB := compile_commands.json
-compile_commands.json: compile_commands.json.in
-	python3 -c 'import os,pathlib; p=pathlib.Path("$<"); pathlib.Path("$@").write_text(p.read_text().replace("@TEST_DIRECTORY@", os.getcwd()))'
+compile_commands.json: compile_commands.json.in Makefile
+	python3 -c 'import os,pathlib,subprocess,sys; p=pathlib.Path("$<"); directory=os.getcwd(); directory=subprocess.check_output(["cygpath", "-m", directory], text=True).strip() if sys.platform in ("win32", "cygwin", "msys") else directory; pathlib.Path("$@").write_text(p.read_text().replace("@TEST_DIRECTORY@", directory))'
 endif
 
 translate: $(OUT_DIR)/.stamp

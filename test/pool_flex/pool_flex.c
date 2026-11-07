@@ -7,6 +7,7 @@
    addresses, and the bytes nobody has been given -- and the emitter reads that
    off the contract rather than off an annotation. See palow.md milestone 14. */
 #include "pal.h"
+#include <stdint.h>
 #include <stdlib.h>
 
 typedef struct {
@@ -187,7 +188,7 @@ void example()
     }
     _ghost_stmt(elim_unless_null $(p) (P.pool_inv $(p) 0sz 0sz 1024sz));
     int *x = pool_alloc(p, sizeof(int));
-    long *y = pool_alloc(p, sizeof(long));
+    int64_t *y = pool_alloc(p, sizeof(int64_t));
     *x = 6;
     *y = *x;
     /* Hand both chunks back before the pool goes. The pointers are the ones
