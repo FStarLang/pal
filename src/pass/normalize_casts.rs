@@ -186,6 +186,7 @@ fn normalize_expr(env: &Env, expr: &mut Expr) {
             let TypeT::Int {
                 signed: target_signed,
                 width: target_width,
+                ..
             } = env.vtype_whnf(target_ty.clone().into()).val
             else {
                 return;
@@ -194,6 +195,7 @@ fn normalize_expr(env: &Env, expr: &mut Expr) {
                 TypeT::Int {
                     signed: false,
                     width,
+                    ..
                 } => normalize_unsigned(value, width),
                 TypeT::Int { signed: true, .. } => value.as_ref().clone(),
                 _ => return,
@@ -286,7 +288,12 @@ fn normalize_stmt(env: &Env, stmt: &mut Stmt) {
             normalize_stmts(env, Rc::make_mut(body));
             normalize_exprs(env, Rc::make_mut(ensures));
         }
-        StmtT::Break | StmtT::Continue | StmtT::Return(None) | StmtT::Goto(_) | StmtT::Error => {}
+        StmtT::Break
+        | StmtT::Freeze(_)
+        | StmtT::Continue
+        | StmtT::Return(None)
+        | StmtT::Goto(_)
+        | StmtT::Error => {}
     }
 }
 

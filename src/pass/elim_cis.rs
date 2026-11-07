@@ -91,10 +91,12 @@ fn type_alpha_eq(a: &Type, b: &Type) -> bool {
             Int {
                 signed: s1,
                 width: w1,
+                ..
             },
             Int {
                 signed: s2,
                 width: w2,
+                ..
             },
         ) => s1 == s2 && w1 == w2,
         (Float { width: w1 }, Float { width: w2 }) => w1 == w2,
@@ -322,6 +324,7 @@ fn rewrite_stmt(env: &Env, stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion
             }
         }
         StmtT::Decl(..)
+        | StmtT::Freeze(_)
         | StmtT::Break
         | StmtT::Continue
         | StmtT::Return(None)
@@ -631,6 +634,7 @@ fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
             }
         }
         StmtT::Break
+        | StmtT::Freeze(_)
         | StmtT::Continue
         | StmtT::Return(None)
         | StmtT::GhostStmt(_)

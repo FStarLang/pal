@@ -69,7 +69,7 @@ int read_after_conditional_mutable_borrow(struct holder *holder, _Bool write)
         _ensures((_slprop)_inline_pulse(
             exists* (v: Struct_holder.struct_holder)
                     (s: Struct_holder.struct_holder_own_spec).
-                Struct_holder.struct_holder_pts_to $&(*holder) 1.0R v **
+                Struct_holder.struct_holder_pts_to_retained index_holder $&(*holder) 1.0R v **
                 Struct_holder.struct_holder_own v 1.0R s))
     {
         write_cell(&holder->cell, 1);

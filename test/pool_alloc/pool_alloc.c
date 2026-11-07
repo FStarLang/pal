@@ -9,8 +9,9 @@
  * block's ownership predicate names the type stored in it, so there is no way
  * to turn one allocation of N bytes into several independently owned typed
  * objects -- the program cannot even be stated. Here a block is bytes,
- * `mem_split` cuts it, and a chunk becomes a `uint32_t` object as soon as a
- * value can be exhibited for it. No new axiom is involved and the translator
+ * `mem_split_at` cuts it, and a chunk is readable as a `uint32_t` when its
+ * actual effective index permits that access and its zero representation is
+ * known. A ghost claim does not install a type. No new axiom is involved and the translator
  * has no idea a pool is what this is: everything below is ordinary annotated C
  * whose contracts happen to name the model's predicates.
  *
@@ -27,6 +28,10 @@ _include_pulse(Pool_shim,
   include Pulse.Lib.C.Palow
   include Pulse.Lib.C.Palow.Scalar
   include Pulse.Lib.C.Palow.Encoding
+  module ET = Pulse.Lib.C.Palow.Etype
+  module Seq = FStar.Seq
+  module SZ = FStar.SizeT
+  module Math = FStar.Math.Lemmas
 
   (* The bytes the pool still has to hand out. They are zeroed rather than
      uninitialised so that a chunk can be claimed at a value the moment it is
@@ -35,16 +40,91 @@ _include_pulse(Pool_shim,
      have to be written first. The size is a `nat` rather than a `size_t`
      because a contract term is typed with none of the `requires` in scope, so
      a refined subtraction would not typecheck there. *)
-  unfold let pool_block (a: ptr) (n: nat) : slprop =
-    mem_pts_to a 1.0R (zeroed n) ** pure (aligned a uint32_t_alignof)
+  (* The pool promises scalar access to each four-byte slot, without hiding
+     an incompatible index or establishing a nominal type from zero bytes. *)
+  let slot_read_ok (e: ET.etypes) : prop =
+    forall (k: nat). k < ET.elen e ==>
+      (match ET.eget e k with
+       | None -> True
+       | Some en -> b2t (ET.access_ok en.ET.ty (en.ET.off - k % 4) uint32_t_ctype))
 
-  (* Two zeroed ranges laid end to end are one zeroed range. This is what a
-     chunk going back into the pool needs, and it is the only thing in this
-     module that is not already in the model. *)
+  unfold let pool_block (a: ptr) (n: nat) : slprop =
+    exists* e. mem_pts_to_at a 1.0R (zeroed n) e **
+      pure (ET.elen e == n /\ slot_read_ok e /\ aligned a uint32_t_alignof)
+
+  let split_guard (e: ET.etypes)
+    : Lemma
+        (requires 4 <= ET.elen e /\ slot_read_ok e)
+        (ensures ET.read_ok (Seq.slice e 0 4) uint32_t_ctype
+                 /\ slot_read_ok (Seq.slice e 4 (ET.elen e)))
+    = let tail (k: nat) : Lemma (k < ET.elen e - 4 ==>
+        (match ET.eget (Seq.slice e 4 (ET.elen e)) k with
+         | None -> True
+         | Some en -> b2t (ET.access_ok en.ET.ty
+             (en.ET.off - k % 4) uint32_t_ctype))) =
+        if k < ET.elen e - 4 then begin
+          let readable = match ET.eget e (4 + k) with
+            | None -> True
+            | Some en -> b2t (ET.access_ok en.ET.ty
+                (en.ET.off - (4 + k) % 4) uint32_t_ctype) in
+          assert readable;
+          Math.modulo_distributivity k 4 4
+        end
+      in Classical.forall_intro tail
+
+  let join_guard (head tail: ET.etypes)
+    : Lemma
+        (requires ET.read_ok head uint32_t_ctype /\ slot_read_ok tail)
+        (ensures slot_read_ok (Seq.append head tail))
+    = let aux (k: nat) : Lemma (k < ET.elen head + ET.elen tail ==>
+        (match ET.eget (Seq.append head tail) k with
+         | None -> True
+         | Some en -> b2t (ET.access_ok en.ET.ty
+             (en.ET.off - k % 4) uint32_t_ctype))) =
+        if k < ET.elen head + ET.elen tail then
+          if k < 4 then () else begin
+            let readable = match ET.eget tail (k - 4) with
+              | None -> True
+              | Some en -> b2t (ET.access_ok en.ET.ty
+                  (en.ET.off - (k - 4) % 4) uint32_t_ctype) in
+            assert readable;
+            Math.modulo_distributivity (k - 4) 4 4
+          end
+      in Classical.forall_intro aux
+
   let zeroed_append (m n: nat)
     : Lemma (append (zeroed m) (zeroed n) == zeroed (m + n))
             [SMTPat (append (zeroed m) (zeroed n))]
     = FStar.Seq.lemma_eq_elim (append (zeroed m) (zeroed n)) (zeroed (m + n))
+
+  ghost fn take (a: ptr) (rest: SZ.t)
+    requires pool_block a (SZ.v rest + 4)
+    ensures uint32_t_pts_to a 1.0R 0ul **
+      pool_block (a +! 4sz) (SZ.v rest)
+  {
+    with e. assert mem_pts_to_at a 1.0R (zeroed (SZ.v rest + 4)) e;
+    split_guard e;
+    mem_split_at a 4sz;
+    aligned_add a uint32_t_alignof 4sz;
+    encode_zero 4;
+    uint32_t_claim a 0ul;
+    fold pool_block (a +! 4sz) (SZ.v rest);
+  }
+
+  ghost fn give_back (a: ptr) (rest: SZ.t)
+    requires uint32_t_pts_to a 1.0R 0ul **
+      pool_block (a +! 4sz) (SZ.v rest)
+    ensures pool_block a (SZ.v rest + 4)
+  {
+    uint32_t_reveal a;
+    with b head. assert mem_pts_to_at a 1.0R b head;
+    with tail. assert mem_pts_to_at (a +! 4sz) 1.0R (zeroed (SZ.v rest)) tail;
+    join_guard head tail;
+    encode_zero 4;
+    mem_join_at a 4sz;
+    zeroed_append 4 (SZ.v rest);
+    fold pool_block a (SZ.v rest + 4);
+  }
 )
 
 /* Carve one `uint32_t` off the front of the block, leaving the caller the
@@ -57,11 +137,7 @@ _ensures(_inline_pulse(uint32_t_pts_to $(return) 1.0R 0ul))
 _ensures(_inline_pulse(Pool_shim.pool_block ($(a) +! 4sz) (FStar.SizeT.v $(rest))))
 uint32_t *pool_take(_plain uint8_t *a, size_t rest)
 {
-  _ghost_stmt(mem_split $(a) 4sz);
-  _ghost_stmt(aligned_add $(a) uint32_t_alignof 4sz);
-  _ghost_stmt(aligned_add $(a) uint32_t_alignof 8sz);
-  _ghost_stmt(encode_zero 4);
-  _ghost_stmt(uint32_t_claim $(a) 0ul);
+  _ghost_stmt(Pool_shim.take $(a) $(rest));
   return (uint32_t *) a;
 }
 
@@ -74,9 +150,7 @@ _requires(_inline_pulse(Pool_shim.pool_block ($(p) +! 4sz) (FStar.SizeT.v $(rest
 _ensures(_inline_pulse(Pool_shim.pool_block $(p) (FStar.SizeT.v $(rest) + 4)))
 void pool_return(_plain uint32_t *p, size_t rest)
 {
-  _ghost_stmt(uint32_t_reveal $(p));
-  _ghost_stmt(encode_zero 4);
-  _ghost_stmt(mem_join $(p) 4sz);
+  _ghost_stmt(Pool_shim.give_back $(p) $(rest));
 }
 
 /* Two chunks out of one block, so that the objects really are independent:
@@ -87,15 +161,18 @@ _ensures(_inline_pulse(uint32_t_pts_to ($(a) +! 4sz) 1.0R 0ul))
 _ensures(_inline_pulse(Pool_shim.pool_block ($(a) +! 8sz) (FStar.SizeT.v $(rest))))
 void pool_take2(_plain uint8_t *a, size_t rest)
 {
-  _ghost_stmt(encode_zero 4);
-  _ghost_stmt(mem_split $(a) 4sz);
-  _ghost_stmt(uint32_t_claim $(a) 0ul);
-  _ghost_stmt(mem_split ($(a) +! 4sz) 4sz);
+  _ghost_stmt(with e. assert mem_pts_to_at $(a) 1.0R
+    (zeroed (FStar.SizeT.v $(rest) + 8)) e);
+  _ghost_stmt(mem_pts_to_at_fits $(a));
+  _ghost_stmt(FStar.SizeT.fits_lte (FStar.SizeT.v $(rest) + 4)
+    (addr_of $(a) + FStar.SizeT.v $(rest) + 8));
+  _ghost_stmt(fold Pool_shim.pool_block $(a) (FStar.SizeT.v $(rest) + 8));
+  _ghost_stmt(Pool_shim.take $(a) ($(rest) `FStar.SizeT.add` 4sz));
   /* `divides_addr` is opaque, so stepping four bytes on from an aligned
      address is a lemma call rather than something the solver does itself. */
   _ghost_stmt(aligned_add $(a) uint32_t_alignof 4sz);
   _ghost_stmt(aligned_add $(a) uint32_t_alignof 8sz);
-  _ghost_stmt(uint32_t_claim ($(a) +! 4sz) 0ul);
+  _ghost_stmt(Pool_shim.take ($(a) +! 4sz) $(rest));
   /* The tail is at `(a + 4) + 4`, and the contract says `a + 8`. `add_add`
      makes the two equal; `rewrite each` is what says so to the matcher, which
      compares addresses syntactically. */

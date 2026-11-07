@@ -69,7 +69,7 @@ uint32_t local_array_two()
 
 uint32_t get_plain(_plain _array const uint32_t *a, size_t i, size_t n)
   _preserves(_inline_pulse(
-    array_pts_to uint32_t_repr 4 (SizeT.v uint32_t_alignof) $(a) 0.5R $`values))
+    array_pts_to uint32_t_ctype uint32_t_repr 4 (SizeT.v uint32_t_alignof) $(a) 0.5R $`values))
   _requires(i < n)
   _requires(_inline_pulse(pure (SizeT.v $(n) == Seq.length $`values)))
   _ensures(_inline_pulse(pure (SizeT.v $(i) < Seq.length $`values
@@ -85,7 +85,7 @@ struct pair {
 
 uint32_t get_plain_field(_plain _array const struct pair *a, size_t i, size_t n)
   _preserves(_inline_pulse(
-    array_pts_to struct_pair_repr 8 (SizeT.v struct_pair_alignof) $(a) 0.5R $`values))
+    array_pts_to struct_pair_ctype struct_pair_repr 8 (SizeT.v struct_pair_alignof) $(a) 0.5R $`values))
   _requires(i < n)
   _requires(_inline_pulse(pure (SizeT.v $(n) == Seq.length $`values)))
   _ensures(_inline_pulse(pure (SizeT.v $(i) < Seq.length $`values
@@ -96,7 +96,7 @@ uint32_t get_plain_field(_plain _array const struct pair *a, size_t i, size_t n)
 
 uint32_t get_spliced_pre(_plain _array const uint32_t *a, size_t i)
   _preserves(_inline_pulse(
-    array_pts_to uint32_t_repr 4 (SizeT.v uint32_t_alignof) $(a) 0.5R $`values **
+    array_pts_to uint32_t_ctype uint32_t_repr 4 (SizeT.v uint32_t_alignof) $(a) 0.5R $`values **
     pure (SizeT.v $(i) < Seq.length $`values)))
   _ensures(_inline_pulse(pure (SizeT.v $(i) < Seq.length $`values
     /\ $(return) == Seq.index $`values (SizeT.v $(i)))))

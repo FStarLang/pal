@@ -5,6 +5,10 @@ open Pulse.Lib.C.Palow.Ptr
 open Pulse.Lib.C.Palow.Scalar
 open Pulse.Lib.C.Palow.Machine
 module U32 = FStar.UInt32
+module ET = Pulse.Lib.C.Palow.Etype
+module R = Pulse.Lib.C.Palow.Effective.Retained
+module RS = Pulse.Lib.C.Palow.Effective.Retained.Scalar
+module K = Pulse.Lib.C.Palow.Effective.Context
 module U64 = FStar.UInt64
 module Cast = FStar.Int.Cast
 module Math = FStar.Math.Lemmas
@@ -46,5 +50,35 @@ fn mul_overflow_u64_u32 (a b: U64.t) (output: ptr)
 {
   let overflow, result = mul_u64_u32 a b;
   uint32_t_write_uninit output result;
+  overflow
+}
+
+(* The same, for storage the caller holds through its effective type: the
+   write keeps the type the caller owes back. *)
+fn mul_overflow_u64_u32_retained (a b: U64.t) (output: ptr) (#base: ET.etypes)
+  requires R.storage uint32_t_ctype uint32_t_alignof output base
+  returns overflow: bool
+  ensures exists* result.
+    R.value uint32_t_ctype uint32_t_repr uint32_t_alignof output 1.0R result base **
+    pure (U32.v result == (U64.v a * U64.v b) % pow2 32 /\
+      (overflow <==> U64.v a * U64.v b >= pow2 32))
+{
+  let overflow, result = mul_u64_u32 a b;
+  RS.uint32_t_write_uninit_retained output result;
+  overflow
+}
+
+(* The same, for a field of a struct held through its effective type. *)
+fn mul_overflow_u64_u32_field (a b: U64.t) (output: ptr)
+    (#root: ET.ctype) (#lo: nat) (#base: ET.etypes)
+  requires K.storage root lo uint32_t_ctype uint32_t_alignof output base
+  returns overflow: bool
+  ensures exists* result.
+    K.value root lo uint32_t_ctype uint32_t_repr uint32_t_alignof output 1.0R result base **
+    pure (U32.v result == (U64.v a * U64.v b) % pow2 32 /\
+      (overflow <==> U64.v a * U64.v b >= pow2 32))
+{
+  let overflow, result = mul_u64_u32 a b;
+  RS.uint32_t_write_uninit_field output result;
   overflow
 }

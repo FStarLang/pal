@@ -113,7 +113,7 @@ int32_t call_optional_fields(void)
 {
     struct pair value;
     _ghost_stmt(struct_pair_scatter_uninit $&(value));
-    _ghost_stmt(int32_t_pts_to_uninit_not_null $&(value.a));
+    _ghost_stmt(K.storage_not_null _ _ _ _ $&(value.a));
     _ghost_stmt(struct_pair_gather_uninit $&(value));
     _ghost_stmt(intro_unless_null $&(value) (struct_pair_pts_to_uninit $&(value)));
     write_optional_fields(&value);

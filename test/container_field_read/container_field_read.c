@@ -40,6 +40,8 @@ struct pair {
    structure. */
 _include_pulse(Container_field_read_include,
   module P = Struct_pair
+  module Ctx = Pulse.Lib.C.Palow.Effective.Context
+  module TypedView = Pulse.Lib.C.Palow.Effective.Typed
   open Pulse.Lib.C.Palow.Ptr
 
   // Focus the enclosing structure -- reached as `second -? off` -- down to the
@@ -49,23 +51,66 @@ _include_pulse(Container_field_read_include,
   ghost fn expose_second (var_second: $type(int32_t *)) (#pv: erased P.struct_pair)
     requires P.struct_pair_pts_to (var_second -? P.struct_pair_offsetof_second) 1.0R pv
           ** pure (SizeT.v P.struct_pair_offsetof_second <= addr_of var_second)
-    ensures  P.struct_pair_hole_second (var_second -? P.struct_pair_offsetof_second) 1.0R pv
-          ** int32_t_pts_to var_second 1.0R pv.P.fld_second
+    ensures exists* (base: P.struct_pair_index).
+      P.struct_pair_hole_second base (var_second -? P.struct_pair_offsetof_second) 1.0R pv **
+      Ctx.value P.struct_pair_ctype (SizeT.v P.struct_pair_offsetof_second)
+        int32_t_ctype int32_t_repr int32_t_alignof var_second 0.5R
+        (reveal pv).P.fld_second
+        (Seq.slice base (SizeT.v P.struct_pair_offsetof_second)
+          (SizeT.v P.struct_pair_offsetof_second + SizeT.v int32_t_sizeof)) **
+      int32_t_pts_to var_second 0.5R pv.P.fld_second
   {
     P.struct_pair_focus_second (var_second -? P.struct_pair_offsetof_second);
-    rewrite (int32_t_pts_to ((var_second -? P.struct_pair_offsetof_second) +! P.struct_pair_offsetof_second) 1.0R (reveal pv).P.fld_second)
-         as (int32_t_pts_to var_second 1.0R (reveal pv).P.fld_second);
+    with base. assert P.struct_pair_hole_second base
+      (var_second -? P.struct_pair_offsetof_second) 1.0R pv;
+    rewrite (Ctx.value P.struct_pair_ctype (SizeT.v P.struct_pair_offsetof_second)
+      int32_t_ctype int32_t_repr int32_t_alignof
+      ((var_second -? P.struct_pair_offsetof_second) +! P.struct_pair_offsetof_second)
+      1.0R (reveal pv).P.fld_second
+      (Seq.slice base (SizeT.v P.struct_pair_offsetof_second)
+        (SizeT.v P.struct_pair_offsetof_second + SizeT.v int32_t_sizeof)))
+    as (Ctx.value P.struct_pair_ctype (SizeT.v P.struct_pair_offsetof_second)
+      int32_t_ctype int32_t_repr int32_t_alignof var_second
+      1.0R (reveal pv).P.fld_second
+      (Seq.slice base (SizeT.v P.struct_pair_offsetof_second)
+        (SizeT.v P.struct_pair_offsetof_second + SizeT.v int32_t_sizeof)));
+    Ctx.borrow_public_read int32_t_ctype int32_t_repr int32_t_alignof var_second;
+    TypedView.reveal_value int32_t_ctype int32_t_repr int32_t_alignof
+      var_second #0.5R #((reveal pv).P.fld_second);
+    with b e. assert mem_pts_to_at var_second 0.5R b e;
+    int32_t_conceal var_second #0.5R #b #pv.P.fld_second #e;
   }
 
-  // Put it back, so what the caller preserved is what it gets.
+  // The retained half enforces byte/index agreement when the read loan returns.
   ghost fn hide_second (var_second: $type(int32_t *)) (#pv: erased P.struct_pair)
-    requires P.struct_pair_hole_second (var_second -? P.struct_pair_offsetof_second) 1.0R pv
-          ** int32_t_pts_to var_second 1.0R pv.P.fld_second
+    (#base: P.struct_pair_index)
+    requires P.struct_pair_hole_second base (var_second -? P.struct_pair_offsetof_second) 1.0R pv
+          ** Ctx.value P.struct_pair_ctype (SizeT.v P.struct_pair_offsetof_second)
+               int32_t_ctype int32_t_repr int32_t_alignof var_second 0.5R
+               (reveal pv).P.fld_second
+               (Seq.slice base (SizeT.v P.struct_pair_offsetof_second)
+                 (SizeT.v P.struct_pair_offsetof_second + SizeT.v int32_t_sizeof))
+          ** int32_t_pts_to var_second 0.5R pv.P.fld_second
           ** pure (SizeT.v P.struct_pair_offsetof_second <= addr_of var_second)
     ensures  P.struct_pair_pts_to (var_second -? P.struct_pair_offsetof_second) 1.0R pv
   {
-    rewrite (int32_t_pts_to var_second 1.0R (reveal pv).P.fld_second)
-         as (int32_t_pts_to ((var_second -? P.struct_pair_offsetof_second) +! P.struct_pair_offsetof_second) 1.0R (reveal pv).P.fld_second);
+    int32_t_reveal var_second #0.5R #pv.P.fld_second;
+    with b e. assert mem_pts_to_at var_second 0.5R b e;
+    int32_t_repr_no_prov (reveal pv).P.fld_second b;
+    TypedView.claim int32_t_ctype int32_t_repr int32_t_alignof
+      var_second #0.5R #((reveal pv).P.fld_second) #b #e;
+    Ctx.restore_public_read int32_t_ctype int32_t_repr int32_t_alignof var_second;
+    rewrite (Ctx.value P.struct_pair_ctype (SizeT.v P.struct_pair_offsetof_second)
+      int32_t_ctype int32_t_repr int32_t_alignof var_second
+      1.0R (reveal pv).P.fld_second
+      (Seq.slice base (SizeT.v P.struct_pair_offsetof_second)
+        (SizeT.v P.struct_pair_offsetof_second + SizeT.v int32_t_sizeof)))
+    as (Ctx.value P.struct_pair_ctype (SizeT.v P.struct_pair_offsetof_second)
+      int32_t_ctype int32_t_repr int32_t_alignof
+      ((var_second -? P.struct_pair_offsetof_second) +! P.struct_pair_offsetof_second)
+      1.0R (reveal pv).P.fld_second
+      (Seq.slice base (SizeT.v P.struct_pair_offsetof_second)
+        (SizeT.v P.struct_pair_offsetof_second + SizeT.v int32_t_sizeof)));
     P.struct_pair_unfocus_read_second (var_second -? P.struct_pair_offsetof_second);
   }
 )

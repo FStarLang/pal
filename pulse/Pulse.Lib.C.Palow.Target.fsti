@@ -51,3 +51,7 @@ let addr_limit_divisible (m: pos)
    32-bit MIPS and ARM. At least `_Alignof(long long)`, so never below 8. *)
 val max_align : n:FStar.SizeT.t {
   let v = FStar.SizeT.v n in v == 8 \/ v == 16 \/ v == 32 }
+
+let max_align_divides_pow2_32 ()
+  : Lemma (FStar.SizeT.v max_align > 0 /\ pow2 32 % FStar.SizeT.v max_align == 0)
+  = assert_norm (pow2 32 % 8 == 0 /\ pow2 32 % 16 == 0 /\ pow2 32 % 32 == 0)

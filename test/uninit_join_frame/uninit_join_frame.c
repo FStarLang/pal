@@ -8,7 +8,7 @@ int delayed_scalar(int *p, _Bool write)
     int result;
     if (write)
         _ensures((_slprop)_inline_pulse(
-            exists* v. int32_t_pts_to $&(*p) 1.0R v))
+            exists* v. R.value int32_t_ctype int32_t_repr int32_t_alignof $&(*p) 1.0R v index_p))
     {
         *p = 1;
     }
@@ -27,7 +27,7 @@ int delayed_union(int *p, _Bool write)
     union result result;
     if (write)
         _ensures((_slprop)_inline_pulse(
-            exists* v. int32_t_pts_to $&(*p) 1.0R v))
+            exists* v. R.value int32_t_ctype int32_t_repr int32_t_alignof $&(*p) 1.0R v index_p))
     {
         *p = 2;
     }
@@ -39,10 +39,10 @@ int conditional_scalar(int *p, _Bool write)
     _ensures(return == (write ? 7 : _old(*p)))
 {
     int result;
-    _ghost_stmt(with initial. assert int32_t_pts_to $(p) 1.0R initial);
+    _ghost_stmt(with initial. assert R.value int32_t_ctype int32_t_repr int32_t_alignof $(p) 1.0R initial index_p);
     if (write)
         _ensures((_slprop)_inline_pulse(
-            exists* v. int32_t_pts_to $&(*p) 1.0R v **
+            exists* v. R.value int32_t_ctype int32_t_repr int32_t_alignof $&(*p) 1.0R v index_p **
                 pure (v == (if $(write) then 7l else initial))))
     {
         result = 7;
@@ -85,7 +85,7 @@ void delayed_output(_out int *out, int *p, _Bool write)
 {
     if (write)
         _ensures((_slprop)_inline_pulse(
-            exists* v. int32_t_pts_to $&(*p) 1.0R v))
+            exists* v. R.value int32_t_ctype int32_t_repr int32_t_alignof $&(*p) 1.0R v index_p))
     {
         *p = 1;
     }

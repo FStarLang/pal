@@ -16,7 +16,7 @@ _include_pulse(M,
   include Pulse.Lib.C.Palow.Scalar
 
   ghost fn claim_misaligned (a: ptr) (#b: bytes)
-    requires mem_pts_to (a +! 1sz) 1.0R b
+    requires mem_pts_to_at (a +! 1sz) 1.0R b (ET.etypes_of uint32_t_ctype true)
     requires pure (aligned a max_align)
     requires pure (len b == FStar.SizeT.v uint32_t_sizeof)
     ensures  uint32_t_pts_to_uninit (a +! 1sz)

@@ -1,0 +1,3 @@
+copying untyped raw storage requires an explicit byte-region specification
+copying pointer-valued objects requires pointer-type-specific effective-type descriptors
+`destination` is read before it is written

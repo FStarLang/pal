@@ -46,14 +46,24 @@ union u2 {
  * counterpart in the current model, which has nothing to say about the bytes
  * outside the live member; it is the price of the byte-level view, and the
  * reason the two spellings cannot be shared.
+ * Both field predicates and the padding retain the same actual index witness;
+ * initializing `a` must neither initialize `b` nor invent a nominal arm type.
  */
 int write_subfield(union u2 *u _consumes, int v)
     _ensures(_inline_pulse(
-        exists* a_val.
-          (int32_t_pts_to ($(u) +! Struct_inner.struct_inner_offsetof_a) 1.0R a_val **
-           int32_t_pts_to_uninit ($(u) +! Struct_inner.struct_inner_offsetof_b) **
-           Struct_inner.struct_inner_padding $(u) 1.0R **
-           Union_u2.union_u2_rest_x $(u) 1.0R)))
+        exists* (base: Struct_inner.struct_inner_index).
+          K.value Struct_inner.struct_inner_ctype
+            (SizeT.v Struct_inner.struct_inner_offsetof_a)
+            int32_t_ctype int32_t_repr int32_t_alignof
+            ($(u) +! Struct_inner.struct_inner_offsetof_a) 1.0R $(v)
+            (Seq.slice base 0 4) **
+          K.storage Struct_inner.struct_inner_ctype
+            (SizeT.v Struct_inner.struct_inner_offsetof_b)
+            int32_t_ctype int32_t_alignof
+            ($(u) +! Struct_inner.struct_inner_offsetof_b)
+            (Seq.slice base 4 8) **
+          Struct_inner.struct_inner_padding_ctx $(u) 1.0R base **
+          Union_u2.union_u2_rest_x $(u) 1.0R))
     _ensures(return == v)
 {
     _ghost_stmt($activate(union u2::x) $(u));

@@ -27,6 +27,13 @@ void zero_char(char a[])
     memset(a, 0, sizeof(char) * 4);
 }
 
+void zero_out(_out uint8_t a[], size_t n)
+    _requires(a._length == n && n > 0)
+    _ensures(a[0] == 0)
+{
+    memset(a, 0, n * sizeof(uint8_t));
+}
+
 struct triple {
     int a;
     int b;
@@ -54,6 +61,14 @@ void zero_withbuf(struct withbuf *s)
     _ensures(s->buf[0] == 0)
 {
     memset(s, 0, sizeof(struct withbuf));
+}
+
+void zero_inline_array(struct withbuf *s)
+    _ensures(s->buf[0] == 0)
+    _ensures(s->buf[3] == 0)
+    _ensures(s->x == _old(s->x))
+{
+    memset(s->buf, 0, sizeof(s->buf));
 }
 
 // Zeroing a single local struct via address-of (memset(&s, 0, sizeof(s)));

@@ -1,10 +1,38 @@
 #include "pal.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef struct {
     float f;
     double d;
 } float_pair;
+
+// `uint64_t` does not fit in `int64_t`: its conversion must not wrap.
+double uint64_to_double(uint64_t x) {
+    return (double) x;
+}
+
+float uint64_to_float(uint64_t x) {
+    return (float) x;
+}
+
+double uint32_to_double(uint32_t x) {
+    return (double) x;
+}
+
+// A float converts to an integer only when it fits; an integer that is exact
+// in the format comes back as itself.
+int32_t int16_round_trip(int16_t x)
+    _ensures(return == x)
+{
+    return (int32_t) (double) x;
+}
+
+uint8_t small_float_to_uint8(void)
+    _ensures(return == 3)
+{
+    return (uint8_t) (float) 3;
+}
 
 float id_float(float x) {
     return x;

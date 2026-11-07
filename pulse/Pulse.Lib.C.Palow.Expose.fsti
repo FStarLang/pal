@@ -32,6 +32,7 @@ open Pulse.Lib.C.Palow.Ptr
 open Pulse.Lib.C.Palow
 
 module SZ = FStar.SizeT
+module ET = Pulse.Lib.C.Palow.Etype
 
 (* `q` has had one of its addresses observed as an integer. Duplicable and
    never revoked: an allocation that has been exposed stays exposed for as long
@@ -63,8 +64,8 @@ val in_footprint (q: prov) (x: nat) : prop
    `uintptr_to_ptr` is the pointer we started with. Without this the round trip
    would type-check but be useless, since nothing would connect the integer
    back to a footprint. *)
-ghost fn mem_pts_to_footprint (a: ptr) (#p: perm) (#b: bytes)
-  preserves mem_pts_to a p b
+ghost fn mem_pts_to_footprint (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
+  preserves mem_pts_to_at a p b e
   requires  pure (len b > 0)
   ensures   pure (in_footprint (prov_of a) (addr_of a))
 
@@ -75,8 +76,8 @@ ghost fn mem_pts_to_footprint (a: ptr) (#p: perm) (#b: bytes)
 (* Exposure is a ghost step: it records that the allocation's address may
    escape, but compiles to nothing. It needs ownership of some of the
    allocation, which is how we know the allocation is live and which one it is. *)
-ghost fn expose (a: ptr) (#p: perm) (#b: bytes)
-  preserves mem_pts_to a p b
+ghost fn expose (a: ptr) (#p: perm) (#b: bytes) (#e: ET.etypes)
+  preserves mem_pts_to_at a p b e
   requires  pure (len b > 0)
   ensures   exposed (prov_of a)
 
