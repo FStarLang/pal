@@ -795,9 +795,7 @@ int32_t malloc_fp(void)
     return r;
 }
 
-/* Pointer/ownership callee. Verifies as an ordinary function exercising a
-   relational `_old` contract. (No longer address-taken — see the disabled
-   ptr_arg_cb below — so no Funcptr_inc wrapper is generated.) */
+/* Owned-pointer callee with a relational _old contract (#279). */
 void inc(int32_t *p)
     _requires(*p < 100)
     _ensures(*p == _old(*p) + 1)
@@ -805,12 +803,9 @@ void inc(int32_t *p)
     *p = *p + 1;
 }
 
-/* ---- DISABLED: relational `_old` on an ownership pointer through an
-   indirect (function-pointer) call ----
-   `_old(*p)` needs the pointer's initial value threaded through the FuncPtr
-   domain, which no longer exists (fnptr arguments are plain values only).
-   Disabled until FuncPtr contracts support `_old` again.
-
+/* Regression: the indirect caller must learn the relational pointee post,
+   with PRE and _old resolved from the wrapper's initial-state witness.
+   See test/fnptr_pointee_post for compound and mixed-witness cases. */
 void ptr_arg_cb(int32_t *p)
     _requires(*p < 100)
     _ensures(*p == _old(*p) + 1)
@@ -818,7 +813,6 @@ void ptr_arg_cb(int32_t *p)
     void (*f)(int32_t *) = inc;
     f(p);
 }
----- end DISABLED ptr_arg_cb ---- */
 
 /* ---- DISABLED: storing a function pointer into an array element ----
    These four functions each write a function pointer into an array slot
