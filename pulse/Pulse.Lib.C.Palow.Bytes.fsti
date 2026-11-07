@@ -56,14 +56,16 @@ let zeroed (n: nat) : b:bytes { len b == n } = Seq.create n zero_byte
    Pointwise predicates
    --------------------------------------------------------------------------- *)
 
+(* Both quantifiers are triggered on `get b i` (or the `Seq.index` it is): left to choose, Z3
+   may pick `i: nat` alone and instantiate on every natural number in sight. *)
 let initialized (b: bytes) : prop =
-  forall (i: nat). i < len b ==> Some? (get b i).value
+  forall (i: nat). {:pattern (get b i) \/ (Seq.index b i)} i < len b ==> Some? (get b i).value
 
 (* All bytes carry provenance `p`. Used to state that the bytes of a stored
    pointer all agree on its allocation, and (with `p == None`) that the bytes of
    an integer carry no provenance. *)
 let has_prov (p: prov) (b: bytes) : prop =
-  forall (i: nat). i < len b ==> (get b i).prov == p
+  forall (i: nat). {:pattern (get b i) \/ (Seq.index b i)} i < len b ==> (get b i).prov == p
 
 let no_prov (b: bytes) : prop = has_prov None b
 

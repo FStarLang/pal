@@ -267,7 +267,7 @@ let ptr_repr_injective (a1 a2: ptr) (b: bytes)
 let ptr_repr_no_prov (a: ptr) (b: bytes)
   : Lemma (requires ptr_repr a b /\ no_prov b)
           (ensures  prov_of a == None)
-  = ()
+  = assert ((get b 0).prov == prov_of a)
 
 ghost fn ptr_pts_to_not_null (dest: ptr) (#p: perm) (#a: ptr)
   preserves ptr_pts_to dest p a

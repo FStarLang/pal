@@ -19,9 +19,27 @@ let is_sorted (xs: list I32.t) =
   forall (i j: nat). i < j /\ j < L.length xs ==>
     I32.v (L.index xs i) <= I32.v (L.index xs j)
 
+(* The inductive step, stated once so that `compute_sorted` does not leave the
+   solver to rediscover it inside a refinement. *)
+let is_sorted_cons_cons (x y: I32.t) (xs: list I32.t)
+  : Lemma (requires is_sorted (y::xs) /\ I32.v x <= I32.v y)
+          (ensures  is_sorted (x::y::xs))
+  = let aux (i j: nat)
+      : Lemma (i < j /\ j < L.length (x::y::xs) ==>
+               I32.v (L.index (x::y::xs) i) <= I32.v (L.index (x::y::xs) j))
+      = if i < j && j < L.length (x::y::xs) && i = 0 && j > 1
+        then assert (I32.v y <= I32.v (L.index (y::xs) (j - 1)))
+        else if i < j && j < L.length (x::y::xs) && i > 0
+        then assert (I32.v (L.index (y::xs) (i - 1)) <= I32.v (L.index (y::xs) (j - 1)))
+    in
+    FStar.Classical.forall_intro_2 aux
+
 let rec compute_sorted (xs: list I32.t) : b:bool { b ==> is_sorted xs } =
   match xs with
-  | x::y::xs -> I32.v x <= I32.v y && compute_sorted (y::xs)
+  | x::y::xs' ->
+    let b = I32.v x <= I32.v y && compute_sorted (y::xs') in
+    if b then is_sorted_cons_cons x y xs';
+    b
   | _ -> true
 
 let is_sorted_of_compute_sorted #xs (h: compute_sorted xs) : is_sorted xs = ()
