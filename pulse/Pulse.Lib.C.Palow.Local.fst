@@ -32,7 +32,7 @@ fn array_stack_alloc (#t: Type0) (t_repr: t -> bytes -> prop) (esize: SZ.t) (eal
   returns a : ptr
   ensures array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) (SZ.v ealign) a 1.0R
                        (Seq.create (SZ.v n) (None #t))
-  ensures pure (addr_of a + SZ.v nbytes < T.addr_limit)
+  ensures pure (addr_of a + SZ.v nbytes < T.addr_limit /\ not (is_null a))
 {
   let a = mem_stack_alloc nbytes ealign;
   mem_pts_to_fits a;
