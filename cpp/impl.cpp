@@ -220,6 +220,8 @@ public:
   SnipMap &snippets;
   SourceManager &sm;
   ASTContext *astCtx = nullptr;
+  // Whether the body being translated is a system header's.
+  bool inSystemBody = false;
   std::unordered_set<RecordDecl *>
       alreadyDefined; // guard against recursive structures
   std::unordered_map<RecordDecl *, std::string>
@@ -440,7 +442,10 @@ public:
 
   Rc<ir::Ident> symbolIdent(NamedDecl *d, Rc<ir::SourceInfo> loc,
                             bool reference = true) {
-    if (reference && isLinkerAlias(d))
+    // glibc's own inline definitions call functions it renames with
+    // `__REDIRECT` (`atoi` calls `strtol`, which is `__isoc23_strtol` in C2X
+    // mode). Only a reference the program itself makes is diagnosed.
+    if (reference && isLinkerAlias(d) && !inSystemBody)
       ctx.report_diag(loc.clone(), true, "unsupported linker symbol alias"_rs);
     bool internal = isa<FunctionDecl>(d) && !d->hasExternalFormalLinkage();
     if (auto *vd = dyn_cast<VarDecl>(d))
@@ -3947,7 +3952,13 @@ public:
         }
       }
       if (FD->hasBody() && ctx.selects_function_body(toStr(FD->getName()))) {
-        return ctx.add_fn_defn(std::move(builder), trStmts(FD->getBody()));
+        auto &sm = astCtx->getSourceManager();
+        bool outer = inSystemBody;
+        inSystemBody =
+            sm.isInSystemHeader(sm.getExpansionLoc(FD->getLocation()));
+        auto body = trStmts(FD->getBody());
+        inSystemBody = outer;
+        return ctx.add_fn_defn(std::move(builder), std::move(body));
       } else {
         if (FD->doesThisDeclarationHaveABody()) {
           std::string message =
