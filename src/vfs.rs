@@ -1,5 +1,13 @@
 use std::{collections::HashMap, path::PathBuf, rc::Rc};
 
+pub fn absolute_file_name(file: &str) -> std::io::Result<String> {
+    let name = std::path::absolute(file)?.to_string_lossy().into_owned();
+    // Match the spelling used by Clang's FileManager.
+    #[cfg(windows)]
+    let name = name.replace('\\', "/");
+    Ok(name)
+}
+
 pub struct VFSEntry {
     pub file_name: String,
     pub contents: String,

@@ -81,7 +81,15 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _do_while_first(name)
 #define _do_while_cond(name)
 
+#ifdef _WIN32
+#include <assert.h>
+/* The Windows CRT also calls its three-argument function `_assert`. */
+#define __pal_annotation_assert(p) ((void)0)
+#define __pal_select_assert(_1, _2, _3, selected, ...) selected
+#define _assert(...) __pal_select_assert(__VA_ARGS__, (_assert), (_assert), __pal_annotation_assert)(__VA_ARGS__)
+#else
 #define _assert(p) ((void)0)
+#endif
 #define _ghost_stmt(args) ((void)0)
 #define _ghost_arg(p)
 

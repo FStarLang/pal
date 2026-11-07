@@ -44,3 +44,13 @@ uint32_t high_of_nested(uint32_t lo, uint32_t hi)
 {
     return make_nested(lo, hi).inner.hi;
 }
+
+/* The increment must only be evaluated in the selected arm. */
+uint32_t conditional_low_of(uint32_t lo, uint32_t hi, int take)
+    _requires(!take || lo < UINT32_MAX)
+    _ensures(return == (take ? lo + 1 : hi))
+{
+    if (take)
+        return make_pair(lo + 1, hi).lo;
+    return hi;
+}
