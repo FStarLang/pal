@@ -726,22 +726,12 @@ impl Snapshot {
     }
 
     /// Only project flags: PAL adds its mandatory compiler flags itself.
-    pub fn project_args(&self, private_c: &Path) -> Vec<String> {
-        let original = self
-            .sources
-            .iter()
-            .find(|source| self.mirror().join(&source.path) == private_c)
-            .map(|source| self.root.join(&source.path))
-            .or_else(|| self.original(private_c))
-            .unwrap_or_else(|| self.root.clone());
-        let mut arguments = vec![
-            "-iquote".into(),
-            original
-                .parent()
-                .unwrap_or(&self.root)
-                .to_string_lossy()
-                .into_owned(),
-        ];
+    /// They are identical for every translation unit, since PAL rejects
+    /// external declarations shared between units compiled in different
+    /// contexts. Quote includes still resolve beside the original source:
+    /// the fallback overlay remaps the mirror onto the project root.
+    pub fn project_args(&self) -> Vec<String> {
+        let mut arguments = Vec::new();
         arguments.extend(
             self.includes
                 .iter()
@@ -762,7 +752,7 @@ impl Snapshot {
         arguments
     }
 
-    pub fn parser_args(&self, private_c: &Path, toolchain: &Toolchain) -> Vec<String> {
+    pub fn parser_args(&self, toolchain: &Toolchain) -> Vec<String> {
         let mut arguments = vec![
             "-DC2PULSE".into(),
             "-fno-builtin".into(),
@@ -772,7 +762,7 @@ impl Snapshot {
             "-Wno-unused-but-set-variable".into(),
             "-Wno-unused-variable".into(),
         ];
-        arguments.extend(self.project_args(private_c));
+        arguments.extend(self.project_args());
         arguments.push(format!("-working-directory={}", self.root.display()));
         arguments
     }
@@ -783,7 +773,7 @@ impl Snapshot {
             .iter()
             .map(|source| {
                 let mut arguments = vec![toolchain.clang.to_string_lossy().into_owned()];
-                arguments.extend(self.project_args(source));
+                arguments.extend(self.project_args());
                 arguments.push(source.to_string_lossy().into_owned());
                 json!({ "directory": self.root, "file": source, "arguments": arguments })
             })

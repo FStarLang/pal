@@ -215,7 +215,7 @@ fn build_index(
         // Remapping every header alias makes libclang coalesce file identities and switch
         // lookup directories. Frozen header bytes already live in the authoritative VFS.
         let unsaved = [Unsaved::new(&root, source.code.as_ref())];
-        let arguments = snapshot.parser_args(&root, toolchain);
+        let arguments = snapshot.parser_args(toolchain);
         let mut parser = clang_index.parser(&root);
         parser
             .arguments(&arguments)
@@ -1423,7 +1423,7 @@ mod tests {
         for (source, expected) in [("probe.c", "return 1;"), ("alias.c", "return 3;")] {
             let private = sparse.mirror().join(source);
             let output = std::process::Command::new(&toolchain.clang)
-                .args(sparse.parser_args(&private, &toolchain))
+                .args(sparse.parser_args(&toolchain))
                 .args(["-E", "-P"])
                 .arg(private)
                 .output()

@@ -152,8 +152,10 @@ impl Verifier {
                 format!("cannot open Pulse library: {error}"),
             )
         })?;
-        if !pulse.join("Pulse.Lib.C.fsti").is_file()
-            || !pulse.join("_cache/Pulse.Lib.C.fsti.checked").is_file()
+        if !pulse.join("Pulse.Lib.C.Palow.fsti").is_file()
+            || !pulse
+                .join("_cache/Pulse.Lib.C.Palow.fsti.checked")
+                .is_file()
         {
             return Err(Failure::new(
                 "toolchain_unavailable",
@@ -552,7 +554,10 @@ impl Verifier {
     }
 }
 
+// Mirrors test/_templates/Makefile: the Palow library is checked once in
+// `pulse/_cache` and only looked up from there.
 fn verification_options(pulse: &str, out: &str, checked: &str) -> Vec<String> {
+    let pulse_cache = format!("{pulse}/_cache");
     [
         "--cache_checked_modules",
         "--cache_dir",
@@ -561,6 +566,8 @@ fn verification_options(pulse: &str, out: &str, checked: &str) -> Vec<String> {
         "Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore",
         "--include",
         pulse,
+        "--include",
+        &pulse_cache,
         "--include",
         out,
         "--message_format",
