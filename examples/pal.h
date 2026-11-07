@@ -32,6 +32,12 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _plain __attribute__((annotate("pal-plain")))
 #define _core_ref __attribute__((annotate("pal-core-ref")))
 #define _nullable __attribute((annotate("pal-nullable")))
+/* Translate a `const`-qualified pointer parameter in the default mode rather
+   than as a const one: it is held at full permission and may be written,
+   instead of being borrowed at a signature-level fraction and handed back
+   unchanged. A typedef can hide the `const` (`typedef const int *PCINT;`),
+   so this is how a declaration using such a typedef opts out. */
+#define _mutable __attribute((annotate("pal-mutable")))
 #define _consumes __attribute__((annotate("pal-consumes")))
 #define _out __attribute__((annotate("pal-out")))
 #define _array __attribute((annotate("pal-array")))
@@ -82,6 +88,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _plain
 #define _core_ref
 #define _nullable
+#define _mutable
 #define _consumes
 #define _out
 #define _array

@@ -112,6 +112,7 @@ fn func_f (var_x: ptr) (#val_x: erased T)
 |---------------------------|---------------------------------------------|
 | `T *x`                    | `T_pts_to var_x 1.0R val_x` at both ends (new value `val_x'` on the way out) |
 | `const T *x`              | `preserves T_pts_to var_x perm_x val_x`: a fraction, and the value is unchanged |
+| `const T _mutable *x`     | as `T *x`: the declaration opts out of the const reading, e.g. for a `_nullable` input that should be held at full permission |
 | `_plain T *x`             | nothing: `x` is a bare address; the user supplies any ownership in `_requires` / `_ensures` |
 | `_plain T x` (a value)    | nothing: for a struct, neither the `_own` of its pointer fields nor its type's or fields' `_refine`s; only refinements written on the parameter itself are stated |
 | `_consumes T *x`          | `T_pts_to` in `requires` only — not returned |
