@@ -3,3 +3,7 @@
 /.vscode
 /.ccls-cache
 test/_palow/
+/.claude
+/.trail
+/AGENTS.md
+/opencode.json
