@@ -80,9 +80,12 @@ def check_case(name, inputs, compare=True, native=False, two_private=False):
     expected_here = [n for n in expected if (out / (n + ".fst")).exists()]
     failures = case / "expected.txt"
     failures.write_text("\n".join(expected_here) + "\n")
+    windows = sys.platform in ("win32", "cygwin", "msys")
+    make_out = out.relative_to(case) if windows else out
+    make_cache = "cache" if windows else case / "cache"
     run([
-        "make", "-f", str(verify_make), "-j2", f"OUT_DIR={out}",
-        f"CACHE_DIR={case}/cache", f"FSTAR_EXE={fstar}",
+        "make", "-f", str(verify_make), "-j2", f"OUT_DIR={make_out}",
+        f"CACHE_DIR={make_cache}", f"FSTAR_EXE={fstar}",
         f"EXPECTED_FAILURES_FILE={failures}", f"EXPECTED_FAILURE_TEXT_FILE={error_text}",
     ], case, "verify.log")
     for path in out.glob("Func_*.fst"):

@@ -72,7 +72,10 @@ verify: $(OUT_DIR)/.stamp
 	fi; \
 	while IFS= read -r pat; do \
 		[ -z "$$pat" ] && continue; \
-		if ! grep -qF -- "$$pat" $(OUT_DIR)/verify.log; then \
+		if ! grep -qF -- "$$pat" $(OUT_DIR)/verify.log && \
+			! { test "$$OS" = Windows_NT && \
+				sed -E '/^\* Error [0-9]+ at /s|\\|/|g' $(OUT_DIR)/verify.log | \
+				grep -qF -- "$$pat"; }; then \
 			echo "ERROR: $(CURDIR) failed, but not for the expected reason:" >&2; \
 			echo "       no line of the output contains '$$pat'" >&2; \
 			exit 1; \

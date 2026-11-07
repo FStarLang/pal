@@ -1,11 +1,14 @@
 #include "generated.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Lex/MacroArgs.h"
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
+#ifndef _WIN32
 #include <dlfcn.h>
+#endif
 #include <map>
 #include <optional>
 #include <sstream>
@@ -36,6 +39,14 @@ Ref<rust::Str> toStr(llvm::StringRef const &str) {
 
 Ref<rust::Str> toStr(std::string const &str) {
   return str_from_parts((uint8_t const *)str.data(), str.size());
+}
+
+static QualType typeForDecl(ASTContext &ctx, const TypeDecl *decl) {
+#if LLVM_VERSION_MAJOR >= 23
+  return ctx.getTypeDeclType(ElaboratedTypeKeyword::None, std::nullopt, decl);
+#else
+  return ctx.getTypeDeclType(decl);
+#endif
 }
 
 // Returns true if `s` contains a `continue` that binds to the enclosing loop,
@@ -577,7 +588,7 @@ public:
         addRecordField(builder, f, liftStructs, /*inUnion=*/false);
       }
       recordTypeLayout(kLayoutStruct, toStringRef(ident_name(ident)),
-                       astCtx->getRecordType(decl));
+                       typeForDecl(*astCtx, decl));
       recordFieldOffsets(kLayoutStruct, toStringRef(ident_name(ident)), decl);
       ctx.add_struct(std::move(builder));
     } else if (decl->getTagKind() == TagTypeKind::Union) {
@@ -597,7 +608,7 @@ public:
         addRecordField(builder, f, liftStructs, /*inUnion=*/true);
       }
       recordTypeLayout(kLayoutUnion, toStringRef(ident_name(ident)),
-                       astCtx->getRecordType(decl));
+                       typeForDecl(*astCtx, decl));
       ctx.add_union(std::move(builder));
     } else {
       reportUnsupported(decl->getSourceRange(), loc, "unsupported record kind",
@@ -901,6 +912,27 @@ public:
 
   bool isBoolType(QualType t) {
     return t->isUnsignedIntegerType() && astCtx->getIntWidth(t) == 1;
+  }
+
+  Expr *ignoreCRecordTemporary(Expr *e) {
+    if (auto *temporary = dyn_cast<MaterializeTemporaryExpr>(e);
+        temporary && !astCtx->getLangOpts().CPlusPlus &&
+        temporary->getType()->isRecordType() &&
+        temporary->getStorageDuration() == SD_FullExpression &&
+        !temporary->isBoundToLvalueReference()) {
+      return temporary->getSubExpr();
+    }
+    return e;
+  }
+
+  Expr *ignoreCCleanups(Expr *e) {
+    if (auto *cleanups = dyn_cast<ExprWithCleanups>(e);
+        cleanups && !astCtx->getLangOpts().CPlusPlus &&
+        cleanups->getNumObjects() == 0 &&
+        !cleanups->cleanupsHaveSideEffects()) {
+      return cleanups->getSubExpr();
+    }
+    return e;
   }
 
   Rc<ir::Expr> trLValue(Expr *e) {
@@ -1269,6 +1301,13 @@ public:
   Rc<ir::Expr> trRValue(Expr *e) {
     auto loc = getRange(e->getSourceRange());
 
+    if (auto *value = ignoreCCleanups(e); value != e) {
+      return trRValue(value);
+    }
+    if (auto *value = ignoreCRecordTemporary(e); value != e) {
+      return trRValue(value);
+    }
+
     if (auto generic = dyn_cast<GenericSelectionExpr>(e)) {
       return trRValue(generic->getResultExpr());
     }
@@ -1282,6 +1321,9 @@ public:
     if (auto ic = dyn_cast<CastExpr>(e)) {
       switch (ic->getCastKind()) {
       case CK_LValueToRValue:
+        if (!astCtx->getLangOpts().CPlusPlus && ic->getSubExpr()->isXValue()) {
+          return trRValue(ic->getSubExpr());
+        }
         if (dyn_cast<CompoundLiteralExpr>(
                 ic->getSubExpr()->IgnoreParenImpCasts())) {
           return trRValue(ic->getSubExpr());
@@ -1305,18 +1347,26 @@ public:
       case CK_PointerToIntegral: {
         auto *target = ic->getType()->getAs<BuiltinType>();
         auto source = ic->getSubExpr()->getType();
-        if (target &&
-            (target->getKind() == BuiltinType::Long ||
-             target->getKind() == BuiltinType::ULong) &&
-            source->isPointerType() &&
+        bool supportedTarget =
+            target && (target->getKind() == BuiltinType::Long ||
+                       target->getKind() == BuiltinType::ULong);
+        const char *supportedTypes = "long or unsigned long";
+#ifdef _WIN32
+        supportedTarget =
+            supportedTarget ||
+            astCtx->hasSameType(ic->getType(), astCtx->getIntPtrType()) ||
+            astCtx->hasSameType(ic->getType(), astCtx->getUIntPtrType());
+        supportedTypes = "long, unsigned long, intptr_t or uintptr_t";
+#endif
+        if (supportedTarget && source->isPointerType() &&
             !source->getPointeeType()->isFunctionType()) {
           return mk_rvalue_cast(std::move(loc), trRValue(ic->getSubExpr()),
                                 trQualType(ic->getType(), e->getSourceRange()));
         }
         reportUnsupported(e->getSourceRange(), loc,
                           "unsupported pointer-to-integer cast",
-                          "only object or void pointers to long or unsigned "
-                          "long are supported");
+                          std::string("only object or void pointers to ") +
+                              supportedTypes + " are supported");
         return mk_rvalue_err(std::move(loc),
                              trQualType(e->getType(), e->getSourceRange()));
       }
@@ -1558,7 +1608,7 @@ public:
                 ooe->getComponent(0).getKind() == OffsetOfNode::Field) {
               if (auto *field = ooe->getComponent(0).getField()) {
                 auto *recordDecl = field->getParent();
-                auto structTy = trQualType(astCtx->getRecordType(recordDecl),
+                auto structTy = trQualType(typeForDecl(*astCtx, recordDecl),
                                            ooe->getSourceRange());
                 auto fieldId = ctx.mk_ident(toStr(fieldNameStr(field)),
                                             getRange(ooe->getSourceRange()));
@@ -1652,9 +1702,8 @@ public:
               auto expr = trRValue(ic->getSubExpr());
               for (auto it = revChain.rbegin(); it != revChain.rend(); ++it) {
                 FieldDecl *f = *it;
-                auto structTy =
-                    trQualType(astCtx->getRecordType(f->getParent()),
-                               ic->getSourceRange());
+                auto structTy = trQualType(typeForDecl(*astCtx, f->getParent()),
+                                           ic->getSourceRange());
                 auto fieldId = ctx.mk_ident(toStr(fieldNameStr(f)),
                                             getRange(ic->getSourceRange()));
                 expr = mk_container_of(loc.clone(), std::move(expr),
@@ -2293,7 +2342,10 @@ public:
       auto id = ctx.mk_ident(toStr(nameStr), loc.clone());
       // When the base was hoisted out of the enclosing statement, project from
       // the temporary rather than re-translating the call.
-      auto hoisted = hoistedRValues.find(m->getBase()->IgnoreParenImpCasts());
+      auto *valueBase =
+          ignoreCRecordTemporary(m->getBase()->IgnoreParenImpCasts())
+              ->IgnoreParenImpCasts();
+      auto hoisted = hoistedRValues.find(valueBase);
       if (hoisted != hoistedRValues.end()) {
         auto tmp = ctx.mk_ident(toStr(StringRef(hoisted->second)), loc.clone());
         auto tmpRef = mk_lvalue_var(loc.clone(), std::move(tmp));
@@ -2576,7 +2628,8 @@ public:
     if (!m || m->isArrow()) {
       return;
     }
-    auto *base = m->getBase()->IgnoreParenImpCasts();
+    auto *base = ignoreCRecordTemporary(m->getBase()->IgnoreParenImpCasts())
+                     ->IgnoreParenImpCasts();
     if (!base->isPRValue() || !isa<CallExpr>(base)) {
       return;
     }
@@ -2633,6 +2686,12 @@ public:
   }
 
   rust::Unit trStmt(Vec<Rc<ir::Stmt>> &stmts, Stmt *stmt) {
+    if (auto *e = dyn_cast<Expr>(stmt)) {
+      if (auto *value = ignoreCCleanups(e); value != e) {
+        return trStmt(stmts, value);
+      }
+    }
+
     auto loc = getRange(stmt->getSourceRange());
 
     if (auto *e = dyn_cast<Expr>(stmt)) {
@@ -3901,8 +3960,7 @@ public:
           trQualType(TD->getUnderlyingType(), TD->getSourceRange(), &anon,
                      findFnProtoTypeLoc(TD->getTypeSourceInfo()));
       type = trTypeAttrs(TD->getAttrs(), std::move(type));
-      recordTypeLayout(kLayoutTypedef, TD->getName(),
-                       astCtx->getTypedefType(TD));
+      recordTypeLayout(kLayoutTypedef, TD->getName(), typeForDecl(*astCtx, TD));
       bool isPointerView = false;
       if (TD->hasAttrs()) {
         for (auto *attr : TD->getAttrs()) {
@@ -4096,6 +4154,7 @@ public:
 #define GetResourcesPath clang::driver::Driver::GetResourcesPath
 #endif
 
+#ifndef _WIN32
 std::string getBinaryForResourcesPath() {
   Dl_info info;
   if (dladdr((void *)static_cast<std::string (*)(StringRef)>(&GetResourcesPath),
@@ -4105,9 +4164,14 @@ std::string getBinaryForResourcesPath() {
     return "/usr/bin/clang";
   }
 }
+#endif
 
 std::string getResourcesPath() {
+#ifdef _WIN32
+  return PAL_CLANG_RESOURCE_DIR;
+#else
   return GetResourcesPath(getBinaryForResourcesPath());
+#endif
 }
 
 llvm::vfs::Status mkStatus(Ref<rust::pal::vfs::VFSEntry> entry) {

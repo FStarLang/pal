@@ -168,10 +168,7 @@ fn main() {
             let mut overlayfs = OverlayFS::new(RealFS::new());
             let tmpdir = Path::new(tmpdir);
             for file in &cli.files {
-                let file_name = std::path::absolute(file)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned();
+                let file_name = vfs::absolute_file_name(file).unwrap();
                 let contents = String::from_utf8(
                     std::fs::read(tmpdir.join(Path::new(&file_name).file_name().unwrap())).unwrap(),
                 )
@@ -209,10 +206,7 @@ fn main() {
 
     let parse_start = Instant::now();
     for (file, identity) in cli.files.iter().zip(&identities) {
-        let file_name = std::path::absolute(file)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        let file_name = vfs::absolute_file_name(file).unwrap();
 
         if let Err(error) = vfs.read_vfs_file(&file_name) {
             eprintln!("Cannot open {}: {}", file_name, error);

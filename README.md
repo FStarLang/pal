@@ -87,6 +87,41 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 `llvm-config` (or `llvm-config-20`) must be on `PATH` -- the build script
 calls it to find LLVM libraries.
 
+### Setup (native Windows)
+
+Use PowerShell 7 and MSYS2's **UCRT64** environment. PAL, Rust, Clang and
+F* run as native Windows executables; WSL is not required. Enable Windows
+Developer Mode (or clone from an elevated terminal) so Git can create the
+test suite's symlinks.
+
+Install these packages from an MSYS2 UCRT64 terminal:
+
+```bash
+pacman -Syu
+pacman -S --needed make git python mingw-w64-ucrt-x86_64-rust \
+  mingw-w64-ucrt-x86_64-clang mingw-w64-ucrt-x86_64-llvm \
+  mingw-w64-ucrt-x86_64-clang-tools-extra
+git -c core.symlinks=true -c core.autocrlf=false clone https://github.com/FStarLang/pal.git
+```
+
+Extract the `fstar-Windows_NT-x86_64.zip` asset from the F*/Pulse nightly
+`2026-11-06`. Set the roots in PowerShell (the F* root must contain
+`bin\fstar.exe`), then use the launcher:
+
+```powershell
+$env:PAL_MSYS_ROOT = 'D:\msys64'
+$env:PAL_FSTAR_ROOT = 'C:\tools\fstar'
+.\opt\windows.ps1 -Command @('make', 'test', '-j8')
+.\opt\windows.ps1 -Command @('target/debug/pal.exe', '--print-ir', 'test/swap/swap.c')
+.\opt\windows.ps1 # interactive UCRT64 shell in the checkout
+```
+
+The Windows build uses the selected C++ compiler's builtin-header directory.
+Keep Clang and `llvm-config` on the same major version, and rebuild PAL after
+moving or changing the toolchain. The MSYS2 packages must provide the shared
+`clang-cpp` library; the versioned, static-only LLVM packages are not substitutes.
+Linux continues to use its existing resource discovery and setup.
+
 ### Build & verify
 
 ```bash

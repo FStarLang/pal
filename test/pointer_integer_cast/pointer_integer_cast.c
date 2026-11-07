@@ -3,6 +3,16 @@
 
 // Test cast acceptance without assuming a particular integer representation.
 
+intptr_t typed_pointer_to_intptr(_plain int32_t *p)
+{
+    return (intptr_t)p;
+}
+
+uintptr_t typed_pointer_to_uintptr(_plain int32_t *p)
+{
+    return (uintptr_t)p;
+}
+
 long typed_pointer_to_long(_plain int32_t *p)
 {
     return (long)p;
