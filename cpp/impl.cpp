@@ -3805,6 +3805,14 @@ public:
                             if (hasCoreRefAttr(param->getAttrs()) ||
                                 isCoreRefQualType(param->getType()))
                               return ir::ParamMode::Regular();
+                            // `_mutable` opts a const-qualified parameter out
+                            // of const mode, which a `const` hidden behind a
+                            // typedef otherwise leaves no way to do.
+                            for (auto *attr : param->getAttrs()) {
+                              if (auto *ann = dyn_cast<AnnotateAttr>(attr);
+                                  ann && ann->getAnnotation() == "pal-mutable")
+                                return ir::ParamMode::Regular();
+                            }
                             // A top-level `const` on a parameter passed by
                             // value says nothing about ownership: the callee
                             // gets its own copy, and the qualifier only
