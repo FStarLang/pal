@@ -361,12 +361,8 @@ fn main() {
     }
 
     let t = Instant::now();
-    let modules = pass::emit_palow::emit_palow(
-        &combined_tu,
-        &header_statics,
-        diags.has_errors(),
-        cli.portable,
-    );
+    let modules =
+        pass::emit_palow::emit_palow(&combined_tu, &header_statics, &mut diags, cli.portable);
     if cli.time_passes {
         eprintln!(
             "  emit ({} modules): {:.3}s",

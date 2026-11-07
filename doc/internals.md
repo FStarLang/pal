@@ -180,6 +180,24 @@ and bitwise operations, plus `Implies` (`==>`) for specifications.
 | `IncludeDecl` | `_include_pulse(Mod, ...)` | `<Mod>.fst` |
 | `GlobalVar` | global variable | `Global_<name>.fst` |
 
+These are candidate names. The emitter allocates generated module names
+case-insensitively, since F* considers names such as `Func_foo` and `Func_Foo`
+duplicates even though C distinguishes `foo` and `Foo`. Non-colliding names
+remain unchanged. In a collision, the lexicographically first candidate keeps
+its name; the others receive numeric suffixes (`_1`, `_2`, ...), skipping all
+original candidates and already allocated names. Allocation is independent of
+declaration order and includes address-taken functions' `Funcptr_<name>` modules.
+Module declarations, filenames, `open`s, qualified references (including those
+produced by antiquotations such as `$type(t)`), and source mappings all use the
+allocated names.
+
+Explicit `_include_pulse` module names take precedence over generated names
+and are never renamed. Case-colliding explicit names, or an explicit name
+colliding with the reserved `TranslationErrors` module, produce a diagnostic.
+Qualified references to a renamed candidate name, such as `Func_foo.func_foo`,
+are redirected to the allocated module wherever they appear; to name a
+generated module that needed a suffix directly, the allocated name works too.
+
 A `TranslationUnit` is the top-level container: a list of
 `main_file_names` (the input `.c` files) and a flat list of `Decl`
 nodes.
