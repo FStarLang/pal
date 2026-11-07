@@ -3510,7 +3510,13 @@ public:
       for (auto d : ds->decls()) {
         auto dloc = getRange(d->getSourceRange());
         if (auto vd = dyn_cast<VarDecl>(d)) {
-          if (vd->isStaticLocal()) {
+          // A `static const` with an initializer holds the same value on
+          // every call, so it is translated as a local initialized each time.
+          // Only its address could tell the two apart, and a local's address
+          // cannot escape the function in Pulse.
+          if (vd->isStaticLocal() &&
+              !(vd->hasInit() &&
+                astCtx->getBaseElementType(vd->getType()).isConstQualified())) {
             ctx.report_diag(dloc.clone(), true,
                             "block-scope static storage is not supported"_rs);
             stmts.push(mk_stmt_err(dloc.clone()));
