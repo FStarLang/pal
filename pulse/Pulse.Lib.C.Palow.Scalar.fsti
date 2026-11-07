@@ -134,6 +134,11 @@ ghost fn uint32_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U32.t)
   ensures   pure (not (is_null a) /\ Some? (prov_of a))
 
 
+ghost fn uint32_t_pts_to_uninit_not_null (a: ptr)
+  preserves uint32_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+
+
 [@@allow_ambiguous]
 ghost fn uint32_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: U32.t)
   preserves uint32_t_pts_to a p1 x
@@ -289,6 +294,11 @@ ghost fn ptr_conceal (dest: ptr) (#p: perm) (#b: bytes) (#a: ptr)
    same `_pts_to_uninit`/`_forget` pair every scalar type has; it exists so the
    translator can allocate and release a local without a case for pointers. *)
 val ptr_pts_to_uninit ([@@@mkey] dest: ptr) : slprop
+
+
+ghost fn ptr_pts_to_uninit_not_null (dest: ptr)
+  preserves ptr_pts_to_uninit dest
+  ensures   pure (not (is_null dest) /\ Some? (prov_of dest))
 
 
 ghost fn ptr_forget (dest: ptr) (#a: ptr)

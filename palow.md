@@ -1502,9 +1502,10 @@ new facts about memory.
   completes the tracked `_out`, including before a later whole-object write.
   `nullable_out` covers scalar and record outputs, early returns, forwarding,
   addressed parameters, exact values, and null/non-null callers.
-  Callers introduce and eliminate nullable ownership explicitly, as for
-  other nullable parameters; a non-null caller derives non-nullness before
-  wrapping its storage. Nullable output arrays remain unsupported, and a
+  A caller takes back what it handed an optional parameter (entry 48):
+  a declined output's empty guard is discarded, and a supplied pointer whose
+  ownership PAL emitted comes back out of the guard. Nullable output arrays
+  remain unsupported, and a
   null-path witness requires a type whose ghost zero value can be constructed.
   `nullable_out_uninit`, `nullable_out_unchecked`, `nullable_out_rebind`, and
   `out_param_null` reject unwritten outputs, unchecked writes, rebinding, and
@@ -6670,3 +6671,26 @@ new facts about memory.
     after the parameter is walked down by a loop;
     `test/label_old_param_bad` claims the walked parameter is unchanged;
     `test/label_old_param_shadowed` is the refusal.
+
+48. **Taking back what was handed to an optional parameter.** A callee
+    states a `_nullable` parameter's ownership as `unless_null p (..)` on
+    both sides, which is right for it and wrong for a caller that knows
+    which side of the test its own argument is on: until now a caller that
+    supplied an optional output could not read what it had asked to be
+    written, and one that declined it was left holding a guard over
+    nothing. Both had to be spelled out with ghost steps. A call now does
+    it: a `NULL` passed to a `_nullable _out` is followed by
+    `elim_unless_null_null null _` (marked `allow_ambiguous`, since a call
+    may decline several), and a supplied pointer whose ownership PAL
+    emitted -- the address of a local, or a parameter the contract grants
+    -- gets `T_pts_to[_uninit]_not_null p` before the call, while the
+    resource is still in the open, and `elim_unless_null p _` after it.
+    Which lemma follows from the callee's mode: an `_out` is handed
+    storage, anything else an initialized object. Struct types gain
+    `<s>_pts_to_uninit_not_null`, and `uint32_t` and `ptr` the scalar ones
+    they lacked. A caller's own `_nullable` parameter is forwarded with its
+    guard untouched, since the caller cannot say which way the test goes,
+    and a `_plain` or hand-granted argument, an array, and a declined
+    initialized input (whose value the guard would have to name) are left
+    to the author as before. `test/nullable_caller_transfer` supplies,
+    declines and forwards optional outputs, including a local's address.
