@@ -17588,6 +17588,7 @@ impl<'a> Body<'a> {
                 out += &format!(" {}", fo.at);
                 continue;
             }
+            let close_mark = self.pending_close.len();
             let v = if outs.get(i) == Some(&true) {
                 self.out_arg(a)?
             } else if is_literal(a)
@@ -17618,12 +17619,18 @@ impl<'a> Body<'a> {
                 && plain_ptrs.get(i) != Some(&true)
                 && consumes.get(i) != Some(&true)
             {
+                // `&s->f` handed to an `_out` is a field `out_arg` opened
+                // for the call, the same as one `field_args` opened.
+                let out = outs.get(i) == Some(&true);
+                let field = out
+                    && matches!(&strip_casts(a).val, ExprT::Ref(inner)
+                        if matches!(strip_vattr(inner).val, ExprT::Member(..)));
                 self.take_back_nullable(
                     a,
                     &v,
-                    outs.get(i) == Some(&true),
+                    out,
                     null_inputs.get(i).cloned().flatten(),
-                    None,
+                    field.then_some(close_mark),
                 );
             }
             // Passing the address of an object that holds a code pointer
