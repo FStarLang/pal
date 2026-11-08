@@ -6693,4 +6693,7 @@ new facts about memory.
     condition keep the ordinary clause. A struct initialiser is now also a
     contract term -- the record, with unnamed fields zeroed, as in a body --
     so a `_pure` function can build a struct. `test/rvalue_member_branch`
-    projects a call result twice, once inside a null-guarded branch.
+    projects a call result twice, once inside a null-guarded branch;
+    `test/rewrites_to_post` covers arithmetic, `_Bool`, `_old(*p)` and a read
+    through a non-const pointer, each once over a body that meets it and once
+    over one that must be rejected for its `rewrites_to`.
