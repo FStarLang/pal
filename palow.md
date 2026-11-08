@@ -1510,9 +1510,10 @@ new facts about memory.
   completes the tracked `_out`, including before a later whole-object write.
   `nullable_out` covers scalar and record outputs, early returns, forwarding,
   addressed parameters, exact values, and null/non-null callers.
-  Callers introduce and eliminate nullable ownership explicitly, as for
-  other nullable parameters; a non-null caller derives non-nullness before
-  wrapping its storage. Nullable output arrays remain unsupported, and a
+  A caller takes back what it handed an optional parameter (entry 48):
+  a declined output's empty guard is discarded, and a supplied pointer whose
+  ownership PAL emitted comes back out of the guard. Nullable output arrays
+  remain unsupported, and a
   null-path witness requires a type whose ghost zero value can be constructed.
   `nullable_out_uninit`, `nullable_out_unchecked`, `nullable_out_rebind`, and
   `out_param_null` reject unwritten outputs, unchecked writes, rebinding, and
@@ -6679,7 +6680,61 @@ new facts about memory.
     `test/label_old_param_bad` claims the walked parameter is unchanged;
     `test/label_old_param_shadowed` is the refusal.
 
-48. **A postcondition that determines the result.** `_ensures(return == E)`,
+48. **Taking back what was handed to an optional parameter.** A callee
+    states a `_nullable` parameter's ownership as `unless_null p (..)` on
+    both sides, which is right for it and wrong for a caller that knows
+    which side of the test its own argument is on: until now a caller that
+    supplied an optional output could not read what it had asked to be
+    written, and one that declined it was left holding a guard over
+    nothing. Both had to be spelled out with ghost steps. A call now does
+    it: a `NULL` passed to a `_nullable _out` is followed by
+    `elim_unless_null_null null _` (marked `allow_ambiguous`, since a call
+    may decline several), and a supplied pointer whose ownership PAL
+    emitted -- the address of a local, or a parameter the contract grants
+    -- gets `T_pts_to[_uninit]_not_null p` before the call, while the
+    resource is still in the open, and `elim_unless_null p _` after it.
+    Which lemma follows from the callee's mode: an `_out` is handed
+    storage, anything else an initialized object. The pointee is looked
+    at through any refinement, `_plain` or `_nullable` wrapper. Struct
+    types gain `<s>_pts_to_uninit_not_null`, and `uint32_t` and `ptr` the
+    scalar ones they lacked; a struct's lemma goes through its field at
+    offset zero, which may now itself be a struct that has one. A union,
+    or a struct led by an array, has none, and its guard is left alone. A
+    caller's own `_nullable` parameter is forwarded with its guard
+    untouched, since the caller cannot say which way the test goes, and a
+    `_plain` or hand-granted argument, an array, and a declined
+    initialized input (whose value the guard would have to name; see entry
+    49) are left to the author as before. `test/nullable_caller_transfer`
+    supplies, declines and forwards optional outputs, including a local's
+    address, supplies an initialized input and refined structs (one led by
+    a nested struct), and declines an output beside a hand-managed array
+    input.
+
+49. **Declining an optional input, and supplying a borrowed member.** A
+    `_nullable` input (const or not) names its pointee value -- and, if
+    const, its permission -- as implicits of the callee's signature, which a
+    call passing `NULL` has nothing to solve against. Under a null pointer
+    the guard is `emp`, so a call now introduces it outright:
+    `intro_unless_null_null null (T_pts_to null 1.0R <zero>)` before and
+    `elim_unless_null_null null _` after, which pins both implicits by
+    structural match and asserts nothing about memory. Only pointees that
+    state nothing beyond a `pts_to` qualify -- scalars and structs of them;
+    a refinement or an owned pointer field would be a second guarded
+    conjunct, and an array has no canonical length -- so those are still
+    written by hand (`test/nullable`, `test/struct_pointee_refine`). The
+    take-back of entry 48 also covers `&s->f` (and `&u->m`), a field
+    opened for the call -- by `field_args` for an input or a union member,
+    and by `out_arg` for a single struct field handed to an `_out` -- or
+    a field of a local still being filled: the field's resource is taken
+    back out of the guard before the field is closed. An input field of
+    an object held in contract-stated pieces, and an array field, are left
+    alone.
+    `test/nullable_const_in` declines, forwards, and supplies a member of
+    a borrowed struct; `test/nullable_field_args` supplies struct fields
+    and union members, singly and two of one struct, as inputs and
+    outputs.
+
+50. **A postcondition that determines the result.** `_ensures(return == E)`,
     with `E` free of `return`, is emitted as `rewrites_to ret E` rather than
     `pure (ret == E)`. It is the same fact, but `rewrites_to` is the form
     Pulse's prover reads as a substitution, which is what a conditional needs:
