@@ -2111,6 +2111,16 @@ fn allocated_own(
 /// rather than from an attribute the IR would have to carry separately.
 /// (`_ensures(false)` is not accepted: a contract is captured before `false`
 /// is a macro, so it arrives as the name of a variable that does not exist.)
+/// The value of a condition that is a constant, through casts and `!`.
+fn const_truth(e: &Expr) -> Option<bool> {
+    match &strip_casts(e).val {
+        ExprT::IntLit(n, _) => Some(n.to_string() != "0"),
+        ExprT::BoolLit(b) => Some(*b),
+        ExprT::UnOp(UnOp::Not, inner) => const_truth(inner).map(|b| !b),
+        _ => None,
+    }
+}
+
 fn is_false_lit(e: &Expr) -> bool {
     match &strip_casts(e).val {
         ExprT::IntLit(n, _) => n.to_string() == "0",
@@ -20468,9 +20478,10 @@ impl<'a> Body<'a> {
                 self.asserted_uninit.clear();
                 Ok(())
             }
-            // A `switch` whose cases all end in `break` reaches the IR as a
-            // `Match`; anything with fallthrough or a `return` in a case has
-            // already been desugared into flags and `if`s by an earlier pass.
+            // An annotated `switch` whose cases cannot fall through -- each
+            // ends in `break`, `return`, a `goto` or an abort -- reaches the
+            // IR as a `Match`; anything with fallthrough has already been
+            // desugared into flags and `if`s by an earlier pass.
             //
             // Pulse has a `match` on integer literals, and it is what this
             // must use. Desugaring into a chain of `if`s works and is much
@@ -20525,16 +20536,24 @@ impl<'a> Body<'a> {
                 arms.push(("_".to_string(), self.branch(default_branch)?));
 
                 // Every arm has to leave the same state behind, or there is no
-                // join. The `default` arm is the one C always has, so it is
-                // the reference.
-                let (_, last) = arms.last().unwrap();
+                // join. An arm that ends in `unreachable ()` has no state to
+                // join: its postcondition is `pure False`, so it meets the
+                // join annotation whatever it left initialised. A dead
+                // `default:` is the usual case. Of the arms that do come back,
+                // the last -- the `default` if it is one -- is the reference.
+                if arms.iter().all(|(_, a)| a.diverged) {
+                    self.diverged = true;
+                }
+                let all_diverged = self.diverged;
+                let joined = |a: &BranchResult| !a.diverged || all_diverged;
+                let (_, last) = arms.iter().rev().find(|(_, a)| joined(a)).unwrap();
                 let inits = last.inits.clone();
                 let scattered = last.scattered.clone();
                 let nested = last.nested_scatter.clone();
                 let pre = last.prescattered.clone();
                 let last_extra = last.extra_slots.clone();
                 let outs = last.out_params.clone();
-                if arms.iter().any(|(_, a)| {
+                if arms.iter().filter(|(_, a)| joined(a)).any(|(_, a)| {
                     a.inits != inits
                         || a.scattered != scattered
                         || a.nested_scatter != nested
@@ -21030,6 +21049,21 @@ impl<'a> Body<'a> {
                     self.unguarded.pop();
                 }
                 let mut els = els?;
+                // An arm whose condition folds to a constant is dead, and an
+                // abort macro is spelled with one: `if (!0) abort();`. Saying
+                // so in the dead arm lets the live one decide the join, so
+                // the macro aborts exactly as its live arm does. The claim is
+                // checked by Pulse against the branch condition, not assumed.
+                if nt.is_none()
+                    && pt.is_none()
+                    && let Some(b) = const_truth(cond)
+                {
+                    let dead = if b { &mut els } else { &mut then };
+                    if !dead.diverged && !dead.returned {
+                        dead.lines.push("unreachable ();".to_string());
+                        dead.diverged = true;
+                    }
+                }
                 if let Some((p, _)) = &pt {
                     let payload = self.nullable_payload(p, &entry_out);
                     let (live, null) = if pt_live_then {
@@ -21127,7 +21161,9 @@ impl<'a> Body<'a> {
                 } else {
                     &then
                 };
+                let both_diverged = then.diverged && els.diverged;
                 if surviving.is_none()
+                    && !both_diverged
                     && (then.inits != els.inits
                         || then.scattered != els.scattered
                         || then.nested_scatter != els.nested_scatter
@@ -21225,6 +21261,10 @@ impl<'a> Body<'a> {
                 self.union_values.retain(|a, v| {
                     then.union_values.get(a) == Some(v) && els.union_values.get(a) == Some(v)
                 });
+                // Neither arm comes back, so neither does the `if`.
+                if both_diverged {
+                    self.diverged = true;
+                }
                 Ok(())
             }
             _ => Err(format!("{} is not translated yet", stmt_kind(s))),

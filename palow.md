@@ -1756,10 +1756,19 @@ new facts about memory.
    source annotation was introduced; the invariant construction was simply
    factored out and shared between the two.
 
-   Only a `switch` whose cases all end in `break` reaches this code at all --
-   fallthrough and a `return` inside a case are desugared into locals and `if`s
-   by an earlier pass, and those were already translated. A case listing
-   several labels duplicates its body, since Pulse has no or-pattern.
+   Only an annotated `switch` whose cases cannot fall through reaches this
+   code at all -- each case ends in `break`, `return`, a `goto` out of the
+   switch, or an abort (`__builtin_unreachable`, possibly inside a
+   `do { } while (0)` or behind an `if` whose condition folds to a constant).
+   Fallthrough is desugared into locals and `if`s by an earlier pass, and an
+   unannotated fall-through-free `switch` with a `default` becomes a nested
+   `if` chain on the scrutinee, whose joins Pulse infers. A case listing
+   several labels duplicates its body, since Pulse has no or-pattern. An arm
+   that ends in `unreachable ()` takes no part in the join: its postcondition
+   is `pure False`, so it need not leave the same variables initialised as the
+   arms that come back. The same holds for an `if` arm whose condition folds
+   to a constant false: it gets `unreachable ()`, which Pulse checks against
+   the branch condition.
 
    Functions are now written out in call-graph order rather than source order.
    C only requires a *declaration* before a call, while F\* requires the
