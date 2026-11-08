@@ -2259,6 +2259,9 @@ fn only_loads(lines: &[String]) -> bool {
 
 /// The lemma that derives a pointer's non-nullness from the points-to of an
 /// object of this type, initialized or (`uninit`) not, where one is emitted.
+///
+/// The type is peeled first: a refined, `_plain` or `_nullable` struct is the
+/// same struct, and the lemma is the struct's or nothing.
 fn not_null_lemma(tds: &Typedefs, pt: &Type, uninit: bool) -> Option<String> {
     let pn = palow_name(tds, pt)?;
     let suffix = if uninit {
@@ -2266,7 +2269,7 @@ fn not_null_lemma(tds: &Typedefs, pt: &Type, uninit: bool) -> Option<String> {
     } else {
         "pts_to_not_null"
     };
-    match &tds.resolve(pt).val {
+    match &peel(tds, pt).val {
         TypeT::TypeRef(TypeRefKind::Union(_)) => None,
         TypeT::TypeRef(TypeRefKind::Struct(n)) => {
             let si = tds.structs.get(&*n.val)?;
@@ -2274,16 +2277,33 @@ fn not_null_lemma(tds: &Typedefs, pt: &Type, uninit: bool) -> Option<String> {
                 si.fields.last().map(|f| &f.shape),
                 Some(FieldShape::Flex { .. })
             );
-            let first = si.fields.iter().find(|f| f.offset == 0)?;
-            let scalar = matches!(first.shape, FieldShape::One { .. })
-                && !matches!(
-                    tds.resolve(&first.ty).val,
-                    TypeT::TypeRef(..) | TypeT::FixedArray(..)
-                );
-            (scalar && !(flex && uninit)).then(|| format!("{}_{}", pn, suffix))
+            first_field_not_null(tds, si, uninit)?;
+            (!(flex && uninit)).then(|| format!("{}_{}", pn, suffix))
         }
         _ => Some(format!("{}_{}", pn, suffix)),
     }
+}
+
+/// A pointer to a struct is a pointer to its field at offset zero, so the
+/// struct's non-nullness lemma is that field's, reached through the struct.
+/// The field's lemma and name, when the field is a single object that has
+/// one: a scalar, or a struct whose own first field does.
+fn first_field_not_null<'s>(
+    tds: &Typedefs,
+    si: &'s StructInfo,
+    uninit: bool,
+) -> Option<(String, &'s str)> {
+    let first = si.fields.iter().find(|f| f.offset == 0)?;
+    let FieldShape::One { pn } = &first.shape else {
+        return None;
+    };
+    let lemma = match &peel(tds, &first.ty).val {
+        TypeT::TypeRef(TypeRefKind::Struct(_)) => not_null_lemma(tds, &first.ty, uninit)?,
+        TypeT::TypeRef(..) | TypeT::FixedArray(..) => return None,
+        _ if uninit => format!("{}_pts_to_uninit_not_null", pn),
+        _ => format!("{}_pts_to_not_null", pn),
+    };
+    Some((lemma, &first.name))
 }
 
 fn is_nullable(tds: &Typedefs, ty: &Type) -> bool {
@@ -8707,18 +8727,12 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
 
     // A pointer to an object is a pointer to its first field; see the
     // general case.
-    if let Some(first) = si.fields.iter().find(|f| f.offset == 0)
-        && let FieldShape::One { pn } = &first.shape
-        && !matches!(
-            tds.resolve(&first.ty).val,
-            TypeT::TypeRef(..) | TypeT::FixedArray(..)
-        )
-    {
+    if let Some((lemma, f)) = first_field_not_null(tds, si, false) {
         c += &format!(
-            "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n  preserves {sn}_pts_to a p x\n  ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n{{\n  {sn}_focus_{f} a;\n  {pn}_pts_to_not_null (a +! {sn}_offsetof_{f});\n  {sn}_unfocus_read_{f} a;\n}}\n\n",
+            "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n  preserves {sn}_pts_to a p x\n  ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n{{\n  {sn}_focus_{f} a;\n  {lemma} (a +! {sn}_offsetof_{f});\n  {sn}_unfocus_read_{f} a;\n}}\n\n",
             sn = sn,
-            pn = pn,
-            f = first.name
+            lemma = lemma,
+            f = f
         );
     }
 
@@ -9007,25 +9021,18 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // provenance. That is worth stating at the object, because a predicate
     // over a linked structure is where the null case has to be ruled out and
     // the caller has no reason to know which field sits at offset zero.
-    if let Some(first) = si.fields.iter().find(|f| f.offset == 0) {
-        if let FieldShape::One { pn } = &first.shape {
-            if !matches!(
-                tds.resolve(&first.ty).val,
-                TypeT::TypeRef(..) | TypeT::FixedArray(..)
-            ) {
-                c += &format!(
-                    "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n\
-                     \x20 preserves {sn}_pts_to a p x\n\
-                     \x20 ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
-                     {{\n\x20 {sn}_focus_{f} a;\n\
-                     \x20 {pn}_pts_to_not_null (a +! {sn}_offsetof_{f});\n\
-                     \x20 {sn}_unfocus_read_{f} a;\n}}\n\n",
-                    sn = sn,
-                    pn = pn,
-                    f = first.name
-                );
-            }
-        }
+    if let Some((lemma, f)) = first_field_not_null(tds, si, false) {
+        c += &format!(
+            "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n\
+             \x20 preserves {sn}_pts_to a p x\n\
+             \x20 ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
+             {{\n\x20 {sn}_focus_{f} a;\n\
+             \x20 {lemma} (a +! {sn}_offsetof_{f});\n\
+             \x20 {sn}_unfocus_read_{f} a;\n}}\n\n",
+            sn = sn,
+            lemma = lemma,
+            f = f
+        );
     }
 
     c += &format!(
@@ -9050,23 +9057,17 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     );
     // The same fact for storage not yet written, which is what a caller has
     // in hand when it supplies the object to an optional output.
-    if let Some(first) = si.fields.iter().find(|f| f.offset == 0)
-        && let FieldShape::One { pn } = &first.shape
-        && !matches!(
-            tds.resolve(&first.ty).val,
-            TypeT::TypeRef(..) | TypeT::FixedArray(..)
-        )
-    {
+    if let Some((lemma, f)) = first_field_not_null(tds, si, true) {
         c += &format!(
             "ghost fn {sn}_pts_to_uninit_not_null (a: ptr)\n\
              \x20 preserves {sn}_pts_to_uninit a\n\
              \x20 ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
              {{\n\x20 {sn}_scatter_uninit a;\n\
-             \x20 {pn}_pts_to_uninit_not_null (a +! {sn}_offsetof_{f});\n\
+             \x20 {lemma} (a +! {sn}_offsetof_{f});\n\
              \x20 {sn}_gather_uninit a;\n}}\n\n",
             sn = sn,
-            pn = pn,
-            f = first.name
+            lemma = lemma,
+            f = f
         );
     }
     {
