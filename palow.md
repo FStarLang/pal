@@ -6721,4 +6721,7 @@ new facts about memory.
     address a callee with hand-written ownership was handed is
     dereferenced on the same terms as one a ghost statement names, leaving
     F* to find the points-to the callee's words grant.
-    `test/core_ref_out_cell` acquires, reads and releases such a buffer.
+    `test/core_ref_out_cell` acquires, reads and releases such a buffer;
+    `test/core_ref_out_cell_bad` is the refusal of a cast claiming another
+    Palow type (`(uint32_t *)&int32_local`, `(char **)&int_local`) and of
+    a local array's address.
