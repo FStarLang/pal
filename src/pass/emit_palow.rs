@@ -2306,6 +2306,43 @@ fn first_field_not_null<'s>(
     Some((lemma, &first.name))
 }
 
+/// The guarded resource of an optional input parameter, stated at a null
+/// pointer with full permission and the pointee type's zero.
+///
+/// The callee names the pointee value -- and for a const parameter the
+/// permission -- as implicits of its signature, which a call site passing a
+/// null has nothing to solve against. Under a null pointer the guard is `emp`,
+/// so any resource may be introduced there; one with no metavariables left in
+/// it pins both implicits by structural match and asserts nothing about
+/// memory. Only pointees that state no more than a `pts_to` qualify: a
+/// refinement, or the `_own` of an owned pointer field, would be a second
+/// guarded conjunct to introduce.
+fn null_input(tds: &Typedefs, ty: &Type) -> Option<String> {
+    fn bare(tds: &Typedefs, ty: &Type) -> bool {
+        match &tds.resolve(ty).val {
+            TypeT::Int { .. } | TypeT::SizeT | TypeT::Bool => true,
+            TypeT::TypeRef(TypeRefKind::Struct(n)) => tds.structs.get(&*n.val).is_some_and(|si| {
+                si.fields
+                    .iter()
+                    .all(|f| matches!(f.shape, FieldShape::One { .. }) && bare(tds, &f.ty))
+            }),
+            _ => false,
+        }
+    }
+    if refined(tds, ty) || extent(tds, ty) != Some(Extent::One) {
+        return None;
+    }
+    let TypeT::Pointer(pt, _) = &peel(tds, ty).val else {
+        return None;
+    };
+    if !bare(tds, pt) {
+        return None;
+    }
+    let pn = palow_name(tds, pt)?;
+    let zero = zero_value(tds, pt).ok()?;
+    Some(format!("{}_pts_to null 1.0R ({})", pn, zero))
+}
+
 fn is_nullable(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Nullable(_) => true,
@@ -2377,6 +2414,15 @@ struct FnSurface {
     /// the source says, and in particular cannot discharge an overflow
     /// obligation -- see `Body::signed_ok`.
     contract: bool,
+    /// Whether the emitted postcondition determines the result with a
+    /// `rewrites_to`, which is what lets Pulse read a call to this function
+    /// in a specification as a term.
+    determined: bool,
+    /// Whether the emitted precondition is trivial: no `preserves`, every
+    /// `requires` is `emp`, and no implicit binders. Pulse reads a call in a
+    /// specification without checking the callee's precondition, so only a
+    /// callee with nothing to check may be read that way.
+    trivial_pre: bool,
     /// The `__fp` wrapper, when this function can be decayed to a code
     /// pointer: the flat, explicitly-quantified form `of_fn_div` needs.
     fp: Option<String>,
@@ -3942,6 +3988,23 @@ impl<'a> Spec<'a> {
                 let n = c_alignof(self.tds, t)
                     .ok_or_else(|| format!("`_Alignof` of {}", describe(self.tds.resolve(t))))?;
                 Ok(format!("{}sz", n))
+            }
+            // A struct value is an F* record, so an initialiser is that record:
+            // the named fields given, the rest zeroed, exactly as in a body.
+            // This is what lets a `_pure` function build a struct.
+            ExprT::StructInit(n, inits) => {
+                let Some(si) = self.tds.structs.get(&*n.val) else {
+                    return Err(format!("an initialiser for struct {} in a contract", n.val));
+                };
+                let mut vals = Vec::new();
+                for f in si.fields.iter() {
+                    let v = match inits.iter().find(|(i, _)| *i.val == *f.name) {
+                        Some((_, e)) => self.value(e, w)?,
+                        None => zero_initializer(self.tds, &f.ty)?,
+                    };
+                    vals.push(format!("fld_{} = {}", f.name, v));
+                }
+                Ok(format!("({{ {} }})", record_fields(vals, false)))
             }
             _ => Err(format!("{} in a contract", expr_kind(e))),
         }
@@ -5773,6 +5836,60 @@ fn emit_fn(
         .cloned()
         .collect();
     let (ens_slprops, ens_props) = split(&ensures_rest);
+    // A clause that fixes the result outright -- `_ensures(return == E)`, with
+    // `E` free of `return` -- is emitted as Pulse's `rewrites_to` rather than
+    // as a `pure` equality. The two assert the same thing, but `rewrites_to`
+    // is the form Pulse's prover reads as a *substitution*: the bound result
+    // is replaced by `E` throughout the context and the goal. That is what a
+    // conditional needs. A call inside a branch binds its result to a
+    // branch-local name, so the branch's postcondition closes over it
+    // existentially, and Pulse's join gives up on an `exists*`. With
+    // `rewrites_to` the local never reaches the postcondition.
+    //
+    // `rewrites_to` is F* equality, so only a result whose C `==` *is* F*
+    // equality qualifies: machine integers, `_Bool`, and struct values, which
+    // C cannot compare at all and a contract compares as records. A float's
+    // `==` is IEEE equality, and a pointer result may sit behind a nullness
+    // guard; both keep the ordinary clause. So does an `E` whose translation
+    // needs a side condition, since `rewrites_to` has nowhere to put one.
+    let mut post_rewrites: Vec<String> = Vec::new();
+    let ens_props: Exprs = {
+        let ret_fty = fstar_type(tds, &decl.ret_type);
+        let mut rest = Vec::new();
+        for e in ens_props {
+            let Some(rhs) = determined_result(&e, &ret_name) else {
+                rest.push(e);
+                continue;
+            };
+            let qualifies = spec.ty_of(rhs).is_ok_and(|ty| {
+                matches!(
+                    peel(tds, &ty).val,
+                    TypeT::Int { .. }
+                        | TypeT::SizeT
+                        | TypeT::PtrdiffT
+                        | TypeT::Bool
+                        | TypeT::TypeRef(TypeRefKind::Struct(_))
+                ) && ret_fty.is_some()
+                    && fstar_type(tds, &ty) == ret_fty
+            });
+            if qualifies {
+                spec.guards.borrow_mut().clear();
+                let mark = spec.defined.borrow().len();
+                let t = spec.value(rhs, When::Post);
+                let clean = spec.guards.borrow().is_empty() && spec.defined.borrow().len() == mark;
+                spec.guards.borrow_mut().clear();
+                spec.defined.borrow_mut().truncate(mark);
+                if let Ok(t) = t
+                    && clean
+                {
+                    post_rewrites.push(format!("rewrites_to {} ({})", ret_name, t));
+                    continue;
+                }
+            }
+            rest.push(e);
+        }
+        rest
+    };
     let mut slprop_err: Option<String> = None;
     let generated_req = req.len();
     for (es, w, into) in [
@@ -5965,6 +6082,7 @@ fn emit_fn(
             // gathered above.
             req.truncate(generated_req);
             owned_post.clear();
+            post_rewrites.clear();
             let why = match contract {
                 Err(why) => why,
                 _ => slprop_err.or(value_err).unwrap_or_default(),
@@ -6127,6 +6245,7 @@ fn emit_fn(
         bodies.push("pure False".to_string());
     }
     bodies.extend(post_props.iter().map(|p| format!("pure ({})", p)));
+    bodies.extend(post_rewrites.iter().cloned());
     // A postcondition that names a `__fp` wrapper is one that hands something
     // about that function on -- a validity, most of the time, and one the
     // body seeded itself. Reading it back off the assembled text is cruder
@@ -6427,6 +6546,13 @@ fn emit_fn(
         );
     }
 
+    let trivial_pre = perms.is_empty()
+        && ghosts.is_empty()
+        && out.lines().all(|l| {
+            let l = l.trim_start();
+            !l.starts_with("preserves ") && (!l.starts_with("requires ") || l == "requires emp")
+        });
+
     Ok(FnSurface {
         olens,
         ret_spliced: contract_ok && !(ret_slprops.is_empty() && ret_valued.is_empty()),
@@ -6446,6 +6572,8 @@ fn emit_fn(
         spliced_own: contract_ok
             && (!(req_slprops.is_empty() && ens_slprops.is_empty()) || refine_own_spliced.take()),
         contract: contract_ok,
+        determined: !post_rewrites.is_empty(),
+        trivial_pre,
         fp,
         fp_wits: wits.len(),
         implicits: perms
@@ -11133,6 +11261,27 @@ pub fn emit_palow(
                 },
                 void: matches!(tds.resolve(&fndecl.ret_type).val, TypeT::Void),
                 contract: sig.contract,
+                // Pulse reads such a call in a specification as the term its
+                // `rewrites_to` names, and checks none of the callee's
+                // precondition while doing so. So the callee must have none:
+                // no `_requires`, and only by-value parameters whose types
+                // carry nothing -- no pointer (ownership, liveness, array
+                // length, nullness), no `_out`/`_consumes`, no refinement.
+                spec_call: sig.determined
+                    && sig.trivial_pre
+                    && fndecl.requires.is_empty()
+                    && fndecl.args.iter().all(|a| {
+                        matches!(a.mode, ParamMode::Regular | ParamMode::Const)
+                            && matches!(
+                                tds.resolve(&a.ty).val,
+                                TypeT::Bool
+                                    | TypeT::Int { .. }
+                                    | TypeT::Float { .. }
+                                    | TypeT::SizeT
+                                    | TypeT::PtrdiffT
+                                    | TypeT::TypeRef(TypeRefKind::Struct(_))
+                            )
+                    }),
                 fp: sig.fp.is_some(),
                 fp_wits: sig.fp_wits,
                 implicits: sig.implicits.clone(),
@@ -11174,6 +11323,15 @@ pub fn emit_palow(
                     .map(|a| is_nullable(&tds, &a.ty))
                     .collect(),
                 spliced_own: sig.spliced_own,
+                null_inputs: fndecl
+                    .args
+                    .iter()
+                    .map(|a| {
+                        (a.mode != ParamMode::Out && is_nullable(&tds, &a.ty))
+                            .then(|| null_input(&tds, &a.ty))
+                            .flatten()
+                    })
+                    .collect(),
                 allocated: sig.ret_block.clone(),
             },
         );
@@ -11942,6 +12100,9 @@ struct Callee {
     /// were not its specification says only what memory comes back, and a
     /// caller that has a contract of its own has nothing to prove it with.
     contract: bool,
+    /// Whether a call to this function may stand in a specification. See
+    /// `Body::inline`.
+    spec_call: bool,
     /// Whether a `__fp` wrapper was emitted, so the function can be decayed
     /// to a code pointer.
     fp: bool,
@@ -11982,6 +12143,9 @@ struct Callee {
     /// local whose address it is handed may come back pointing at memory
     /// that only those words describe; see `Body::author_slots`.
     spliced_own: bool,
+    /// For each optional input whose guarded resource a declining call site
+    /// can write down outright, that resource at a null pointer.
+    null_inputs: Vec<Option<String>>,
     /// What the call hands the caller, when the return type grants a block.
     /// The caller has to start tracking it or the ownership the `ensures` just
     /// granted would be left over.
@@ -15403,6 +15567,11 @@ impl<'a> Body<'a> {
     /// `rewrites_to`, which is exactly what lets Pulse use it in a
     /// specification; an ordinary call has no such postcondition, and putting
     /// one in an `assert` is refused with "cannot find rewrites_to in post".
+    /// The exception is a call whose contract determines its result
+    /// (`_ensures(return == E)`, emitted as `rewrites_to`) and has no
+    /// `_requires`: Pulse reads such a call in a specification as `E`, without
+    /// running it, and with no precondition to skip that is exactly what the
+    /// source means by naming the call.
     ///
     /// Nor may the call be lifted out and the name used instead. An `_assert`
     /// is a specification: it does not run, and it must not make the program
@@ -15462,10 +15631,17 @@ impl<'a> Body<'a> {
             let Some((n, d)) = rest.split_once(" = ") else {
                 return Ok(v);
             };
+            let head = d.split_whitespace().next().unwrap_or("");
             let inlinable = self.in_guard
-                || d.split_whitespace()
-                    .next()
-                    .is_some_and(|h| h.ends_with("_read"));
+                || head.ends_with("_read")
+                // A ghost statement keeps its loads as statements, and this
+                // one must not run.
+                || !self.keep_reads
+                    && head
+                    .trim_start_matches('(')
+                    .strip_prefix("func_")
+                    .and_then(|f| self.callees.get(f))
+                    .is_some_and(|c| c.spec_call);
             bound.push((n.to_string(), format!("({})", d), inlinable));
         }
         for i in (0..bound.len()).rev() {
@@ -17375,6 +17551,7 @@ impl<'a> Body<'a> {
         let consumes = c.consumes.clone();
         let nullables = c.nullables.clone();
         let callee_spliced = c.spliced_own;
+        let null_inputs = c.null_inputs.clone();
         let (implicits, ghost_args) = (c.implicits.clone(), c.ghost_args.clone());
         // A `$witness` before a direct call names the callee's `_ghost_arg`s,
         // which appear only inside `pure`s and so cannot be read off the
@@ -17405,6 +17582,7 @@ impl<'a> Body<'a> {
                 values.insert(i, self.arg_value(a)?);
             }
         }
+        let field_close = self.pending_close.len();
         let opened = self.field_args(args, &outs, &consts, |i| {
             !(arr_args.get(i) == Some(&true)
                 || arrayptr_args.get(i) == Some(&true)
@@ -17418,6 +17596,15 @@ impl<'a> Body<'a> {
             }
             if let Some(at) = opened.get(&i) {
                 out += &format!(" {}", at);
+                if nullables.get(i) == Some(&true) {
+                    self.take_back_nullable(
+                        a,
+                        at,
+                        outs.get(i) == Some(&true),
+                        None,
+                        Some(field_close),
+                    );
+                }
                 continue;
             }
             // A literal's address carries no writable ownership. A const
@@ -17541,6 +17728,7 @@ impl<'a> Body<'a> {
                 out += &format!(" {}", fo.at);
                 continue;
             }
+            let close_mark = self.pending_close.len();
             let v = if outs.get(i) == Some(&true) {
                 self.out_arg(a)?
             } else if is_literal(a)
@@ -17578,7 +17766,19 @@ impl<'a> Body<'a> {
                 && plain_ptrs.get(i) != Some(&true)
                 && consumes.get(i) != Some(&true)
             {
-                self.take_back_nullable(a, &v, outs.get(i) == Some(&true));
+                // `&s->f` handed to an `_out` is a field `out_arg` opened
+                // for the call, the same as one `field_args` opened.
+                let out = outs.get(i) == Some(&true);
+                let field = out
+                    && matches!(&strip_casts(a).val, ExprT::Ref(inner)
+                        if matches!(strip_vattr(inner).val, ExprT::Member(..)));
+                self.take_back_nullable(
+                    a,
+                    &v,
+                    out,
+                    null_inputs.get(i).cloned().flatten(),
+                    field.then_some(close_mark),
+                );
             }
             // Passing the address of an object that holds a code pointer
             // hands the validity along with it.
@@ -17654,40 +17854,59 @@ impl<'a> Body<'a> {
     /// while the resource is still in the open. An `_out` callee is handed
     /// storage, anything else an initialized object, which decides the lemma.
     ///
+    /// A field of an object this function holds, opened for the call by
+    /// `field_args`, counts as held too. A declined input is handed a guard
+    /// over a resource written down outright (see `null_input`).
+    ///
     /// Anything else is left alone: a caller's own `_nullable` parameter is
     /// forwarded with its guard untouched, and ownership a hand-written
     /// contract supplies is the author's to open.
-    fn take_back_nullable(&mut self, a: &Expr, v: &str, out: bool) {
+    fn take_back_nullable(
+        &mut self,
+        a: &Expr,
+        v: &str,
+        out: bool,
+        null_input: Option<String>,
+        field_close: Option<usize>,
+    ) {
         if is_zero(strip_casts(a)) {
-            // Only an output's guarded storage needs no witness to introduce;
-            // an initialized pointee's value is left to the caller to name.
-            if out && v == "null" {
+            // An output's guarded storage needs no witness to introduce; an
+            // input's pointee value does, which `null_input` supplies where
+            // it can. Any other is left to the caller to name.
+            if v == "null" {
+                if let Some(r) = null_input.filter(|_| !out) {
+                    self.lines
+                        .push(format!("intro_unless_null_null null ({});", r));
+                } else if !out {
+                    return;
+                }
                 self.pending_close
                     .push("elim_unless_null_null null _;".to_string());
             }
             return;
         }
-        let held = match &strip_casts(a).val {
-            ExprT::Ref(inner) => match &strip_vattr(inner).val {
-                ExprT::Var(x) => self
-                    .slots
-                    .iter()
-                    .rev()
-                    .find(|s| s.name == *x.val)
-                    .is_some_and(|s| s.addr == v && s.array.is_none()),
+        let held = field_close.is_some()
+            || match &strip_casts(a).val {
+                ExprT::Ref(inner) => match &strip_vattr(inner).val {
+                    ExprT::Var(x) => self
+                        .slots
+                        .iter()
+                        .rev()
+                        .find(|s| s.name == *x.val)
+                        .is_some_and(|s| s.addr == v && s.array.is_none()),
+                    _ => false,
+                },
+                ExprT::Var(x) => {
+                    let x = x.val.to_string();
+                    v == format!("var_{}", x)
+                        && (!self.guarded.contains(&x) || self.unguarded.contains(&x))
+                        && (self.owned.iter().any(|o| o.base == x)
+                            || self.outs.iter().any(|o| o.base == x)
+                            || self.out_params.contains(&x)
+                            || self.unguarded.contains(&x))
+                }
                 _ => false,
-            },
-            ExprT::Var(x) => {
-                let x = x.val.to_string();
-                v == format!("var_{}", x)
-                    && (!self.guarded.contains(&x) || self.unguarded.contains(&x))
-                    && (self.owned.iter().any(|o| o.base == x)
-                        || self.outs.iter().any(|o| o.base == x)
-                        || self.out_params.contains(&x)
-                        || self.unguarded.contains(&x))
-            }
-            _ => false,
-        };
+            };
         if !held {
             return;
         }
@@ -17704,8 +17923,13 @@ impl<'a> Body<'a> {
             return;
         };
         self.lines.push(format!("{} {};", pn, v));
-        self.pending_close
-            .push(format!("elim_unless_null {} _;", v));
+        // A field opened for the call is closed again by `field_args`, and
+        // its resource has to be out of the guard before that.
+        let close = format!("elim_unless_null {} _;", v);
+        match field_close {
+            Some(at) => self.pending_close.insert(at, close),
+            None => self.pending_close.push(close),
+        }
     }
 
     /// Open the fields whose addresses a call's arguments are, for the length
@@ -22913,6 +23137,75 @@ fn has_effects(e: &Rc<Expr>) -> bool {
         | ExprT::Free(_)
         | ExprT::InlinePulse(..) => true,
         _ => expr_operands(e).into_iter().any(has_effects),
+    }
+}
+
+/// The `E` of a postcondition `return == E` (either way round), when `E` does
+/// not itself mention the result, either as `return` or, in inline Pulse, as
+/// `ret`, the name the result is bound to in the emitted contract.
+/// Elaboration renders a boolean clause as an slprop through a coercion,
+/// which is looked through first.
+fn determined_result<'e>(e: &'e Rc<Expr>, ret: &str) -> Option<&'e Rc<Expr>> {
+    let mut inner = e;
+    loop {
+        match &inner.val {
+            ExprT::Cast(a, _) | ExprT::VAttr(_, a) => inner = a,
+            _ => break,
+        }
+    }
+    let ExprT::BinOp(BinOp::Eq, l, r) = &inner.val else {
+        return None;
+    };
+    let is_ret = |x: &Rc<Expr>| matches!(&x.val, ExprT::Var(id) if &*id.val == "return");
+    if is_ret(l) && !mentions_return(r, ret) {
+        Some(r)
+    } else if is_ret(r) && !mentions_return(l, ret) {
+        Some(l)
+    } else {
+        None
+    }
+}
+
+/// Conservatively, whether `e` could mention the result: the `return`
+/// keyword, or `ret`, its name in the emitted contract, written out in inline
+/// Pulse. Only the forms a contract is written in are looked into; any other
+/// answers `true`, which costs the `rewrites_to` form rather than soundness.
+fn mentions_return(e: &Expr, ret: &str) -> bool {
+    let m = |a: &Expr| mentions_return(a, ret);
+    match &e.val {
+        ExprT::Var(id) => &*id.val == "return",
+        ExprT::BoolLit(_) | ExprT::IntLit(..) | ExprT::FloatLit(..) => false,
+        ExprT::UnOp(_, a)
+        | ExprT::Cast(a, _)
+        | ExprT::Deref(a)
+        | ExprT::Ref(a)
+        | ExprT::Old(a)
+        | ExprT::Member(a, _)
+        | ExprT::VAttr(_, a) => m(a),
+        ExprT::BinOp(_, a, b) | ExprT::Index(a, b) => m(a) || m(b),
+        ExprT::Cond(a, b, c) => m(a) || m(b) || m(c),
+        ExprT::FnCall(_, args) => args.iter().any(|a| m(a)),
+        ExprT::StructInit(_, inits) => inits.iter().any(|(_, a)| m(a)),
+        // Inline Pulse reaches `return` through an antiquotation, but its
+        // verbatim text can also name the result directly, by the name the
+        // emitted contract binds it to: `_inline_pulse(not ret_f)` would make
+        // `rewrites_to ret_f (not ret_f)`, which callers cannot solve. So the
+        // antiquotations are looked inside and the text is searched for that
+        // name. That is what lets `_ensures(return == (_Bool)_inline_pulse(f
+        // $(A) $(B)))`, the only way to say "this function decides that
+        // predicate", be a `rewrites_to` as well.
+        ExprT::InlinePulse(code, _) => code.tokens.iter().any(|tok| match tok {
+            InlinePulseToken::RValueAntiquot { expr, .. }
+            | InlinePulseToken::LValueAntiquot { expr, .. } => m(expr),
+            InlinePulseToken::Verbatim(t) | InlinePulseToken::WitnessAntiquot(t) => t
+                .text
+                .val
+                .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
+                .any(|w| w == ret),
+            InlinePulseToken::Declare { ident, .. } => &*ident.val == ret,
+            _ => false,
+        }),
+        _ => true,
     }
 }
 
