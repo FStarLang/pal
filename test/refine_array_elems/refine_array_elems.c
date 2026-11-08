@@ -123,3 +123,39 @@ uint32_t forward_hidden(_array struct hidden *a)
 {
   return hidden_v(a[1]);
 }
+
+// An `_out` array has no elements on entry; its postcondition states the
+// refinement of every element the body wrote.
+void fill1(_out _array struct small *a)
+  _requires(1 == a._length)
+{
+  struct small s = { .v = 7 };
+  a[0] = s;
+}
+
+// The same, filled by a loop: the invariant says every cell written so far
+// holds a value that satisfies the refinement.
+void fill_loop(_out _array struct small *a, size_t n)
+  _requires(n == a._length)
+{
+  for (size_t i = 0; i < n; i++)
+    _invariant(_live(i) && i <= n)
+    _invariant(_forall(size_t j, j < i ==> a[j].v < 100))
+  {
+    struct small s = { .v = 42 };
+    a[i] = s;
+  }
+}
+
+// A `_nullable` array states the fact under `not (is_null a) ==>`: the callee
+// keeps it for its caller...
+void keep_nullable(_nullable _array struct small *a)
+{
+}
+
+// ...and a caller holding the same guarded fact discharges the callee's.
+void pass_nullable(_nullable _array struct small *a)
+{
+  keep_nullable(a);
+  keep_nullable(a);
+}

@@ -952,3 +952,62 @@ let seq_forall_create (#t: Type) (p: t -> prop) (n: nat) (x: t)
           (ensures seq_forall p (Seq.create n x))
           [SMTPat (seq_forall p (Seq.create n x))]
   = seq_forall_reveal p (Seq.create n x)
+
+(* An `_out` array of a refined struct leaves the function as a value with the
+   element fact: `array_somes`, with the refinement asked of every written cell
+   and given back of the sequence it claims. Like `array_somes` it accepts the
+   cells indexed by `nat` or, for a loop that counted with a `size_t`, by
+   `SZ.t`. *)
+let all_some_forall_sz (#t: Type0) (p: t -> prop) (xs: Seq.seq (option t)) : prop =
+  forall (i: SZ.t). SZ.v i < Seq.length xs ==>
+    Some? (Seq.index xs (SZ.v i)) /\ p (Some?.v (Seq.index xs (SZ.v i)))
+
+let all_some_forall_of_sz (#t: Type0) (p: t -> prop) (xs: Seq.seq (option t))
+  : Lemma (requires SZ.fits (Seq.length xs) /\ all_some_forall_sz p xs)
+          (ensures  forall (i: nat). i < Seq.length xs ==>
+                      Some? (Seq.index xs i) /\ p (Some?.v (Seq.index xs i)))
+  = let aux (i: nat)
+      : Lemma (i < Seq.length xs ==> Some? (Seq.index xs i) /\ p (Some?.v (Seq.index xs i))) =
+      if i < Seq.length xs then begin
+        SZ.fits_lte i (Seq.length xs);
+        assert (SZ.v (SZ.uint_to_t i) == i)
+      end
+    in
+    Classical.forall_intro aux
+
+let seq_forall_of_somes (#t: Type0) (p: t -> prop) (xs: Seq.seq (option t)) (vs: Seq.seq t)
+  : Lemma (requires Seq.length vs == Seq.length xs /\
+                    (forall (i: nat). i < Seq.length vs ==> Seq.index xs i == Some (Seq.index vs i)) /\
+                    (forall (i: nat). i < Seq.length xs ==>
+                       Some? (Seq.index xs i) /\ p (Some?.v (Seq.index xs i))))
+          (ensures  seq_forall p vs)
+  = let aux (i: nat) : Lemma (i < Seq.length vs ==> p (Seq.index vs i)) =
+      if i < Seq.length vs then begin
+        assert (Seq.index xs i == Some (Seq.index vs i));
+        assert (p (Some?.v (Seq.index xs i)))
+      end
+    in
+    Classical.forall_intro aux;
+    seq_forall_reveal p vs
+
+ghost fn array_somes_forall (#t: Type0) (p: t -> prop) (t_repr: t -> bytes -> prop) (a: ptr)
+                            (esize: SZ.t) (ealign: SZ.t)
+                            (#pm: perm) (#xs: Seq.seq (option t))
+  requires array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) (SZ.v ealign) a pm xs
+  requires pure ((forall (i: nat). i < Seq.length xs ==>
+                    Some? (Seq.index xs i) /\ p (Some?.v (Seq.index xs i))) \/
+                 (SZ.v esize > 0 /\ all_some_forall_sz p xs))
+  ensures  exists* (vs: Seq.seq t).
+             array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a pm vs **
+             pure (xs == somes vs /\ Seq.length vs == Seq.length xs /\
+                   (forall (i: nat). {:pattern Seq.index vs i}
+                     i < Seq.length vs ==> Seq.index xs i == Some (Seq.index vs i)) /\
+                   seq_forall p vs)
+{
+  array_length_fits (maybe_repr t_repr (SZ.v esize)) a esize ealign;
+  Classical.move_requires (all_some_forall_of_sz p) xs;
+  array_somes t_repr a esize ealign;
+  with vs. assert array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a pm vs;
+  seq_forall_of_somes p xs vs;
+  assert pure (seq_forall p vs);
+}

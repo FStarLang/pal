@@ -21928,10 +21928,26 @@ impl<'a> Body<'a> {
                 let Some(a) = self.arrays.get(&base) else {
                     continue;
                 };
-                self.lines.push(format!(
-                    "array_somes {}_repr {} {} {}_alignof;",
-                    a.pn, a.addr, a.esize, a.pn
-                ));
+                // The postcondition states a refined struct's element fact
+                // of the sequence claimed here, so the claim asks it of
+                // every written cell.
+                let refined =
+                    a.pn.strip_prefix("struct_")
+                        .and_then(|sn| self.tds.structs.get(sn))
+                        .is_some_and(|si| si.elem_refine.is_some());
+                self.lines.push(if refined {
+                    format!(
+                        "array_somes_forall {pn}__refine {pn}_repr {} {} {pn}_alignof;",
+                        a.addr,
+                        a.esize,
+                        pn = a.pn
+                    )
+                } else {
+                    format!(
+                        "array_somes {}_repr {} {} {}_alignof;",
+                        a.pn, a.addr, a.esize, a.pn
+                    )
+                });
             }
         }
         for i in (mark..self.slots.len()).rev() {

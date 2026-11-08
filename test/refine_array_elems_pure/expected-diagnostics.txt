@@ -1,0 +1,2 @@
+# Expected translation diagnostic substrings
+parameter var_a is an array of struct small, whose `_refine` is not a proposition about the value of each element

@@ -690,9 +690,16 @@ contract (or a loop invariant that rebinds the array's sequence) states
 `seq_forall struct_X__refine xs` beside the array's points-to. `seq_forall` is
 opaque to SMT; `Pulse.Lib.C.Palow.Array` exposes it through patterned lemmas
 that fire on a concrete read (`Seq.index xs i`) and on the sequences the array
-operations build (`Seq.upd`, `Seq.slice`, `Seq.append`, `Seq.create`). A struct
-refinement that states ownership cannot be spread over a sequence, and an
-array of such a struct is refused rather than given a weaker contract.
+operations build (`Seq.upd`, `Seq.slice`, `Seq.append`, `Seq.create`). A
+`_nullable` array states it under `not (is_null p) ==>`. An `_out` array has no
+elements on entry, so it carries the fact only in its postcondition: the
+function leaves through `array_somes_forall`, which asks every cell to hold a
+value satisfying the refinement (a loop that fills the array says so in its
+invariant, e.g. `_forall(size_t j, j < i ==> a[j].v < 100)`) and gives back
+`seq_forall` of the sequence it claims. A struct refinement that states
+ownership, or is otherwise not a proposition about the value (one calling a
+`_pure` C function, today), cannot be spread over a sequence, and an array of
+such a struct is refused rather than given a weaker contract.
 
 ### Effective types
 
