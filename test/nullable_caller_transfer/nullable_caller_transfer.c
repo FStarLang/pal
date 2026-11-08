@@ -136,3 +136,75 @@ void via_local(const uint64_t* Src, _out uint64_t* Dst)
     opt_write_many(Src, &tmp, NULL);
     *Dst = tmp;
 }
+
+/* A refined struct whose first field is itself a struct. The refinement is
+   looked through to find the struct, and the struct's non-nullness comes from
+   its first field's, which is the inner struct's. */
+struct inner
+{
+    uint32_t a;
+    uint32_t b;
+};
+
+_refine(this.n > 0)
+typedef struct nested
+{
+    struct inner in;
+    uint32_t n;
+} nested;
+
+void opt_nested(_nullable nested* p);
+
+void supply_nested(nested* p)
+{
+    opt_nested(p);
+}
+
+void opt_nested_out(_nullable _out nested* p);
+
+void supply_nested_out(void)
+{
+    nested tmp;
+
+    opt_nested_out(&tmp);
+}
+
+/* A refined struct whose first field is a scalar, so the lemma exists and the
+   supplied pointer is taken back. */
+_refine(this.n > 0)
+typedef struct counted
+{
+    uint32_t n;
+    uint32_t m;
+} counted;
+
+void opt_counted(_nullable counted* p);
+
+void supply_counted(counted* p)
+{
+    opt_counted(p);
+}
+
+/* An initialized object handed to an optional input: it comes back as the
+   object, so the caller can read it afterwards. */
+void opt_read(_nullable const uint64_t* p);
+
+uint64_t supply_input(uint64_t* p)
+    _ensures(return == *p)
+{
+    opt_read(p);
+    return *p;
+}
+
+/* One call declining an output and a hand-managed array input: the output's
+   empty guard is discarded by PAL, the array's is the author's to introduce
+   and discard, and the two discards do not get in each other's way. */
+void opt_out_and_array(_nullable _out uint64_t* Dst, _nullable _array const uint8_t* Buf);
+
+void decline_out_and_array(void)
+{
+    _ghost_stmt(intro_unless_null_null null
+        (array_pts_to uint8_t_repr 1 (SizeT.v uint8_t_alignof) null 1.0R Seq.empty));
+    opt_out_and_array(NULL, NULL);
+    _ghost_stmt(elim_unless_null_null null _);
+}

@@ -6694,14 +6694,20 @@ new facts about memory.
     -- gets `T_pts_to[_uninit]_not_null p` before the call, while the
     resource is still in the open, and `elim_unless_null p _` after it.
     Which lemma follows from the callee's mode: an `_out` is handed
-    storage, anything else an initialized object. Struct types gain
-    `<s>_pts_to_uninit_not_null`, and `uint32_t` and `ptr` the scalar ones
-    they lacked. A caller's own `_nullable` parameter is forwarded with its
-    guard untouched, since the caller cannot say which way the test goes,
-    and a `_plain` or hand-granted argument, an array, and a declined
+    storage, anything else an initialized object. The pointee is looked
+    at through any refinement, `_plain` or `_nullable` wrapper. Struct
+    types gain `<s>_pts_to_uninit_not_null`, and `uint32_t` and `ptr` the
+    scalar ones they lacked; a struct's lemma goes through its field at
+    offset zero, which may now itself be a struct that has one. A union,
+    or a struct led by an array, has none, and its guard is left alone. A
+    caller's own `_nullable` parameter is forwarded with its guard
+    untouched, since the caller cannot say which way the test goes, and a
+    `_plain` or hand-granted argument, an array, and a declined
     initialized input (whose value the guard would have to name) are left
     to the author as before. `test/nullable_caller_transfer` supplies,
-    declines and forwards optional outputs, including a local's address.
+    declines and forwards optional outputs, including a local's address,
+    supplies an initialized input and refined structs (one led by a nested
+    struct), and declines an output beside a hand-managed array input.
 
 49. **A caller's pointer slot through an untyped out-parameter.**
     `f((void const **)&typed_local)` is how every acquire-a-buffer
