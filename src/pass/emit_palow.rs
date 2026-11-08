@@ -9559,6 +9559,25 @@ fn const_expr(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<String> {
             }
             Some(format!("({{ {} }})", record_fields(vals, false)))
         }
+        ExprT::UnionInit(n, member, init) => {
+            let TypeT::TypeRef(TypeRefKind::Union(tn)) = &target.val else {
+                return None;
+            };
+            if *tn.val != *n.val {
+                return None;
+            }
+            let field = tds
+                .unions
+                .get(&*n.val)?
+                .members
+                .iter()
+                .find(|f| *f.name == *member.val)?;
+            let value = const_expr(tds, &field.ty, init)?;
+            Some(format!(
+                "(Union_{}.Union_{}_{} {})",
+                n.val, n.val, member.val, value
+            ))
+        }
         ExprT::ArrayInit { .. } => const_array(tds, ty, e).map(|(_, _, v)| v),
         _ => None,
     }
@@ -12742,9 +12761,8 @@ impl<'a> Body<'a> {
         }
     }
 
-    /// The constant an lvalue reads, as an F\* term, when there is one. Only a
-    /// scalar qualifies: an aggregate has no literal to fold to, and falls
-    /// through to the ordinary access.
+    /// The constant an lvalue reads, as an F\* term, when its initializer is
+    /// representable as a closed value.
     fn const_read(&self, e: &Expr) -> Option<String> {
         let (ty, init) = self.const_path(e)?;
         match init {
