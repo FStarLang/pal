@@ -15548,8 +15548,9 @@ impl<'a> Body<'a> {
     }
 
     /// An assertion can expose partial ownership behind a pointer stored in
-    /// an aggregate, rather than a named parameter. It only selects direct
-    /// field access: Pulse still checks the assertion and every accessed cell.
+    /// an aggregate, rather than a named parameter, or close that loan by
+    /// asserting the whole points-to. This only selects field access:
+    /// Pulse still checks the assertion and every accessed cell.
     fn note_pieces_assertion(&mut self, code: &InlinePulseCode) {
         let mut predicate = String::new();
         for token in &code.tokens {
@@ -15565,11 +15566,11 @@ impl<'a> Body<'a> {
             {
                 return;
             }
-            let Some((sn, _)) = predicate
-                .rsplit('.')
-                .next()
-                .and_then(|p| p.split_once("_hole_"))
-            else {
+            let Some((sn, partial)) = predicate.rsplit('.').next().and_then(|p| {
+                p.split_once("_hole_")
+                    .map(|(sn, _)| (sn, true))
+                    .or_else(|| p.strip_suffix("_pts_to").map(|sn| (sn, false)))
+            }) else {
                 return;
             };
             let place = match token {
@@ -15580,7 +15581,11 @@ impl<'a> Body<'a> {
             if self.struct_of(&place).is_ok_and(|(actual, _)| actual == sn)
                 && let Some(key) = self.place_path(&place)
             {
-                self.asserted_pieces.insert(key);
+                if partial {
+                    self.asserted_pieces.insert(key);
+                } else {
+                    self.asserted_pieces.remove(&key);
+                }
             }
             return;
         }
