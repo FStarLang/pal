@@ -151,6 +151,28 @@ struct plain_owned_box {
 
 void ignore_plain_field(struct plain_owned_box p) {}
 
+_refine(this.values._length == this.count)
+typedef struct counted_array {
+  _array int *values;
+  size_t count;
+} counted_array;
+
+struct explicit_array_message {
+  _plain counted_array *array;
+  _refine(this < 10) _plain unsigned int tag;
+};
+
+unsigned int ignore_array(struct explicit_array_message message)
+  _ensures(return < 10)
+{
+  return message.tag;
+}
+
+void ignore_null_array(void) {
+  struct explicit_array_message message = {NULL, 7};
+  ignore_array(message);
+}
+
 void keep_nullable(_nullable const struct owned *p) {}
 
 void call_null(void) {
