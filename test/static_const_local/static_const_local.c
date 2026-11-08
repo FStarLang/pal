@@ -21,3 +21,9 @@ uint32_t second_kind(void) _ensures(return == 7) {
     };
     return entries[1].kind;
 }
+
+/* Only the value of a scalar `static const` is used. */
+uint32_t scaled(uint32_t x) _requires(x < 1000) _ensures(return == 4 * x) {
+    static const uint32_t factor = 4;
+    return factor * x;
+}

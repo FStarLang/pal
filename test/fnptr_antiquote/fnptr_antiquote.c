@@ -16,3 +16,12 @@ int call_add1(void) _ensures(return == 8) {
     _ghost_stmt(Pulse.Lib.C.Palow.FnPtr.valid_cast $(add1) $(add1));
     return f(7);
 }
+
+/* A parameter named like a function shadows it, in annotations as in C:
+   `add1` and `$(add1)` below are the parameter, not the (renamed) static
+   function. */
+int param_shadows(int add1) _requires(add1 < 10) _ensures(return == add1 + 1) {
+    _assert(add1 < 10);
+    _ghost_stmt(assert pure (Int32.v $(add1) < 10));
+    return add1 + 1;
+}

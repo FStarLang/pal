@@ -84,6 +84,53 @@ static bool hasTopLevelBreak(const Stmt *s) {
   return false;
 }
 
+// The variable an lvalue such as `v`, `v.f` or `v[i].f` designates part of.
+static const VarDecl *lvalueRoot(const Expr *e) {
+  while (e) {
+    e = e->IgnoreParens();
+    if (auto *dre = dyn_cast<DeclRefExpr>(e))
+      return dyn_cast<VarDecl>(dre->getDecl());
+    if (auto *me = dyn_cast<MemberExpr>(e)) {
+      if (me->isArrow())
+        return nullptr;
+      e = me->getBase();
+    } else if (auto *ase = dyn_cast<ArraySubscriptExpr>(e)) {
+      auto *base = dyn_cast<ImplicitCastExpr>(ase->getBase()->IgnoreParens());
+      if (!base || base->getCastKind() != CK_ArrayToPointerDecay)
+        return nullptr;
+      e = base->getSubExpr();
+    } else {
+      return nullptr;
+    }
+  }
+  return nullptr;
+}
+
+// Whether `s` takes the address of (part of) `vd`, either with `&` or by
+// letting an array decay to a pointer anywhere but as the base of a subscript.
+static bool takesAddressOf(const VarDecl *vd, const Stmt *s) {
+  if (!s)
+    return false;
+  if (auto *uo = dyn_cast<UnaryOperator>(s)) {
+    if (uo->getOpcode() == UO_AddrOf && lvalueRoot(uo->getSubExpr()) == vd)
+      return true;
+  } else if (auto *ice = dyn_cast<ImplicitCastExpr>(s)) {
+    if (ice->getCastKind() == CK_ArrayToPointerDecay &&
+        lvalueRoot(ice->getSubExpr()) == vd)
+      return true;
+  } else if (auto *ase = dyn_cast<ArraySubscriptExpr>(s)) {
+    const Expr *base = ase->getBase()->IgnoreParens();
+    if (auto *ice = dyn_cast<ImplicitCastExpr>(base))
+      if (ice->getCastKind() == CK_ArrayToPointerDecay)
+        base = ice->getSubExpr();
+    return takesAddressOf(vd, base) || takesAddressOf(vd, ase->getIdx());
+  }
+  for (const Stmt *child : s->children())
+    if (takesAddressOf(vd, child))
+      return true;
+  return false;
+}
+
 using SnipMap = rust::pal::hauntedc::SnippetMap;
 using TargetIntWidths = rust::pal::hauntedc::TargetIntWidths;
 
@@ -3517,11 +3564,24 @@ public:
         if (auto vd = dyn_cast<VarDecl>(d)) {
           // A `static const` with an initializer holds the same value on
           // every call, so it is translated as a local initialized each time.
-          // Only its address could tell the two apart, and a local's address
-          // cannot escape the function in Pulse.
-          if (vd->isStaticLocal() &&
-              !(vd->hasInit() &&
-                astCtx->getBaseElementType(vd->getType()).isConstQualified())) {
+          // Only its address could tell the two apart, so one whose address
+          // is taken is rejected: it could escape the call, a local's cannot.
+          if (vd->isStaticLocal() && vd->hasInit() &&
+              astCtx->getBaseElementType(vd->getType()).isConstQualified()) {
+            auto *fn =
+                dyn_cast_or_null<FunctionDecl>(vd->getParentFunctionOrMethod());
+            if (fn && takesAddressOf(vd, fn->getBody())) {
+              ctx.report_diag(
+                  dloc.clone(), true,
+                  toStr("the address of block-scope static const '" +
+                        vd->getName().str() +
+                        "' is taken (only its value may be used, e.g. by "
+                        "subscripting); block-scope static storage is not "
+                        "supported"));
+              stmts.push(mk_stmt_err(dloc.clone()));
+              continue;
+            }
+          } else if (vd->isStaticLocal()) {
             ctx.report_diag(dloc.clone(), true,
                             "block-scope static storage is not supported"_rs);
             stmts.push(mk_stmt_err(dloc.clone()));
