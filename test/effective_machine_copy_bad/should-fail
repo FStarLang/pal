@@ -1,0 +1,2 @@
+Func_read_float_after_integer_copy.fst(
+View.view_ok uint32_t_ctype uint32_t_repr float32_t_ctype float32_t_repr

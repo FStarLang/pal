@@ -42,7 +42,7 @@ void init_mixed_addressed(_out int *x, bool b)
     if (b)
         _ensures(_inline_pulse(
             exists* (v: Int32.t).
-                int32_t_pts_to $(x) 1.0R v **
+                R.value int32_t_ctype int32_t_repr int32_t_alignof $(x) 1.0R v index_x **
                 pure (Int32.v v == 42) **
                 ptr_pts_to $&(x) 1.0R $(x)))
     {

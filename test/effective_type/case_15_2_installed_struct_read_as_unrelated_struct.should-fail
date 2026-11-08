@@ -1,0 +1,4 @@
+Func_case_15_2_installed_struct_read_as_unrelated_struct.fst(
+struct_nested_pts_to tmp2_p
+Func_sink_d.fst(
+Pulse.Lib.C.Palow.Float.float64_fits (FStar.Float64.mul var_v

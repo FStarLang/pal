@@ -840,7 +840,12 @@ fn collect_refs_stmt(s: &Stmt, out: &mut Vec<TypeKey>) {
             }
             exprs(ensures, out);
         }
-        StmtT::Return(None) | StmtT::Break | StmtT::Continue | StmtT::Goto(_) | StmtT::Error => {}
+        StmtT::Return(None)
+        | StmtT::Freeze(_)
+        | StmtT::Break
+        | StmtT::Continue
+        | StmtT::Goto(_)
+        | StmtT::Error => {}
     }
 }
 fn in_dependency_cycle(node: usize, prereqs: &[Vec<usize>], done: &[bool]) -> bool {

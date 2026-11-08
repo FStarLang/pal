@@ -306,26 +306,6 @@ union wrapped copy_wrapped(const union wrapped *input)
   return *input;
 }
 
-struct envelope_pair {
-  struct envelope values[2];
-};
-
-struct envelope_pair make_envelope_pair(int32_t first, int32_t second)
-  _ensures(return.values[0].record.rd._active && return.values[1].record.rd._active)
-  _ensures(return.values[0].record.rd.value == first)
-  _ensures(return.values[1].record.rd.value == second)
-{
-  struct envelope_pair result = {
-    .values = {
-      { .sequence = 0, .record = { .rd = { .sensor = { 0 }, .value = 0 } } },
-      { .sequence = 0, .record = { .rd = { .sensor = { 0 }, .value = 0 } } }
-    }
-  };
-  result.values[0].record.rd.value = first;
-  result.values[1].record.rd.value = second;
-  return result;
-}
-
 union event copy_event(const union event *input)
   _requires(input->rec._active && input->rec.rd._active)
   _ensures((_Bool)_inline_pulse($(return) == $(*input)))
@@ -355,16 +335,6 @@ struct envelope partially_initialized_envelope(uint32_t sequence)
   _ensures(return.record.rd.value == 0 && return.record.rd.sensor[3] == 0)
 {
   struct envelope result = { .sequence = sequence };
-  return result;
-}
-
-struct envelope_pair partially_initialized_pair(uint32_t sequence)
-  _ensures(return.values[0].record.rd._active && return.values[1].record.rd._active)
-  _ensures(return.values[0].sequence == sequence && return.values[1].sequence == 0)
-  _ensures(return.values[0].record.rd.value == 0)
-  _ensures(return.values[1].record.rd.sensor[3] == 0)
-{
-  struct envelope_pair result = { .values = { { .sequence = sequence } } };
   return result;
 }
 

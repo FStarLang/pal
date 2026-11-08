@@ -1,2 +1,2 @@
 Error 228
-int32_t_pts_to (var_message.fld_owner +! struct_packet_offsetof_header)
+struct_packet_pts_to var_message.fld_owner

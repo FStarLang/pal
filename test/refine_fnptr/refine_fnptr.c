@@ -37,5 +37,7 @@ int32_t apply_b(int32_t (*op)(struct b *)
                             (Pulse.Lib.C.Palow.FnPtr.pre_of Funcptr_on_b.func_on_b__fp) (Pulse.Lib.C.Palow.FnPtr.post_of Funcptr_on_b.func_on_b__fp))),
                 struct b *p)
 {
+  /* Eta-expand the indexed (baseline, value) witness before inference. */
+  _ghost_stmt($witness (hide (_, _)));
   return op(p);
 }

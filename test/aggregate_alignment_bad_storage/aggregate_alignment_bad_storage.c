@@ -12,7 +12,7 @@ void initialize(_out struct aligned_record *p)
 
 void misaligned_storage(_plain struct aligned_record *p)
     _requires(_inline_pulse(
-        array_pts_to_uninit uint8_t_repr 1 (SizeT.v uint8_t_alignof) 8
+        array_pts_to_uninit uint8_t_ctype uint8_t_repr 1 (SizeT.v uint8_t_alignof) 8
             ($(p) +! struct_aligned_record_offsetof_bytes)))
     _requires((_Bool)_inline_pulse(not (aligned $(p) 8sz)))
     _ensures(_inline_pulse(

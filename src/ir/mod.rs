@@ -155,6 +155,17 @@ pub enum PointerKind {
     Core,
 }
 
+/// The C identity of an integer type beyond its sign and width.
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub enum IntIdent {
+    /// The canonical type of its sign and width (`int`, `long`, ...).
+    Std,
+    /// `long long` / `unsigned long long`, which share `long`'s width.
+    LongLong,
+    /// An enumerated type, by its (unique) tag.
+    Enum(Rc<str>),
+}
+
 pub type Type = Ast<TypeT>;
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum TypeT {
@@ -163,6 +174,12 @@ pub enum TypeT {
     Int {
         signed: bool,
         width: u32,
+        /// Which C type of that sign and width this is. Values of equal sign
+        /// and width are interchangeable (`Env::vtype_eq` ignores this), but
+        /// an object's effective type is not: `long long` is not `long`, and
+        /// an enumerated type is neither its underlying type nor any other
+        /// enumerated type.
+        ident: IntIdent,
     },
     Float {
         width: u32,
@@ -458,6 +475,9 @@ pub enum StmtT {
     Break,
     Continue,
     Return(Option<Rc<Expr>>),
+    /// The local, just initialised, was declared `const`: from here on the
+    /// program may read it but not modify it (6.7.3p6).
+    Freeze(Rc<Ident>),
     Assert(Rc<Expr>),
     GhostStmt(Rc<InlinePulseCode>),
     Goto(Rc<Ident>),
@@ -661,6 +681,8 @@ pub enum AuxFnKind {
     /// uninitialized. Union-only; has no struct form. Emits the per-arm
     /// activation fn `union_<U>__activate_<arm>`.
     Activate,
+    /// `$prepare(T) $(p)` reserves owned allocated storage for a new type.
+    Prepare,
     /// `$scattered(struct S) $(p)` — says that `*p` is already in pieces:
     /// its fields are owned one by one, those the body writes as storage.
     /// Palow-only; it emits nothing, and only tells the emitter to fill the
@@ -681,6 +703,7 @@ impl AuxFnKind {
             AuxFnKind::Fold => "fold",
             AuxFnKind::FoldUninit => "fold-uninit",
             AuxFnKind::Activate => "activate",
+            AuxFnKind::Prepare => "prepare",
             AuxFnKind::Scattered => "scattered",
             AuxFnKind::Gathered => "gathered",
         }

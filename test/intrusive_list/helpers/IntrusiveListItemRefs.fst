@@ -35,10 +35,91 @@ module I2 = Struct_item2
 module I3 = Struct_item3
 module Seq = FStar.Seq
 module SZ = FStar.SizeT
+module ET = Pulse.Lib.C.Palow.Etype
+module Rel = Pulse.Lib.C.Palow.Effective.Relation
+
+(* Full public field ownership is used only for the declared items in these
+   clients. The immutable certificate remembers the actual index, not an
+   invented nominal snapshot. Mutable embedded items need indexed field loans. *)
+let declared_origin (a: ptr) (ct: ET.ctype) : slprop =
+  exists* e. pure (fixed_metadata a e /\ ET.declared_destination e /\ ET.read_ok e ct)
+
+let declared_intro (a: ptr) (ct: ET.ctype) (e: ET.etypes)
+  : Pulse.Lib.Core.stt_ghost unit Pulse.Lib.Core.emp_inames
+      (pure (fixed_metadata a e /\ ET.declared_destination e /\ ET.read_ok e ct))
+      (fun _ -> declared_origin a ct)
+  = Pulse.Lib.Core.intro_exists
+      (fun remembered -> pure (fixed_metadata a remembered /\
+        ET.declared_destination remembered /\ ET.read_ok remembered ct)) e
+
+let declared_elim (a: ptr) (ct: ET.ctype)
+  : Pulse.Lib.Core.stt_ghost (erased ET.etypes) Pulse.Lib.Core.emp_inames
+      (declared_origin a ct)
+      (fun remembered -> pure (fixed_metadata a remembered /\
+        ET.declared_destination remembered /\ ET.read_ok remembered ct))
+  = Pulse.Lib.Core.elim_exists
+      (fun remembered -> pure (fixed_metadata a remembered /\
+        ET.declared_destination remembered /\ ET.read_ok remembered ct))
+
+ghost fn declared_drop (a: ptr) (ct: ET.ctype)
+  requires declared_origin a ct
+  ensures emp
+{
+  let _ = declared_elim a ct;
+}
+
+ghost fn recover_declared (a: ptr) (ct: ET.ctype) (#p: perm)
+    (#b: bytes) (#e: ET.etypes)
+  preserves mem_pts_to_at a p b e
+  requires declared_origin a ct
+  requires pure (len b == ET.csize ct)
+  ensures declared_origin a ct ** pure (ET.read_ok e ct)
+{
+  let remembered = declared_elim a ct;
+  fixed_metadata_index a #p #b #e #remembered;
+  declared_intro a ct remembered;
+}
+
+let split_slices (b: bytes) (e: ET.etypes)
+    (upper: nat { upper <= len b /\ upper <= ET.elen e })
+    (cut: nat { cut <= upper })
+  : Lemma (
+      slice (slice b 0 upper) 0 cut == slice b 0 cut /\
+      slice (slice b 0 upper) cut upper == slice b cut upper /\
+      Seq.slice (Seq.slice e 0 upper) 0 cut == Seq.slice e 0 cut /\
+      Seq.slice (Seq.slice e 0 upper) cut upper == Seq.slice e cut upper)
+  = Seq.slice_slice b 0 upper 0 cut;
+    Seq.slice_slice b 0 upper cut upper;
+    Seq.slice_slice e 0 upper 0 cut;
+    Seq.slice_slice e 0 upper cut upper
+
+(* Splitting a joined range back into the two it was joined from. A
+   fieldwise struct has no whole-object reveal, so its nonwrapping extent is
+   found by joining the field ranges and splitting them again. *)
+ghost fn unjoin (a: ptr) (n: SZ.t) (#p: perm) (#b1 #b2: bytes)
+    (#e1: ET.etypes { ET.elen e1 == len b1 })
+    (#e2: ET.etypes { ET.elen e2 == len b2 })
+  requires mem_pts_to_at a p (append b1 b2) (Seq.append e1 e2)
+  requires pure (SZ.v n == len b1)
+  ensures mem_pts_to_at a p b1 e1 ** mem_pts_to_at (a +! n) p b2 e2
+{
+  mem_split_at a #p #(append b1 b2) #(Seq.append e1 e2) n;
+  append_slice_left b1 b2;
+  append_slice_right b1 b2;
+  Seq.lemma_eq_intro (Seq.slice (Seq.append e1 e2) 0 (SZ.v n)) e1;
+  Seq.lemma_eq_intro (Seq.slice (Seq.append e1 e2) (SZ.v n) (ET.elen (Seq.append e1 e2))) e2;
+  rewrite each slice (append b1 b2) 0 (SZ.v n) as b1,
+               Seq.slice (Seq.append e1 e2) 0 (SZ.v n) as e1;
+  rewrite each slice (append b1 b2) (SZ.v n) (len (append b1 b2)) as b2,
+               Seq.slice (Seq.append e1 e2) (SZ.v n) (ET.elen (Seq.append e1 e2)) as e2;
+}
 
 (* --- struct item: value, link ------------------------------------------- *)
 
-unfold let item_unfolded (a: ptr) (p: perm) : slprop = I1.struct_item_padding a p
+unfold let item_unfolded (a: ptr) (p: perm) : slprop =
+  (exists* b e. mem_pts_to_at (a +! 4sz) p b e **
+    pure (len b == 4 /\ ET.elen e == len b)) **
+  pure (aligned a I1.struct_item_alignof) ** declared_origin a I1.struct_item_ctype
 unfold let item_value_1 (a: ptr) : ptr = a +! I1.struct_item_offsetof_value
 unfold let item_link_1 (a: ptr) : ptr = a +! I1.struct_item_offsetof_link
 unfold let item_container (a: ptr) : ptr = a -? I1.struct_item_offsetof_link
@@ -55,17 +136,29 @@ unfold let item_link ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
 
 ghost fn item_unfold (a: ptr) (#p: perm) (v: I1.struct_item)
   requires I1.struct_item_pts_to a p v
+  requires declared_origin a I1.struct_item_ctype
   ensures  pure (addr_of a + SZ.v I1.struct_item_sizeof < pow2 64)
   ensures  item_unfolded a p
   ensures  item_value a #p v.I1.fld_value
   ensures  N.struct_list_node_pts_to (item_link_1 a) p v.I1.fld_link
 {
-  I1.struct_item_reveal a;
-  with b. assert (mem_pts_to a p b ** pure (I1.struct_item_repr v b));
+  I1.struct_item_reveal a #p #v;
+  with b e. assert (mem_pts_to_at a p b e);
   I1.struct_item_repr_len v b;
-  mem_pts_to_fits a;
-  I1.struct_item_conceal a #p #b #v;
-  unfold I1.struct_item_pts_to a p v;
+  mem_pts_to_at_fits a;
+  recover_declared a I1.struct_item_ctype #p #b #e;
+  I1.struct_item_field_aligned a;
+  ET.read_ok_slice e I1.struct_item_ctype 0 int32_t_ctype;
+  ET.read_ok_slice e I1.struct_item_ctype 8 N.struct_list_node_ctype;
+  Rel.read_ok_view (Seq.slice e 8 24) N.struct_list_node_ctype;
+  mem_split_at a 8sz;
+  mem_split_at a 4sz;
+  split_slices b e 8 4;
+  int32_t_conceal a #p #(slice b 0 4) #v.I1.fld_value;
+  N.struct_list_node_conceal (a +! 8sz) #p #(slice b 8 24) #v.I1.fld_link;
+  rewrite (int32_t_pts_to a p v.I1.fld_value)
+    as (int32_t_pts_to (item_value_1 a) p v.I1.fld_value);
+  fold item_unfolded a p;
 }
 
 ghost fn item_fold (a: ptr) (#p: perm) (v_value: Int32.t) (v_link: N.struct_list_node)
@@ -73,13 +166,31 @@ ghost fn item_fold (a: ptr) (#p: perm) (v_value: Int32.t) (v_link: N.struct_list
   requires item_value a #p v_value
   requires N.struct_list_node_pts_to (item_link_1 a) p v_link
   ensures  I1.struct_item_pts_to a p ({ I1.fld_value = v_value; I1.fld_link = v_link })
+  ensures declared_origin a I1.struct_item_ctype
 {
-  fold I1.struct_item_pts_to a p ({ I1.fld_value = v_value; I1.fld_link = v_link });
+  unfold item_unfolded a p;
+  rewrite (int32_t_pts_to (item_value_1 a) p v_value)
+    as (int32_t_pts_to a p v_value);
+  int32_t_reveal a #p #v_value;
+  with bv ev. assert (mem_pts_to_at a p bv ev);
+  with bp ep. assert (mem_pts_to_at (a +! 4sz) p bp ep);
+  N.struct_list_node_reveal (item_link_1 a) #p #v_link;
+  with bl el. assert (mem_pts_to_at (a +! 8sz) p bl el);
+  mem_join_at a 4sz;
+  mem_join_at a 8sz;
+  slice_append_left_at (append bv bp) bl 0 4;
+  append_slice_left bv bp;
+  append_slice_right (append bv bp) bl;
+  recover_declared a I1.struct_item_ctype;
+  Rel.read_ok_view (Seq.append (Seq.append ev ep) el) I1.struct_item_ctype;
+  I1.struct_item_conceal a #p #(append (append bv bp) bl)
+    #({ I1.fld_value = v_value; I1.fld_link = v_link });
 }
 
 (* --- struct item2: priority, used, samples, processed, link ------------- *)
 
-unfold let item2_unfolded (a: ptr) (p: perm) : slprop = I2.struct_item2_padding a p
+unfold let item2_unfolded (a: ptr) (p: perm) : slprop =
+  I2.struct_item2_padding a p ** declared_origin a I2.struct_item2_ctype
 unfold let item2_priority_1 (a: ptr) : ptr = a +! I2.struct_item2_offsetof_priority
 unfold let item2_used_1 (a: ptr) : ptr = a +! I2.struct_item2_offsetof_used
 unfold let item2_samples_1 (a: ptr) : ptr = a +! I2.struct_item2_offsetof_samples
@@ -97,7 +208,7 @@ unfold let item2_used ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
   uint32_t_pts_to (item2_used_1 a) p v
 unfold let item2_samples ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
                          (v: samples_t) : slprop =
-  array_pts_to uint32_t_repr 4 (SizeT.v uint32_t_alignof) (item2_samples_1 a) p v
+  array_pts_to uint32_t_ctype uint32_t_repr 4 (SizeT.v uint32_t_alignof) (item2_samples_1 a) p v
 unfold let item2_processed ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
                            (v: ptr) : slprop =
   ptr_pts_to (item2_processed_1 a) p v
@@ -110,6 +221,7 @@ unfold let item2_link ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
 
 ghost fn item2_unfold (a: ptr) (#p: perm) (v: I2.struct_item2)
   requires I2.struct_item2_pts_to a p v
+  requires declared_origin a I2.struct_item2_ctype
   ensures  pure (addr_of a + SZ.v I2.struct_item2_sizeof < pow2 64)
   ensures  item2_unfolded a p
   ensures  item2_priority a #p v.I2.fld_priority
@@ -118,12 +230,39 @@ ghost fn item2_unfold (a: ptr) (#p: perm) (v: I2.struct_item2)
   ensures  item2_processed a #p v.I2.fld_processed
   ensures  N.struct_list_node_pts_to (item2_link_1 a) p v.I2.fld_link
 {
-  I2.struct_item2_reveal a;
-  with b. assert (mem_pts_to a p b ** pure (I2.struct_item2_repr v b));
-  I2.struct_item2_repr_len v b;
-  mem_pts_to_fits a;
-  I2.struct_item2_conceal a #p #b #v;
-  unfold I2.struct_item2_pts_to a p v;
+  I2.struct_item2_scatter a #p #v;
+  rewrite (int32_t_pts_to (a +! I2.struct_item2_offsetof_priority) p v.I2.fld_priority)
+    as (int32_t_pts_to a p v.I2.fld_priority);
+  int32_t_reveal a;
+  with b0 e0. assert (mem_pts_to_at a p b0 e0);
+  uint32_t_reveal (a +! 4sz);
+  with b1 e1. assert (mem_pts_to_at (a +! 4sz) p b1 e1);
+  unfold (array_pts_to uint32_t_ctype uint32_t_repr 4 (SizeT.v uint32_t_alignof)
+    (a +! 8sz) p v.I2.fld_samples);
+  with b2 e2. assert (mem_pts_to_at (a +! 8sz) p b2 e2);
+  ptr_reveal (a +! 24sz);
+  with b3 e3. assert (mem_pts_to_at (a +! 24sz) p b3 e3);
+  N.struct_list_node_reveal (a +! 32sz);
+  with b4 e4. assert (mem_pts_to_at (a +! 32sz) p b4 e4);
+  N.struct_list_node_repr_len v.I2.fld_link b4;
+  mem_join_at a 4sz;
+  mem_join_at a 8sz;
+  mem_join_at a 24sz;
+  mem_join_at a 32sz;
+  mem_pts_to_at_fits a;
+  unjoin a 32sz;
+  unjoin a 24sz;
+  unjoin a 8sz;
+  unjoin a 4sz;
+  N.struct_list_node_conceal (a +! 32sz) #p #b4 #v.I2.fld_link;
+  ptr_conceal (a +! 24sz) #p #b3 #v.I2.fld_processed #e3;
+  fold (array_pts_to uint32_t_ctype uint32_t_repr 4 (SizeT.v uint32_t_alignof)
+    (a +! 8sz) p v.I2.fld_samples);
+  uint32_t_conceal (a +! 4sz) #p #b1 #v.I2.fld_used #e1;
+  int32_t_conceal a #p #b0 #v.I2.fld_priority #e0;
+  rewrite (int32_t_pts_to a p v.I2.fld_priority)
+    as (int32_t_pts_to (item2_priority_1 a) p v.I2.fld_priority);
+  fold item2_unfolded a p;
 }
 
 ghost fn item2_fold (a: ptr) (#p: perm) (v_priority: Int32.t) (v_used: UInt32.t)
@@ -140,17 +279,18 @@ ghost fn item2_fold (a: ptr) (#p: perm) (v_priority: Int32.t) (v_used: UInt32.t)
                                          I2.fld_samples = v_samples;
                                          I2.fld_processed = v_processed;
                                          I2.fld_link = v_link })
+  ensures declared_origin a I2.struct_item2_ctype
 {
-  fold I2.struct_item2_pts_to a p ({ I2.fld_priority = v_priority;
-                                     I2.fld_used = v_used;
-                                     I2.fld_samples = v_samples;
-                                     I2.fld_processed = v_processed;
-                                     I2.fld_link = v_link });
+  unfold item2_unfolded a p;
+  I2.struct_item2_gather a #p #v_priority #v_used #v_samples #v_processed #v_link;
 }
 
 (* --- struct item3: ready, link ------------------------------------------ *)
 
-unfold let item3_unfolded (a: ptr) (p: perm) : slprop = I3.struct_item3_padding a p
+unfold let item3_unfolded (a: ptr) (p: perm) : slprop =
+  (exists* b e. mem_pts_to_at (a +! 1sz) p b e **
+    pure (len b == 7 /\ ET.elen e == len b)) **
+  pure (aligned a I3.struct_item3_alignof) ** declared_origin a I3.struct_item3_ctype
 unfold let item3_ready_1 (a: ptr) : ptr = a +! I3.struct_item3_offsetof_ready
 unfold let item3_link_1 (a: ptr) : ptr = a +! I3.struct_item3_offsetof_link
 unfold let item3_container (a: ptr) : ptr = a -? I3.struct_item3_offsetof_link
@@ -167,17 +307,29 @@ unfold let item3_link ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
 
 ghost fn item3_unfold (a: ptr) (#p: perm) (v: I3.struct_item3)
   requires I3.struct_item3_pts_to a p v
+  requires declared_origin a I3.struct_item3_ctype
   ensures  pure (addr_of a + SZ.v I3.struct_item3_sizeof < pow2 64)
   ensures  item3_unfolded a p
   ensures  item3_ready a #p v.I3.fld_ready
   ensures  N.struct_list_node_pts_to (item3_link_1 a) p v.I3.fld_link
 {
-  I3.struct_item3_reveal a;
-  with b. assert (mem_pts_to a p b ** pure (I3.struct_item3_repr v b));
+  I3.struct_item3_reveal a #p #v;
+  with b e. assert (mem_pts_to_at a p b e);
   I3.struct_item3_repr_len v b;
-  mem_pts_to_fits a;
-  I3.struct_item3_conceal a #p #b #v;
-  unfold I3.struct_item3_pts_to a p v;
+  mem_pts_to_at_fits a;
+  recover_declared a I3.struct_item3_ctype #p #b #e;
+  I3.struct_item3_field_aligned a;
+  ET.read_ok_slice e I3.struct_item3_ctype 0 bool_t_ctype;
+  ET.read_ok_slice e I3.struct_item3_ctype 8 N.struct_list_node_ctype;
+  Rel.read_ok_view (Seq.slice e 8 24) N.struct_list_node_ctype;
+  mem_split_at a 8sz;
+  mem_split_at a 1sz;
+  split_slices b e 8 1;
+  bool_t_conceal a #p #(slice b 0 1) #v.I3.fld_ready;
+  N.struct_list_node_conceal (a +! 8sz) #p #(slice b 8 24) #v.I3.fld_link;
+  rewrite (bool_t_pts_to a p v.I3.fld_ready)
+    as (bool_t_pts_to (item3_ready_1 a) p v.I3.fld_ready);
+  fold item3_unfolded a p;
 }
 
 ghost fn item3_fold (a: ptr) (#p: perm) (v_ready: bool) (v_link: N.struct_list_node)
@@ -185,8 +337,25 @@ ghost fn item3_fold (a: ptr) (#p: perm) (v_ready: bool) (v_link: N.struct_list_n
   requires item3_ready a #p v_ready
   requires N.struct_list_node_pts_to (item3_link_1 a) p v_link
   ensures  I3.struct_item3_pts_to a p ({ I3.fld_ready = v_ready; I3.fld_link = v_link })
+  ensures declared_origin a I3.struct_item3_ctype
 {
-  fold I3.struct_item3_pts_to a p ({ I3.fld_ready = v_ready; I3.fld_link = v_link });
+  unfold item3_unfolded a p;
+  rewrite (bool_t_pts_to (item3_ready_1 a) p v_ready)
+    as (bool_t_pts_to a p v_ready);
+  bool_t_reveal a #p #v_ready;
+  with bv ev. assert (mem_pts_to_at a p bv ev);
+  with bp ep. assert (mem_pts_to_at (a +! 1sz) p bp ep);
+  N.struct_list_node_reveal (item3_link_1 a) #p #v_link;
+  with bl el. assert (mem_pts_to_at (a +! 8sz) p bl el);
+  mem_join_at a 1sz;
+  mem_join_at a 8sz;
+  slice_append_left_at (append bv bp) bl 0 1;
+  append_slice_left bv bp;
+  append_slice_right (append bv bp) bl;
+  recover_declared a I3.struct_item3_ctype;
+  Rel.read_ok_view (Seq.append (Seq.append ev ep) el) I3.struct_item3_ctype;
+  I3.struct_item3_conceal a #p #(append (append bv bp) bl)
+    #({ I3.fld_ready = v_ready; I3.fld_link = v_link });
 }
 
 (* --- whole-object points-to -------------------------------------------- *)
@@ -200,13 +369,13 @@ ghost fn item3_fold (a: ptr) (#p: perm) (v_ready: bool) (v_link: N.struct_list_n
 
 unfold let item_pts_to ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
                        (v: I1.struct_item) : slprop =
-  I1.struct_item_pts_to a p v
+  I1.struct_item_pts_to a p v ** declared_origin a I1.struct_item_ctype
 unfold let item2_pts_to ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
                         (v: I2.struct_item2) : slprop =
-  I2.struct_item2_pts_to a p v
+  I2.struct_item2_pts_to a p v ** declared_origin a I2.struct_item2_ctype
 unfold let item3_pts_to ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
                         (v: I3.struct_item3) : slprop =
-  I3.struct_item3_pts_to a p v
+  I3.struct_item3_pts_to a p v ** declared_origin a I3.struct_item3_ctype
 unfold let u32_pts_to ([@@@mkey] a: ptr) (#[T.exact (`1.0R)] p: perm)
                       (v: UInt32.t) : slprop =
   uint32_t_pts_to a p v

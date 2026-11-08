@@ -1,31 +1,5 @@
 module Pulse.Lib.C.Palow.Union
 
-(* ---------------------------------------------------------------------------
-   Unions, and the type-punning acceptance test from `palow.md`:
-
-     union { int x; struct { int y; int z; }; } a;
-     a.x = 10;
-     int b = a.y;
-     _assert(b == 10);
-
-   This program is legal C and is exactly what today's model cannot express:
-   `a.x` and `a.y` are different F* fields of different F* types, so there is
-   no way to say that storing through one is observable through the other.
-   Palow has one answer for both: they name the *same bytes*, and reading them
-   back at either type goes through the same `mem_pts_to`.
-
-   Modelled here with `uint32_t` in place of `int`, since that is the scalar
-   type `Pulse.Lib.C.Palow.Scalar` provides.
-
-     union U { uint32_t x; struct T t; };   // sizeof 8, alignof 4
-
-   The union's representation is *not* injective, and that is the point: a byte
-   range that represents `U_x v` also represents `U_t {y = v; z = w}` for
-   whatever `w` the trailing bytes happen to encode. Palow does not need the
-   `*_pts_to` predicates to be injective anywhere, which is what makes this
-   expressible at all.
-   --------------------------------------------------------------------------- *)
-
 #lang-pulse
 open Pulse
 open Pulse.Lib.C.Palow.Bytes
@@ -34,11 +8,14 @@ open Pulse.Lib.C.Palow.Encoding
 open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Scalar
 open Pulse.Lib.C.Palow.Aggregate
-open Pulse.Lib.C.Palow.Machine
 
 module SZ = FStar.SizeT
 module Seq = FStar.Seq
 module U32 = FStar.UInt32
+module ET = Pulse.Lib.C.Palow.Etype
+module V = Pulse.Lib.C.Palow.Effective.Value
+module EM = Pulse.Lib.C.Palow.Effective.Machine
+module I = Pulse.Lib.C.Palow.Machine.Intrinsics
 
 noeq type union_U =
   | U_x : U32.t -> union_U
@@ -46,180 +23,240 @@ noeq type union_U =
 
 let union_U_sizeof : SZ.t = 8sz
 let union_U_alignof : SZ.t = 4sz
+let union_U_ctype : ET.ctype =
+  ET.TUnion "union_U" 8 [(0, uint32_t_ctype); (0, struct_T_ctype)]
 
-(* A union's `*_repr` relates a value to the bytes of whichever member it
-   holds. Members shorter than the union leave the remaining bytes
-   unconstrained -- `a.x = 10` says nothing about bytes 4..8, matching C. *)
 let union_U_repr (u: union_U) (b: bytes) : prop =
-  len b == SZ.v union_U_sizeof /\
-  (len b == SZ.v union_U_sizeof ==>
-     (match u with
-      | U_x v -> uint32_t_repr v (slice b 0 4)
-      | U_t t -> struct_T_repr t b))
+  len b == 8 /\ (len b == 8 ==>
+    (match u with
+     | U_x v -> uint32_t_repr v (slice b 0 4)
+     | U_t t -> struct_T_repr t b))
+
+let union_U_pts_to_at ([@@@mkey] a: ptr) (p: perm) (u: union_U) (e: ET.etypes) : slprop =
+  V.value union_U_ctype union_U_repr union_U_alignof a p u e
 
 let union_U_pts_to ([@@@mkey] a: ptr) (p: perm) (u: union_U) : slprop =
-  exists* b. mem_pts_to a p b ** pure (union_U_repr u b /\ aligned a union_U_alignof)
+  exists* (e: ET.etypes { ET.elen e == 8 }). union_U_pts_to_at a p u e
 
-(* A union's members all start at offset zero, so each one's alignment is the
-   union's -- which is by construction the strictest of theirs. *)
 let union_U_member_aligned (a: ptr)
   : Lemma (requires aligned a union_U_alignof)
-          (ensures  aligned a uint32_t_alignof /\ aligned a struct_T_alignof)
-  = ()
+          (ensures aligned a uint32_t_alignof /\ aligned a struct_T_alignof) = ()
 
-(* Ownership of the bytes past the end of the `x` member. The `x` view hands
-   these back separately so that the union can be reassembled, and so that a
-   client cannot silently forget that they exist. *)
-let union_U_x_rest ([@@@mkey] a: ptr) (p: perm) : slprop =
-  exists* b. mem_pts_to (a +! 4sz) p b ** pure (len b == 4)
+let union_U_x_rest ([@@@mkey] a: ptr) (p: perm)
+                   (e: ET.etypes { ET.elen e == 8 }) : slprop =
+  exists* b. mem_pts_to_at (a +! 4sz) p b (Seq.slice e 4 8) ** pure (len b == 4)
 
-(* ---------------------------------------------------------------------------
-   Member views
+let union_U_x_view ([@@@mkey] a: ptr) (p: perm) (v: U32.t)
+                   (e: ET.etypes { ET.elen e == 8 }) : slprop =
+  V.value uint32_t_ctype uint32_t_repr uint32_t_alignof a p v (Seq.slice e 0 4)
+  ** union_U_x_rest a p e
+  ** pure (ET.read_ok e union_U_ctype /\ aligned a union_U_alignof)
 
-   Each member view is `mem_split` at the member's extent followed by a fold at
-   the member's type. Note that both members start at offset 0, so the `x` view
-   and the `t.y` view produce the *same* resource at the *same* address -- that
-   equality is the whole content of the pun.
-   --------------------------------------------------------------------------- *)
+let union_U_t_view ([@@@mkey] a: ptr) (p: perm) (t: struct_T)
+                   (e: ET.etypes { ET.elen e == 8 }) : slprop =
+  struct_T_pts_to_at a p t e ** pure (ET.read_ok e union_U_ctype)
+
+ghost fn union_U_split_x_at (a: ptr) (#p: perm) (#v: U32.t)
+                            (#e: ET.etypes { ET.elen e == 8 })
+  requires union_U_pts_to_at a p (U_x v) e
+  ensures union_U_x_view a p v e
+{
+  unfold union_U_pts_to_at a p (U_x v) e;
+  V.reveal_value union_U_ctype union_U_repr union_U_alignof a;
+  with b. assert (mem_pts_to_at a p b e);
+  union_U_member_aligned a;
+  ET.read_ok_slice e union_U_ctype 0 uint32_t_ctype;
+  mem_split_at a 4sz;
+  V.claim uint32_t_ctype uint32_t_repr uint32_t_alignof a #p #v;
+  fold union_U_x_rest a p e;
+  fold union_U_x_view a p v e;
+}
+
+ghost fn union_U_join_x_at (a: ptr) (#p: perm) (#v: U32.t)
+                           (#e: ET.etypes { ET.elen e == 8 })
+  requires union_U_x_view a p v e
+  ensures union_U_pts_to_at a p (U_x v) e
+{
+  unfold union_U_x_view a p v e;
+  V.reveal_value uint32_t_ctype uint32_t_repr uint32_t_alignof a;
+  with b. assert (mem_pts_to_at a p b (Seq.slice e 0 4));
+  unfold union_U_x_rest a p e;
+  with rest. assert (mem_pts_to_at (a +! 4sz) p rest (Seq.slice e 4 8));
+  mem_join_at a #p #b #rest #(Seq.slice e 0 4) #(Seq.slice e 4 8) 4sz;
+  Seq.lemma_eq_intro (Seq.append (Seq.slice e 0 4) (Seq.slice e 4 8)) e;
+  append_slice_left b rest;
+  V.claim union_U_ctype union_U_repr union_U_alignof a #p #(U_x v);
+  fold union_U_pts_to_at a p (U_x v) e;
+}
 
 ghost fn union_U_split_x (a: ptr) (#p: perm) (#v: U32.t)
   requires union_U_pts_to a p (U_x v)
-  ensures  uint32_t_pts_to a p v
-  ensures  union_U_x_rest a p
+  ensures exists* (e: ET.etypes { ET.elen e == 8 }). union_U_x_view a p v e
 {
   unfold union_U_pts_to a p (U_x v);
-  union_U_member_aligned a;
-  with b. assert (mem_pts_to a p b ** pure (union_U_repr (U_x v) b));
-  mem_split a 4sz;
-  Seq.lemma_eq_intro (slice b 0 4) (encode 4 None (U32.v v));
-  uint32_t_conceal a #p #_ #v;
-  fold union_U_x_rest a p;
+  with e. assert (union_U_pts_to_at a p (U_x v) e);
+  union_U_split_x_at a;
 }
 
 ghost fn union_U_join_x (a: ptr) (#p: perm) (#v: U32.t)
-  requires uint32_t_pts_to a p v
-  requires union_U_x_rest a p
-  ensures  union_U_pts_to a p (U_x v)
+                        (#e: ET.etypes { ET.elen e == 8 })
+  requires union_U_x_view a p v e
+  ensures union_U_pts_to a p (U_x v)
 {
-  uint32_t_reveal a #p #v;
-  unfold union_U_x_rest a p;
-  with rest. assert (mem_pts_to (a +! 4sz) p rest);
-  mem_join a #p #(encode 4 None (U32.v v)) #rest 4sz;
-  append_slice_left (encode 4 None (U32.v v)) rest;
+  union_U_join_x_at a;
   fold union_U_pts_to a p (U_x v);
+}
+
+ghost fn union_U_split_t_at (a: ptr) (#p: perm) (#t: struct_T)
+                            (#e: ET.etypes { ET.elen e == 8 })
+  requires union_U_pts_to_at a p (U_t t) e
+  ensures union_U_t_view a p t e
+{
+  unfold union_U_pts_to_at a p (U_t t) e;
+  V.reveal_value union_U_ctype union_U_repr union_U_alignof a;
+  with b. assert (mem_pts_to_at a p b e);
+  union_U_member_aligned a;
+  ET.read_ok_slice e union_U_ctype 0 struct_T_ctype;
+  Seq.lemma_eq_intro (Seq.slice e 0 8) e;
+  V.claim struct_T_ctype struct_T_repr struct_T_alignof a #p #t #b #e;
+  fold struct_T_pts_to_at a p t e;
+  fold union_U_t_view a p t e;
+}
+
+ghost fn union_U_join_t_at (a: ptr) (#p: perm) (#t: struct_T)
+                           (#e: ET.etypes { ET.elen e == 8 })
+  requires union_U_t_view a p t e
+  ensures union_U_pts_to_at a p (U_t t) e
+{
+  unfold union_U_t_view a p t e;
+  unfold struct_T_pts_to_at a p t e;
+  V.reveal_value struct_T_ctype struct_T_repr struct_T_alignof a;
+  with b. assert (mem_pts_to_at a p b e);
+  V.claim union_U_ctype union_U_repr union_U_alignof a #p #(U_t t) #b #e;
+  fold union_U_pts_to_at a p (U_t t) e;
 }
 
 ghost fn union_U_split_t (a: ptr) (#p: perm) (#t: struct_T)
   requires union_U_pts_to a p (U_t t)
-  ensures  struct_T_pts_to a p t
+  ensures exists* (e: ET.etypes { ET.elen e == 8 }). union_U_t_view a p t e
 {
   unfold union_U_pts_to a p (U_t t);
-  fold struct_T_pts_to a p t;
+  with e. assert (union_U_pts_to_at a p (U_t t) e);
+  union_U_split_t_at a;
 }
 
 ghost fn union_U_join_t (a: ptr) (#p: perm) (#t: struct_T)
-  requires struct_T_pts_to a p t
-  ensures  union_U_pts_to a p (U_t t)
+                        (#e: ET.etypes { ET.elen e == 8 })
+  requires union_U_t_view a p t e
+  ensures union_U_pts_to a p (U_t t)
 {
-  unfold struct_T_pts_to a p t;
+  union_U_join_t_at a;
   fold union_U_pts_to a p (U_t t);
 }
 
-(* ---------------------------------------------------------------------------
-   The pun, as a pure fact about representations
-
-   If the bytes represent `U_x v` and their tail happens to represent some `w`,
-   then they equally represent `U_t {y = v; z = w}`. This is where the
-   non-injectivity of `union_U_repr` is used, and it is the reason `a.y` reads
-   back what `a.x` wrote.
-   --------------------------------------------------------------------------- *)
-
 let union_U_pun (v w: U32.t) (b: bytes)
   : Lemma (requires union_U_repr (U_x v) b /\ uint32_t_repr w (slice b 4 8))
-          (ensures  union_U_repr (U_t ({ y = v; z = w })) b)
-  = ()
-
-(* ---------------------------------------------------------------------------
-   Reading a member is a *field*-level access
-
-   `a.y` needs the bytes of `y` only; `a.z` may still be uninitialized. That is
-   why the program below may read `a.y` immediately after `a.x = 10` even
-   though nothing has ever written bytes 4..8, and it is what field-level
-   ownership buys over object-level ownership. Since `y` sits at offset 0 of
-   the struct member and `x` at offset 0 of the union, the resource for `a.x`
-   and the resource for `a.y` are literally the same slprop.
-   --------------------------------------------------------------------------- *)
+          (ensures union_U_repr (U_t ({ y = v; z = w })) b) = ()
 
 ghost fn union_U_focus_t_y (a: ptr) (#p: perm) (#v: U32.t)
   requires uint32_t_pts_to a p v
-  ensures  uint32_t_pts_to (a +! struct_T_offsetof_y) p v
+  ensures uint32_t_pts_to (a +! struct_T_offsetof_y) p v
 {
-  rewrite (uint32_t_pts_to a p v)
-       as (uint32_t_pts_to (a +! struct_T_offsetof_y) p v);
+  rewrite (uint32_t_pts_to a p v) as (uint32_t_pts_to (a +! struct_T_offsetof_y) p v);
 }
 
 ghost fn union_U_unfocus_t_y (a: ptr) (#p: perm) (#v: U32.t)
   requires uint32_t_pts_to (a +! struct_T_offsetof_y) p v
-  ensures  uint32_t_pts_to a p v
+  ensures uint32_t_pts_to a p v
 {
-  rewrite (uint32_t_pts_to (a +! struct_T_offsetof_y) p v)
-       as (uint32_t_pts_to a p v);
+  rewrite (uint32_t_pts_to (a +! struct_T_offsetof_y) p v) as (uint32_t_pts_to a p v);
 }
 
-(* ---------------------------------------------------------------------------
-   Acceptance test 2, as an executable Pulse program.
+(* A member store preserves nominal union labels only if they were already
+   present. It never establishes a union from a scalar store into None bytes. *)
+#push-options "--z3rlimit 40"
+fn union_U_store_x (a: ptr) (v: U32.t) (#old: erased (b: bytes { len b == 8 }))
+                   (#e: ET.etypes { ET.elen e == 8 })
+  requires mem_pts_to_at a 1.0R old e
+  requires pure (len old == 8 /\ ET.read_ok e union_U_ctype /\
+    (forall (k: nat). k < 8 ==> Some? (ET.eget e k)))
+  ensures mem_pts_to_at a 1.0R
+    (append (encode 4 None (U32.v v)) (slice old 4 8)) e
+{
+  ET.read_ok_slice e union_U_ctype 0 uint32_t_ctype;
+  ET.store_readable_stable (Seq.slice e 0 4) uint32_t_ctype;
+  mem_split_at a 4sz;
+  let b = encode 4 None (U32.v v);
+  uint32_t_repr_no_prov v b;
+  EM.store a (hide uint32_t_ctype) b;
+  rewrite (mem_pts_to_at a 1.0R b (EM.store_index (Seq.slice e 0 4) uint32_t_ctype))
+    as (mem_pts_to_at a 1.0R b (Seq.slice e 0 4));
+  mem_join_at a #1.0R #b #(slice old 4 8) #(Seq.slice e 0 4) #(Seq.slice e 4 8) 4sz;
+  Seq.lemma_eq_intro (Seq.append (Seq.slice e 0 4) (Seq.slice e 4 8)) e;
+  assert (pure (Seq.append (Seq.slice e 0 4) (Seq.slice e 4 8) == e));
+  rewrite (mem_pts_to_at a 1.0R (append b (slice old 4 8))
+    (Seq.append (Seq.slice e 0 4) (Seq.slice e 4 8)))
+    as (mem_pts_to_at a 1.0R (append b (slice old 4 8)) e);
+}
 
-   `a` starts out as arbitrary union storage. We store through `.x` and read
-   back through `.t.y`, and the postcondition records that the value survives.
-   No axiom is involved: the store and the load are the ordinary machine
-   operations, and everything between them is `mem_split` / `mem_join`.
-   --------------------------------------------------------------------------- *)
+fn union_U_read_x (a: ptr) (#p: perm) (#v: erased U32.t)
+                  (#old: erased bytes) (#e: ET.etypes { ET.elen e == 8 })
+  preserves mem_pts_to_at a p old e
+  requires pure (union_U_repr (U_x (reveal v)) old /\ ET.read_ok e union_U_ctype)
+  returns r: U32.t
+  ensures rewrites_to r (reveal v)
+{
+  ET.read_ok_slice e union_U_ctype 0 uint32_t_ctype;
+  mem_split_at a 4sz;
+  uint32_t_repr_no_prov (reveal v) (slice old 0 4);
+  let r = I.uint32_t_read_at a #p #v #(hide (slice old 0 4)) #(Seq.slice e 0 4);
+  mem_join_at a #p #(slice old 0 4) #(slice old 4 8)
+    #(Seq.slice e 0 4) #(Seq.slice e 4 8) 4sz;
+  Seq.lemma_eq_intro (append (slice old 0 4) (slice old 4 8)) (reveal old);
+  Seq.lemma_eq_intro (Seq.append (Seq.slice e 0 4) (Seq.slice e 4 8)) e;
+  r
+}
 
 fn union_pun_test (a: ptr) (#u0: erased union_U)
-  requires union_U_pts_to a 1.0R u0
-  returns  b: U32.t
-  ensures  union_U_pts_to a 1.0R (U_x 10ul)
-  ensures  pure (b == 10ul)
+                  (#e: ET.etypes { ET.elen e == 8 })
+  requires union_U_pts_to_at a 1.0R u0 e
+  requires pure (forall (k: nat). k < 8 ==> Some? (ET.eget e k))
+  returns r: U32.t
+  ensures union_U_pts_to_at a 1.0R (U_x 10ul) e ** pure (r == 10ul)
 {
-  (* a.x = 10; -- the store only needs the first four bytes, whatever they
-     previously held and whichever member the union was in. *)
-  unfold union_U_pts_to a 1.0R u0;
-  with b0. assert (mem_pts_to a 1.0R b0 ** pure (union_U_repr u0 b0));
-  mem_split a 4sz;
-  uint32_t_claim_uninit a;
-  uint32_t_write_uninit a 10ul;
-  fold union_U_x_rest a 1.0R;
-
-  (* int b = a.y; *)
-  union_U_focus_t_y a;
-  let r = uint32_t_read (a +! struct_T_offsetof_y);
-  union_U_unfocus_t_y a;
-
-  union_U_join_x a;
+  unfold union_U_pts_to_at a 1.0R u0 e;
+  V.reveal_value union_U_ctype union_U_repr union_U_alignof a;
+  with old. assert (mem_pts_to_at a 1.0R old e);
+  union_U_store_x a 10ul;
+  let b: erased bytes = hide (append (encode 4 None 10) (slice old 4 8));
+  append_slice_left (encode 4 None 10) (slice old 4 8);
+  let r = union_U_read_x a #1.0R #(hide 10ul) #b #e;
+  V.claim union_U_ctype union_U_repr union_U_alignof a #1.0R #(U_x 10ul);
+  fold union_U_pts_to_at a 1.0R (U_x 10ul) e;
   r
 }
 
-(* The same program written through the struct member view instead: here the
-   union really is inhabited by `U_t`, so `a.z` is readable too, and the write
-   to `a.x` is visible as a change to `a.y` while leaving `a.z` alone. *)
 fn union_pun_test_struct (a: ptr) (#t0: erased struct_T)
-  requires union_U_pts_to a 1.0R (U_t t0)
-  returns  b: U32.t
-  ensures  union_U_pts_to a 1.0R (U_t ({ y = 10ul; z = (reveal t0).z }))
-  ensures  pure (b == 10ul)
+                         (#e: ET.etypes { ET.elen e == 8 })
+  requires union_U_pts_to_at a 1.0R (U_t t0) e
+  requires pure (forall (k: nat). k < 8 ==> Some? (ET.eget e k))
+  returns r: U32.t
+  ensures union_U_pts_to_at a 1.0R (U_t ({ y = 10ul; z = (reveal t0).z })) e
+    ** pure (r == 10ul)
 {
-  union_U_split_t a;
-  struct_T_split a;
-
-  (* a.x = 10 *)
-  uint32_t_write a 10ul;
-
-  (* int b = a.y *)
-  union_U_focus_t_y a;
-  let r = uint32_t_read (a +! struct_T_offsetof_y);
-  union_U_unfocus_t_y a;
-
-  struct_T_join a #1.0R #({ y = 10ul; z = (reveal t0).z });
-  union_U_join_t a;
+  unfold union_U_pts_to_at a 1.0R (U_t t0) e;
+  V.reveal_value union_U_ctype union_U_repr union_U_alignof a;
+  with old. assert (mem_pts_to_at a 1.0R old e);
+  union_U_store_x a 10ul;
+  let b: erased bytes = hide (append (encode 4 None 10) (slice old 4 8));
+  append_slice_left (encode 4 None 10) (slice old 4 8);
+  append_slice_right (encode 4 None 10) (slice old 4 8);
+  let r = union_U_read_x a #1.0R #(hide 10ul) #b #e;
+  struct_T_repr_intro ({ y = 10ul; z = (reveal t0).z })
+    (encode 4 None 10) (slice old 4 8);
+  V.claim union_U_ctype union_U_repr union_U_alignof a #1.0R
+    #(U_t ({ y = 10ul; z = (reveal t0).z }));
+  fold union_U_pts_to_at a 1.0R (U_t ({ y = 10ul; z = (reveal t0).z })) e;
   r
 }
+#pop-options

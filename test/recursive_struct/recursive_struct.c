@@ -132,9 +132,12 @@ _rec void traverse(const list head)
         return;
     }
     _ghost_stmt(Recursive_struct_include2.elim_is_list_nonnull $(head));
+    _ghost_stmt(with nd_head tl_head.
+      assert struct_node_pts_to $(head) 1.0R nd_head **
+        Recursive_struct_include1.is_list nd_head.fld_next 1.0R tl_head);
     node *nx = head->next;
     traverse(nx);
-    _ghost_stmt(Recursive_struct_include2.intro_is_list_cons $(head) $(*head));
+    _ghost_stmt(Recursive_struct_include2.intro_is_list_cons $(head) nd_head);
 }
 
 _let(bool starts_with(spec_list xs, int x),
@@ -151,8 +154,11 @@ bool peek_head(const list head, int *out)
         return false;
     }
     _ghost_stmt(Recursive_struct_include2.elim_is_list_nonnull $(head));
+    _ghost_stmt(with nd_head tl_head.
+      assert struct_node_pts_to $(head) 1.0R nd_head **
+        Recursive_struct_include1.is_list nd_head.fld_next 1.0R tl_head);
     *out = head->data;
-    _ghost_stmt(Recursive_struct_include2.intro_is_list_cons $(head) $(*head));
+    _ghost_stmt(Recursive_struct_include2.intro_is_list_cons $(head) nd_head);
     return true;
 }
 
@@ -161,6 +167,9 @@ void get_head(const list head, _out int *out)
   _ensures(starts_with(_elements_of(head), *out))
 {
     _ghost_stmt(Recursive_struct_include2.elim_is_list_nonnull $(head));
+    _ghost_stmt(with nd_head tl_head.
+      assert struct_node_pts_to $(head) 1.0R nd_head **
+        Recursive_struct_include1.is_list nd_head.fld_next 1.0R tl_head);
     *out = head->data;
-    _ghost_stmt(Recursive_struct_include2.intro_is_list_cons $(head) $(*head));
+    _ghost_stmt(Recursive_struct_include2.intro_is_list_cons $(head) nd_head);
 }

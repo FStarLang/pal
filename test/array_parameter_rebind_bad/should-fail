@@ -1,4 +1,4 @@
 Error 228
 Cannot prove:
-array_pts_to int32_t_repr
+RA.value int32_t_ctype
 var_b

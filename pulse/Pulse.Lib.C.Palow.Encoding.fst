@@ -274,6 +274,39 @@ let encode_injective (n: nat) (p: prov) (x y: nat)
   = decode_encode_exact n p x;
     decode_encode_exact n p y
 
+(* The first `m` bytes of an `n`-byte representation: what a byte copy of an
+   object's prefix carries. On a little-endian target that is the low
+   `8 * m` bits of the value; on a big-endian one, the high ones. *)
+let prefix_value (n: nat) (m: nat { m <= n }) (x: nat) : nat =
+  if T.little_endian then x % pow2 (8 * m)
+  else (x / pow2 (8 * (n - m))) % pow2 (8 * m)
+
+#push-options "--z3rlimit 30"
+let encode_le_prefix (m: nat) (p: prov) (x: nat) (i: nat { i < m })
+  : Lemma (byte_at p x i == byte_at p (x % pow2 (8 * m)) i)
+  = M.pow2_modulo_division_lemma_1 x (8 * i) (8 * m);
+    M.pow2_modulo_modulo_lemma_1 (x / pow2 (8 * i)) 8 (8 * m - 8 * i);
+    assert_norm (pow2 8 == 256)
+
+let encode_prefix (n: nat) (m: nat { m <= n }) (p: prov) (x: nat)
+  : Lemma (slice (encode n p x) 0 m == encode m p (prefix_value n m x))
+  = let lhs = slice (encode n p x) 0 m in
+    let rhs = encode m p (prefix_value n m x) in
+    let aux (i: nat { i < m }) : Lemma (get lhs i == get rhs i) =
+      if T.little_endian then encode_le_prefix m p x i
+      else begin
+        let j : nat = m - 1 - i in
+        let z = x / pow2 (8 * (n - m)) in
+        encode_le_prefix m p z j;
+        M.division_multiplication_lemma x (pow2 (8 * (n - m))) (pow2 (8 * j));
+        M.pow2_plus (8 * (n - m)) (8 * j);
+        assert (8 * (n - m) + 8 * j == 8 * (n - 1 - i))
+      end
+    in
+    Classical.forall_intro aux;
+    bytes_ext lhs rhs
+#pop-options
+
 (* The value an initialised, provenance-free range encodes. *)
 let bytes_nat (b: bytes) : nat =
   match decode b with Some x -> x | None -> 0
