@@ -6753,7 +6753,7 @@ new facts about memory.
     through a non-const pointer, each once over a body that meets it and once
     over one that must be rejected for its `rewrites_to`.
 
-49. **A determined call in an assertion.** `_ensures(return ==
+51. **A determined call in an assertion.** `_ensures(return ==
     (_Bool)_inline_pulse(f $(A) $(B)))` is a `rewrites_to` too: the
     antiquotations are checked for `return`, and the verbatim text for the
     name the result is bound to (`ret_f`), which inline Pulse can write out;
