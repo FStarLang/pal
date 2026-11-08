@@ -2265,6 +2265,55 @@ fn only_loads(lines: &[String]) -> bool {
     })
 }
 
+/// The lemma that derives a pointer's non-nullness from the points-to of an
+/// object of this type, initialized or (`uninit`) not, where one is emitted.
+///
+/// The type is peeled first: a refined, `_plain` or `_nullable` struct is the
+/// same struct, and the lemma is the struct's or nothing.
+fn not_null_lemma(tds: &Typedefs, pt: &Type, uninit: bool) -> Option<String> {
+    let pn = palow_name(tds, pt)?;
+    let suffix = if uninit {
+        "pts_to_uninit_not_null"
+    } else {
+        "pts_to_not_null"
+    };
+    match &peel(tds, pt).val {
+        TypeT::TypeRef(TypeRefKind::Union(_)) => None,
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+            let si = tds.structs.get(&*n.val)?;
+            let flex = matches!(
+                si.fields.last().map(|f| &f.shape),
+                Some(FieldShape::Flex { .. })
+            );
+            first_field_not_null(tds, si, uninit)?;
+            (!(flex && uninit)).then(|| format!("{}_{}", pn, suffix))
+        }
+        _ => Some(format!("{}_{}", pn, suffix)),
+    }
+}
+
+/// A pointer to a struct is a pointer to its field at offset zero, so the
+/// struct's non-nullness lemma is that field's, reached through the struct.
+/// The field's lemma and name, when the field is a single object that has
+/// one: a scalar, or a struct whose own first field does.
+fn first_field_not_null<'s>(
+    tds: &Typedefs,
+    si: &'s StructInfo,
+    uninit: bool,
+) -> Option<(String, &'s str)> {
+    let first = si.fields.iter().find(|f| f.offset == 0)?;
+    let FieldShape::One { pn } = &first.shape else {
+        return None;
+    };
+    let lemma = match &peel(tds, &first.ty).val {
+        TypeT::TypeRef(TypeRefKind::Struct(_)) => not_null_lemma(tds, &first.ty, uninit)?,
+        TypeT::TypeRef(..) | TypeT::FixedArray(..) => return None,
+        _ if uninit => format!("{}_pts_to_uninit_not_null", pn),
+        _ => format!("{}_pts_to_not_null", pn),
+    };
+    Some((lemma, &first.name))
+}
+
 fn is_nullable(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Nullable(_) => true,
@@ -8686,18 +8735,12 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
 
     // A pointer to an object is a pointer to its first field; see the
     // general case.
-    if let Some(first) = si.fields.iter().find(|f| f.offset == 0)
-        && let FieldShape::One { pn } = &first.shape
-        && !matches!(
-            tds.resolve(&first.ty).val,
-            TypeT::TypeRef(..) | TypeT::FixedArray(..)
-        )
-    {
+    if let Some((lemma, f)) = first_field_not_null(tds, si, false) {
         c += &format!(
-            "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n  preserves {sn}_pts_to a p x\n  ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n{{\n  {sn}_focus_{f} a;\n  {pn}_pts_to_not_null (a +! {sn}_offsetof_{f});\n  {sn}_unfocus_read_{f} a;\n}}\n\n",
+            "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n  preserves {sn}_pts_to a p x\n  ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n{{\n  {sn}_focus_{f} a;\n  {lemma} (a +! {sn}_offsetof_{f});\n  {sn}_unfocus_read_{f} a;\n}}\n\n",
             sn = sn,
-            pn = pn,
-            f = first.name
+            lemma = lemma,
+            f = f
         );
     }
 
@@ -8986,25 +9029,18 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // provenance. That is worth stating at the object, because a predicate
     // over a linked structure is where the null case has to be ruled out and
     // the caller has no reason to know which field sits at offset zero.
-    if let Some(first) = si.fields.iter().find(|f| f.offset == 0) {
-        if let FieldShape::One { pn } = &first.shape {
-            if !matches!(
-                tds.resolve(&first.ty).val,
-                TypeT::TypeRef(..) | TypeT::FixedArray(..)
-            ) {
-                c += &format!(
-                    "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n\
-                     \x20 preserves {sn}_pts_to a p x\n\
-                     \x20 ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
-                     {{\n\x20 {sn}_focus_{f} a;\n\
-                     \x20 {pn}_pts_to_not_null (a +! {sn}_offsetof_{f});\n\
-                     \x20 {sn}_unfocus_read_{f} a;\n}}\n\n",
-                    sn = sn,
-                    pn = pn,
-                    f = first.name
-                );
-            }
-        }
+    if let Some((lemma, f)) = first_field_not_null(tds, si, false) {
+        c += &format!(
+            "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n\
+             \x20 preserves {sn}_pts_to a p x\n\
+             \x20 ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
+             {{\n\x20 {sn}_focus_{f} a;\n\
+             \x20 {lemma} (a +! {sn}_offsetof_{f});\n\
+             \x20 {sn}_unfocus_read_{f} a;\n}}\n\n",
+            sn = sn,
+            lemma = lemma,
+            f = f
+        );
     }
 
     c += &format!(
@@ -9027,6 +9063,21 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         sn = sn,
         u = uninit.join("\n\x20 requires ")
     );
+    // The same fact for storage not yet written, which is what a caller has
+    // in hand when it supplies the object to an optional output.
+    if let Some((lemma, f)) = first_field_not_null(tds, si, true) {
+        c += &format!(
+            "ghost fn {sn}_pts_to_uninit_not_null (a: ptr)\n\
+             \x20 preserves {sn}_pts_to_uninit a\n\
+             \x20 ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
+             {{\n\x20 {sn}_scatter_uninit a;\n\
+             \x20 {lemma} (a +! {sn}_offsetof_{f});\n\
+             \x20 {sn}_gather_uninit a;\n}}\n\n",
+            sn = sn,
+            lemma = lemma,
+            f = f
+        );
+    }
     {
         let binders: Vec<String> = si
             .fields
@@ -11144,6 +11195,11 @@ pub fn emit_palow(
                     .iter()
                     .map(|a| a.mode == ParamMode::Consumed)
                     .collect(),
+                nullables: fndecl
+                    .args
+                    .iter()
+                    .map(|a| is_nullable(&tds, &a.ty))
+                    .collect(),
                 allocated: sig.ret_block.clone(),
             },
         );
@@ -12006,6 +12062,10 @@ struct Callee {
     /// Which parameters are `_consumes`, by position. The argument's ownership
     /// does not come back, so the caller stops accounting for it.
     consumes: Vec<bool>,
+    /// Which parameters are `_nullable`, by position. The callee states their
+    /// ownership under `unless_null`, which the caller opens again where it
+    /// knows which side of the test its argument is on.
+    nullables: Vec<bool>,
     /// What the call hands the caller, when the return type grants a block.
     /// The caller has to start tracking it or the ownership the `ensures` just
     /// granted would be left over.
@@ -17394,6 +17454,7 @@ impl<'a> Body<'a> {
         let arr_args = c.arr_args.clone();
         let arrayptr_args = c.arrayptr_args.clone();
         let consumes = c.consumes.clone();
+        let nullables = c.nullables.clone();
         let (implicits, ghost_args) = (c.implicits.clone(), c.ghost_args.clone());
         // A `$witness` before a direct call names the callee's `_ghost_arg`s,
         // which appear only inside `pure`s and so cannot be read off the
@@ -17584,6 +17645,14 @@ impl<'a> Body<'a> {
             if consumes.get(i) == Some(&true) {
                 self.give_away(a)?;
             }
+            if nullables.get(i) == Some(&true)
+                && arr_args.get(i) != Some(&true)
+                && arrayptr_args.get(i) != Some(&true)
+                && plain_ptrs.get(i) != Some(&true)
+                && consumes.get(i) != Some(&true)
+            {
+                self.take_back_nullable(a, &v, outs.get(i) == Some(&true));
+            }
             // Passing the address of an object that holds a code pointer
             // hands the validity along with it.
             if let Some(slot) = self.slots.iter().find(|s| s.addr == v) {
@@ -17646,6 +17715,70 @@ impl<'a> Body<'a> {
         self.active.clear();
         self.union_values.clear();
         Ok(format!("({})", out))
+    }
+
+    /// A callee states an optional parameter's ownership under a guard, which
+    /// is right for it and wrong for a caller that knows which side of the
+    /// test its own argument is on. A declined output gives back a guard over
+    /// nothing, which is discarded. A supplied argument whose ownership this
+    /// function holds gets its resource back out of the guard; eliminating the
+    /// guard needs the pointer to be non-null, and the only evidence of that
+    /// is the resource itself, so the fact is established before the call
+    /// while the resource is still in the open. An `_out` callee is handed
+    /// storage, anything else an initialized object, which decides the lemma.
+    ///
+    /// Anything else is left alone: a caller's own `_nullable` parameter is
+    /// forwarded with its guard untouched, and ownership a hand-written
+    /// contract supplies is the author's to open.
+    fn take_back_nullable(&mut self, a: &Expr, v: &str, out: bool) {
+        if is_zero(strip_casts(a)) {
+            // Only an output's guarded storage needs no witness to introduce;
+            // an initialized pointee's value is left to the caller to name.
+            if out && v == "null" {
+                self.pending_close
+                    .push("elim_unless_null_null null _;".to_string());
+            }
+            return;
+        }
+        let held = match &strip_casts(a).val {
+            ExprT::Ref(inner) => match &strip_vattr(inner).val {
+                ExprT::Var(x) => self
+                    .slots
+                    .iter()
+                    .rev()
+                    .find(|s| s.name == *x.val)
+                    .is_some_and(|s| s.addr == v && s.array.is_none()),
+                _ => false,
+            },
+            ExprT::Var(x) => {
+                let x = x.val.to_string();
+                v == format!("var_{}", x)
+                    && (!self.guarded.contains(&x) || self.unguarded.contains(&x))
+                    && (self.owned.iter().any(|o| o.base == x)
+                        || self.outs.iter().any(|o| o.base == x)
+                        || self.out_params.contains(&x)
+                        || self.unguarded.contains(&x))
+            }
+            _ => false,
+        };
+        if !held {
+            return;
+        }
+        let Some(pn) = self
+            .ty_of(a)
+            .ok()
+            .and_then(|t| match &peel(self.tds, &t).val {
+                TypeT::Pointer(pt, _) if extent(self.tds, &t) == Some(Extent::One) => {
+                    not_null_lemma(self.tds, pt, out)
+                }
+                _ => None,
+            })
+        else {
+            return;
+        };
+        self.lines.push(format!("{} {};", pn, v));
+        self.pending_close
+            .push(format!("elim_unless_null {} _;", v));
     }
 
     /// Open the fields whose addresses a call's arguments are, for the length
