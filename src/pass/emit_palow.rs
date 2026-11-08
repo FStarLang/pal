@@ -5771,7 +5771,7 @@ fn emit_fn(
         let ret_fty = fstar_type(tds, &decl.ret_type);
         let mut rest = Vec::new();
         for e in ens_props {
-            let Some(rhs) = determined_result(&e) else {
+            let Some(rhs) = determined_result(&e, &ret_name) else {
                 rest.push(e);
                 continue;
             };
@@ -22882,9 +22882,11 @@ fn has_effects(e: &Rc<Expr>) -> bool {
 }
 
 /// The `E` of a postcondition `return == E` (either way round), when `E` does
-/// not itself mention the result. Elaboration renders a boolean clause as an
-/// slprop through a coercion, which is looked through first.
-fn determined_result(e: &Rc<Expr>) -> Option<&Rc<Expr>> {
+/// not itself mention the result, either as `return` or, in inline Pulse, as
+/// `ret`, the name the result is bound to in the emitted contract.
+/// Elaboration renders a boolean clause as an slprop through a coercion,
+/// which is looked through first.
+fn determined_result<'e>(e: &'e Rc<Expr>, ret: &str) -> Option<&'e Rc<Expr>> {
     let mut inner = e;
     loop {
         match &inner.val {
@@ -22896,19 +22898,21 @@ fn determined_result(e: &Rc<Expr>) -> Option<&Rc<Expr>> {
         return None;
     };
     let is_ret = |x: &Rc<Expr>| matches!(&x.val, ExprT::Var(id) if &*id.val == "return");
-    if is_ret(l) && !mentions_return(r) {
+    if is_ret(l) && !mentions_return(r, ret) {
         Some(r)
-    } else if is_ret(r) && !mentions_return(l) {
+    } else if is_ret(r) && !mentions_return(l, ret) {
         Some(l)
     } else {
         None
     }
 }
 
-/// Conservatively, whether `e` could mention the `return` keyword. Only the
-/// forms a contract is written in are looked into; any other answers `true`,
-/// which costs the `rewrites_to` form rather than soundness.
-fn mentions_return(e: &Expr) -> bool {
+/// Conservatively, whether `e` could mention the result: the `return`
+/// keyword, or `ret`, its name in the emitted contract, written out in inline
+/// Pulse. Only the forms a contract is written in are looked into; any other
+/// answers `true`, which costs the `rewrites_to` form rather than soundness.
+fn mentions_return(e: &Expr, ret: &str) -> bool {
+    let m = |a: &Expr| mentions_return(a, ret);
     match &e.val {
         ExprT::Var(id) => &*id.val == "return",
         ExprT::BoolLit(_) | ExprT::IntLit(..) | ExprT::FloatLit(..) => false,
@@ -22918,19 +22922,28 @@ fn mentions_return(e: &Expr) -> bool {
         | ExprT::Ref(a)
         | ExprT::Old(a)
         | ExprT::Member(a, _)
-        | ExprT::VAttr(_, a) => mentions_return(a),
-        ExprT::BinOp(_, a, b) | ExprT::Index(a, b) => mentions_return(a) || mentions_return(b),
-        ExprT::Cond(a, b, c) => mentions_return(a) || mentions_return(b) || mentions_return(c),
-        ExprT::FnCall(_, args) => args.iter().any(|a| mentions_return(a)),
-        ExprT::StructInit(_, inits) => inits.iter().any(|(_, a)| mentions_return(a)),
-        // Inline Pulse can only reach `return` through an antiquotation; the
-        // verbatim tokens around them cannot reintroduce it. Looking inside is
-        // what lets `_ensures(return == (_Bool)_inline_pulse(f $(A) $(B)))`,
-        // the only way to say "this function decides that predicate", be a
-        // `rewrites_to` as well.
+        | ExprT::VAttr(_, a) => m(a),
+        ExprT::BinOp(_, a, b) | ExprT::Index(a, b) => m(a) || m(b),
+        ExprT::Cond(a, b, c) => m(a) || m(b) || m(c),
+        ExprT::FnCall(_, args) => args.iter().any(|a| m(a)),
+        ExprT::StructInit(_, inits) => inits.iter().any(|(_, a)| m(a)),
+        // Inline Pulse reaches `return` through an antiquotation, but its
+        // verbatim text can also name the result directly, by the name the
+        // emitted contract binds it to: `_inline_pulse(not ret_f)` would make
+        // `rewrites_to ret_f (not ret_f)`, which callers cannot solve. So the
+        // antiquotations are looked inside and the text is searched for that
+        // name. That is what lets `_ensures(return == (_Bool)_inline_pulse(f
+        // $(A) $(B)))`, the only way to say "this function decides that
+        // predicate", be a `rewrites_to` as well.
         ExprT::InlinePulse(code, _) => code.tokens.iter().any(|tok| match tok {
             InlinePulseToken::RValueAntiquot { expr, .. }
-            | InlinePulseToken::LValueAntiquot { expr, .. } => mentions_return(expr),
+            | InlinePulseToken::LValueAntiquot { expr, .. } => m(expr),
+            InlinePulseToken::Verbatim(t) | InlinePulseToken::WitnessAntiquot(t) => t
+                .text
+                .val
+                .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
+                .any(|w| w == ret),
+            InlinePulseToken::Declare { ident, .. } => &*ident.val == ret,
             _ => false,
         }),
         _ => true,

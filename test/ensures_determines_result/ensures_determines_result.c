@@ -51,3 +51,40 @@ screen(uint32_t A, uint32_t B)
 
     return checked_combine(A, B);
 }
+
+// A determined callee with a real body, whose contract is checked against it,
+// asserted over both a literal and a variable argument.
+_Bool
+is_small(uint32_t x)
+    _ensures(return == (_Bool)_inline_pulse(UInt32.v $(x) < 10))
+{
+    return x < 10u;
+}
+
+void
+use_is_small(uint32_t x)
+    _requires(x < 5u)
+{
+    _assert(is_small(3u));
+    _assert(is_small(x));
+}
+
+// Inline Pulse can name the result directly, by the name the emitted contract
+// binds it to. `return == (return && b)` says only "true implies `b`", and as
+// a `rewrites_to` it would be `rewrites_to ret_implies_b (ret_implies_b && b)`,
+// which no caller can solve. So it stays an ordinary equality.
+_Bool
+implies_b(_Bool b)
+    _ensures(return == (_Bool)_inline_pulse(ret_implies_b && $(b)))
+{
+    return 0;
+}
+
+void
+use_implies_b(_Bool b)
+{
+    if (implies_b(b))
+    {
+        _assert(b);
+    }
+}

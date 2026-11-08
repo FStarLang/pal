@@ -34,3 +34,15 @@ check_ptr(const uint32_t *p)
 {
     _assert(get(p) == 1);
 }
+
+// Inline Pulse that names the result by its emitted name does not determine
+// it, so the contract stays an ordinary equality and the call is not read.
+_Bool
+implies_b(_Bool b)
+    _ensures(return == (_Bool)_inline_pulse(ret_implies_b && $(b)));
+
+void
+check_named(_Bool b)
+{
+    _assert(implies_b(b));
+}
