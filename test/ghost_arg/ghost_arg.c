@@ -20,3 +20,20 @@ int bar()
 {
     return 42;
 }
+
+void frame()
+    _ghost_arg(_slprop P)
+    _preserves(_inline_pulse($(P)))
+{
+}
+
+_pure int identity(int n)
+    _ensures(_inline_pulse($(return) == $(n)))
+{
+    return n;
+}
+
+int identity_client(int n) _ensures(return == identity(n))
+{
+    return n;
+}

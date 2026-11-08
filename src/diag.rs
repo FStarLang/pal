@@ -109,26 +109,50 @@ impl Diagnostics {
             };
             d = d.with_message(&diag.msg);
             let file_name = &*diag.loc.file_name;
-            let file_id = *file_ids.entry(file_name).or_insert_with(|| {
-                files.add(
-                    file_name,
-                    match vfs.read_vfs_file(file_name) {
-                        Ok(entry) => entry.contents.clone(),
-                        Err(_) => "".to_string(),
-                    },
-                )
-            });
-            let pos_to_byte = |pos: Position| {
-                files
-                    .line_range(file_id, pos.line.saturating_sub(1) as usize)
-                    .expect("invalid position")
-                    .start
-                    + (pos.character.saturating_sub(1) as usize)
+            let file_id = if let Some(id) = file_ids.get(file_name) {
+                Some(*id)
+            } else {
+                match vfs.read_vfs_file(file_name) {
+                    Ok(entry) => {
+                        let id = files.add(file_name, entry.contents.clone());
+                        file_ids.insert(file_name, id);
+                        Some(id)
+                    }
+                    Err(error) => {
+                        d = d.with_note(format!(
+                            "{}:{}:{}: source unavailable: {}",
+                            file_name,
+                            diag.loc.range.start.line,
+                            diag.loc.range.start.character,
+                            error
+                        ));
+                        None
+                    }
+                }
             };
-            d = d.with_label(Label::primary(
-                file_id,
-                pos_to_byte(diag.loc.range.start)..(pos_to_byte(diag.loc.range.end) + 1),
-            ));
+            if let Some(file_id) = file_id {
+                let pos_to_byte = |pos: Position, end: bool| {
+                    let line = files
+                        .line_range(file_id, pos.line.saturating_sub(1) as usize)
+                        .ok()?;
+                    let byte = line.start + pos.character.saturating_sub(1) as usize;
+                    (byte <= line.end).then_some((byte + usize::from(end)).min(line.end))
+                };
+                match (
+                    pos_to_byte(diag.loc.range.start, false),
+                    pos_to_byte(diag.loc.range.end, true),
+                ) {
+                    (Some(start), Some(end)) if start <= end => {
+                        d = d.with_label(Label::primary(file_id, start..end));
+                    }
+                    _ => {
+                        d = d.with_note(format!(
+                            "{}:{}:{}: source range unavailable",
+                            file_name, diag.loc.range.start.line, diag.loc.range.start.character
+                        ));
+                    }
+                }
+            }
             term::emit_to_io_write(&mut writer.lock(), &config, &files, &d).expect("printing diag");
         }
     }

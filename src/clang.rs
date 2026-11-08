@@ -22,11 +22,27 @@ unsafe fn str_from_parts<'a>(ptr: *const u8, sz: usize) -> &'a str {
     str::from_utf8(unsafe { slice::from_raw_parts(ptr, sz) }).unwrap()
 }
 
+fn ident_name(ident: &Rc<Ident>) -> &str {
+    &ident.val
+}
+
+/// Decode the `kind` tag used by [`Ctx::set_type_layout`] and
+/// [`Ctx::set_field_offset`]: 0 = typedef, 1 = struct, 2 = union.
+fn layout_key(kind: u32, name: Rc<str>) -> LayoutKey {
+    match kind {
+        0 => LayoutKey::Typedef(name),
+        1 => LayoutKey::Struct(name),
+        _ => LayoutKey::Union(name),
+    }
+}
+
 pub struct Ctx<'a> {
     vfs: &'a mut dyn VFS,
     input_file_name: String,
     include_paths: Vec<String>,
+    include_files: Vec<String>,
     defines: Vec<String>,
+    only_functions: HashSet<String>,
     interned_strs: HashSet<Rc<str>>,
     translation_unit: TranslationUnit,
     diagnostics: Diagnostics,
@@ -38,7 +54,9 @@ impl<'a> Ctx<'a> {
     fn new(
         input_file_name: String,
         include_paths: Vec<String>,
+        include_files: Vec<String>,
         defines: Vec<String>,
+        only_functions: HashSet<String>,
         vfs: &'a mut dyn VFS,
     ) -> Ctx<'a> {
         let input_fn: &str = &input_file_name;
@@ -47,11 +65,17 @@ impl<'a> Ctx<'a> {
             vfs,
             input_file_name,
             include_paths,
+            include_files,
             defines,
+            only_functions,
             interned_strs: HashSet::new(),
             translation_unit: TranslationUnit {
                 main_file_names: vec![main_file_name],
                 decls: vec![],
+                layouts: LayoutTable::new(),
+                pointer_size: 8,
+                little_endian: true,
+                max_align: 16,
             },
             diagnostics: Diagnostics::empty(),
             target_int_widths: TargetIntWidths::default(),
@@ -71,6 +95,22 @@ impl<'a> Ctx<'a> {
         &self.include_paths[idx]
     }
 
+    fn get_include_file_count(&self) -> usize {
+        self.include_files.len()
+    }
+
+    fn get_include_file(&self, idx: usize) -> &str {
+        &self.include_files[idx]
+    }
+
+    fn selects_function_body(&self, name: &str) -> bool {
+        self.only_functions.is_empty() || self.only_functions.contains(name)
+    }
+
+    /// Extra preprocessor defines: a test's own `-D` flags, and how a source
+    /// says which memory model it is being translated for. `--palow` defines
+    /// `PALOW`, so hand-written Pulse that names predicates only one of the
+    /// two models has can be written twice in the one file.
     fn get_define_count(&self) -> usize {
         self.defines.len()
     }
@@ -81,6 +121,46 @@ impl<'a> Ctx<'a> {
 
     fn set_target_int_widths(&mut self, widths: TargetIntWidths) {
         self.target_int_widths = widths;
+    }
+
+    fn set_pointer_size(&mut self, size: u64) {
+        self.translation_unit.pointer_size = size;
+    }
+
+    fn set_little_endian(&mut self, little_endian: bool) {
+        self.translation_unit.little_endian = little_endian;
+    }
+
+    fn set_max_align(&mut self, align: u64) {
+        self.translation_unit.max_align = align;
+    }
+
+    /// Record the clang-computed size and alignment (in bytes) of a named C
+    /// type. `kind` is 0 for typedefs, 1 for structs and 2 for unions; it must
+    /// match the [`LayoutKey`] the emitter will look the type up under.
+    fn set_type_layout(&mut self, kind: u32, name: &str, size: u64, align: u64) {
+        let key = layout_key(kind, self.intern_str(name));
+        let entry = self.translation_unit.layouts.entry(key).or_default();
+        entry.size = size;
+        entry.align = align;
+    }
+
+    /// Record the clang-computed byte offset of `field` within the named type
+    /// `name`. See [`Ctx::set_type_layout`] for the `kind` encoding.
+    fn set_field_offset(&mut self, kind: u32, name: &str, field: &str, offset: u64) {
+        let field = self.intern_str(field);
+        let key = layout_key(kind, self.intern_str(name));
+        let entry = self.translation_unit.layouts.entry(key).or_default();
+        entry.field_offsets.push((field, offset));
+    }
+
+    /// Record the clang-computed *bit* offset of bit-field `field` within the
+    /// named type `name`. See [`Ctx::set_type_layout`] for the `kind` encoding.
+    fn set_field_bit_offset(&mut self, kind: u32, name: &str, field: &str, offset: u64) {
+        let field = self.intern_str(field);
+        let key = layout_key(kind, self.intern_str(name));
+        let entry = self.translation_unit.layouts.entry(key).or_default();
+        entry.field_bit_offsets.push((field, offset));
     }
 
     fn set_linkage_context(&mut self, context: &str) {
@@ -1053,7 +1133,9 @@ fn mk_label(loc: Rc<SourceInfo>, label: Rc<Ident>, ensures: Exprs) -> Rc<Stmt> {
 pub fn parse_file(
     file_name: &str,
     include_paths: &[String],
+    include_files: &[String],
     defines: &[String],
+    only_functions: &[String],
     identity: &crate::pass::linkage::UnitIdentity,
     vfs: &mut dyn VFS,
 ) -> (
@@ -1064,7 +1146,9 @@ pub fn parse_file(
     let mut ctx = Ctx::new(
         file_name.to_string(),
         include_paths.to_vec(),
+        include_files.to_vec(),
         defines.to_vec(),
+        only_functions.iter().cloned().collect(),
         vfs,
     );
     ctx.symbols.identity = identity.clone();

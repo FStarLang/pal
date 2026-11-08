@@ -19,7 +19,7 @@ int32_t read_b(int32_t *p) _ensures(return == *p) {
 }
 
 int32_t ghost_b(_plain int32_t *p)
-    _preserves(_inline_pulse(Pulse.Lib.Reference.pts_to $(p) #1.0R 3l))
+    _preserves(_inline_pulse(int32_t_pts_to $(p) 1.0R 3l))
     _ensures(return == 3)
 {
     return shared_ghost(p);

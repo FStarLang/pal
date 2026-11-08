@@ -32,6 +32,12 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _plain __attribute__((annotate("pal-plain")))
 #define _core_ref __attribute__((annotate("pal-core-ref")))
 #define _nullable __attribute((annotate("pal-nullable")))
+/* Translate a `const`-qualified pointer parameter in the default mode rather
+   than as a const one: it is held at full permission and may be written,
+   instead of being borrowed at a signature-level fraction and handed back
+   unchanged. A typedef can hide the `const` (`typedef const int *PCINT;`),
+   so this is how a declaration using such a typedef opts out. */
+#define _mutable __attribute((annotate("pal-mutable")))
 #define _consumes __attribute__((annotate("pal-consumes")))
 #define _out __attribute__((annotate("pal-out")))
 #define _array __attribute((annotate("pal-array")))
@@ -77,13 +83,22 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _do_while_first(name)
 #define _do_while_cond(name)
 
+#ifdef _WIN32
+#include <assert.h>
+/* The Windows CRT also calls its three-argument function `_assert`. */
+#define __pal_annotation_assert(p) ((void)0)
+#define __pal_select_assert(_1, _2, _3, selected, ...) selected
+#define _assert(...) __pal_select_assert(__VA_ARGS__, (_assert), (_assert), __pal_annotation_assert)(__VA_ARGS__)
+#else
 #define _assert(p) ((void)0)
+#endif
 #define _ghost_stmt(args) ((void)0)
 #define _ghost_arg(p)
 
 #define _plain
 #define _core_ref
 #define _nullable
+#define _mutable
 #define _consumes
 #define _out
 #define _array

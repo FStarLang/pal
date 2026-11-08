@@ -1,0 +1,2 @@
+aligned (a +! FStar.SizeT.uint_to_t 1)
+uint32_t_alignof

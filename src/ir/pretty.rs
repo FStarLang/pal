@@ -15,6 +15,7 @@ fn inline_pulse_code_to_doc<'a>(code: &'a InlinePulseCode) -> RcDoc<'a, ()> {
                 .append("$&(")
                 .append(expr.to_doc())
                 .append(")"),
+            InlinePulseToken::WitnessAntiquot(ct) => RcDoc::text(ct.before).append("$witness"),
             InlinePulseToken::TypeAntiquot { before, ty } => RcDoc::text(*before)
                 .append("$type(")
                 .append(ty.to_doc())
