@@ -282,26 +282,23 @@ Notes:
 
 - `_pure` — function has no effects; callable in spec position.
 - `_rec` — recursive (must be paired with `_decreases`).
-- `_pal_ignore` — omit a declaration/definition entirely: functions, typedefs,
-  structs/unions (including their fields and nested types), enums, or variables
-  (including initializers). It also works on block-scope declarations.
-  Mark the declaration itself, not individual fields. Mark the first declaration as
-  well if the function has a separate prototype; Clang inherits the marker on
-  later declarations. An ignored function definition with an earlier unignored
-  declaration is an error: use `_pal_admit` to retain the prototype/contract,
-  or put `_pal_ignore` on the first declaration to omit the function entirely.
-  A definition with no earlier declaration may use `_pal_ignore` directly.
-  Translated code using an ignored function, type, or variable
-  still needs a supported declaration; this does not create an opaque type.
-- `_pal_admit` — translate a function's signature and contract as a
-  declaration, without translating its body. Calls trust that contract; the
-  implementation is not verified. Contracts on an earlier prototype are retained.
-  `_pal_ignore` takes precedence when both markers are present.
+- `_pal_ignore` — omit a declaration/definition from translation (also applies to types and variables).
+- `_pal_admit` — trust a function's contract without translating or verifying its body.
 - `_pulse_eager_unfold_predicate` — on a struct/union, emit `[@@pulse_eager_unfold]` on the generated `__pred`.
 
-Both markers are no-ops when compiling ordinary C. They skip PAL's
-translation, not Clang's parsing/type-checking: bodies must still be valid C.
-They are intended for functions such as inline-assembly wrappers:
+## Ignoring declarations and admitting functions
+
+Use `_pal_ignore` for declarations outside the translated model, and
+`_pal_admit` for functions whose implementations are verified elsewhere or
+trusted. Both are no-ops in ordinary C builds. Clang still parses and
+type-checks the source; neither marker hides invalid C.
+
+### Admitted functions
+
+`_pal_admit` keeps the signature and contract as a translated declaration.
+PAL never translates the body, so unsupported constructs such as inline
+assembly are allowed there. Callers use the contract without a proof of the
+implementation:
 
 ```c
 _pal_admit
@@ -311,7 +308,17 @@ int platform_identity(int x) _ensures(return == x) {
 }
 ```
 
-For types, attach the marker to the typedef name or the struct/union/enum tag:
+Contracts on an earlier prototype are retained. `_pal_admit` applies only to
+functions; `_pal_ignore` takes precedence if both markers are present.
+
+### Ignored declarations
+
+`_pal_ignore` drops functions, typedefs, structs/unions, enums, and variables,
+including block-scope declarations. Record fields and nested types are not
+translated; variable initializers are not translated or evaluated in the model.
+Mark the declaration itself, not individual fields.
+
+Attach the marker to the typedef name or the struct/union/enum tag:
 
 ```c
 typedef long double platform_float _pal_ignore;
@@ -320,6 +327,25 @@ typedef struct _pal_ignore { long double value; } platform_record _pal_ignore;
 ```
 
 The typedef and its record are separate declarations: mark both to omit both.
+
+Ignoring a type does not make it opaque. Translated code using an ignored
+function, type, or variable still needs a supported declaration.
+
+### Separate declarations and definitions
+
+For a function with a separate prototype, put `_pal_ignore` on the first
+declaration to omit the function entirely. Clang inherits the marker on later
+declarations in the same translation unit. Marking only the definition leaves
+the earlier prototype translated and is an error; use `_pal_admit` if retaining
+that prototype and its contract is intended.
+
+A function definition without an earlier declaration can use `_pal_ignore`
+directly. Markers do not retroactively remove earlier declarations, and putting
+either marker after a definition is too late to skip its body. Separately parsed
+translation units do not share markers; use a shared annotated header.
+
+`test/ignore_functions`, `test/admit_contract`, `test/ignore_declarations`, and
+`test/ignore_definition` exercise these forms.
 
 ## Global variables
 
