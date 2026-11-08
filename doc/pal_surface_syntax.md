@@ -287,7 +287,11 @@ Notes:
   (including initializers). It also works on block-scope declarations.
   Mark the declaration itself, not individual fields. Mark the first declaration as
   well if the function has a separate prototype; Clang inherits the marker on
-  later declarations. Translated code using an ignored function, type, or variable
+  later declarations. An ignored function definition with an earlier unignored
+  declaration is an error: use `_pal_admit` to retain the prototype/contract,
+  or put `_pal_ignore` on the first declaration to omit the function entirely.
+  A definition with no earlier declaration may use `_pal_ignore` directly.
+  Translated code using an ignored function, type, or variable
   still needs a supported declaration; this does not create an opaque type.
 - `_pal_admit` — translate a function's signature and contract as a
   declaration, without translating its body. Calls trust that contract; the

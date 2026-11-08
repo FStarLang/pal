@@ -3472,8 +3472,23 @@ public:
   }
 
   rust::Unit HandleDecl(Decl *D) {
-    if (hasAnnotation(D, "pal-ignore"))
+    if (hasAnnotation(D, "pal-ignore")) {
+      if (auto *fd = dyn_cast<FunctionDecl>(D);
+          fd && fd->doesThisDeclarationHaveABody()) {
+        for (auto *previous = fd->getPreviousDecl(); previous;
+             previous = previous->getPreviousDecl()) {
+          if (!hasAnnotation(previous, "pal-ignore")) {
+            ctx.report_diag(
+                getRange(D->getSourceRange()), true,
+                "_pal_ignore on a definition leaves an earlier declaration "
+                "translated; use _pal_admit to retain the prototype and "
+                "contract, or put _pal_ignore on the first declaration"_rs);
+            break;
+          }
+        }
+      }
       return {};
+    }
     if (auto *FD = dyn_cast<FunctionDecl>(D)) {
       bool admit = hasAnnotation(FD, "pal-admit");
       // Include block
