@@ -6699,9 +6699,10 @@ new facts about memory.
     types gain `<s>_pts_to_uninit_not_null`, and `uint32_t` and `ptr` the
     scalar ones they lacked; a struct's lemma goes through its field at
     offset zero, which may now itself be a struct that has one. A union,
-    or a struct led by an array, has none, and its guard is left alone. A caller's own `_nullable` parameter is forwarded with its
-    guard untouched, since the caller cannot say which way the test goes,
-    and a `_plain` or hand-granted argument, an array, and a declined
+    or a struct led by an array, has none, and its guard is left alone. A
+    caller's own `_nullable` parameter is forwarded with its guard
+    untouched, since the caller cannot say which way the test goes, and a
+    `_plain` or hand-granted argument, an array, and a declined
     initialized input (whose value the guard would have to name) are left
     to the author as before. `test/nullable_caller_transfer` supplies,
     declines and forwards optional outputs, including a local's address,
