@@ -357,8 +357,9 @@ typedef struct _pal_ignore { long double value; } platform_record _pal_ignore;
 
 The typedef and its record are separate declarations: mark both to omit both.
 
-Ignoring a type does not make it opaque. Translated code using an ignored
-function, type, or variable still needs a supported declaration.
+Ignoring a type does not make it opaque. Translated code that uses an ignored
+function, type, variable, or field of an ignored record is rejected with an
+error at the use (`test/ignore_use`).
 
 For a function with a separate prototype, put `_pal_ignore` on the first
 declaration to omit the function entirely. Clang inherits the marker on later
@@ -368,14 +369,20 @@ that prototype and its contract is intended.
 
 A function definition without an earlier declaration can use `_pal_ignore`
 directly. Markers do not retroactively remove earlier declarations, and putting
-either marker after a definition is too late to skip its body. Separately parsed
-translation units do not share markers; use a shared annotated header.
+either marker after a definition is too late to skip its body.
+
+Like a contract, both markers belong to the entity, so every translation unit
+that declares it must agree on them: a function admitted in one file but
+declared or defined without `_pal_admit` in another is an error, and likewise
+for `_pal_ignore` (`test/admit_multifile`). Put the marked declaration in a
+shared header (`test/admit_shared_header`).
 
 Both markers are no-ops in ordinary C builds. Clang still parses and type-checks
 the source; neither marker hides invalid C.
 
-`test/ignore_functions`, `test/admit_contract`, `test/ignore_declarations`, and
-`test/ignore_definition` exercise these forms.
+`test/ignore_functions`, `test/admit_contract`, `test/ignore_declarations`,
+`test/ignore_definition`, `test/ignore_use`, `test/admit_multifile`, and
+`test/admit_shared_header` exercise these forms.
 
 ## Global variables
 

@@ -23,6 +23,10 @@ pub struct CSymbol {
     pub internal: bool,
     pub definition: bool,
     pub inline: bool,
+    /// `_pal_ignore` omits the entity from this translation unit.
+    pub ignored: bool,
+    /// `_pal_admit` trusts the function's contract in this translation unit.
+    pub admitted: bool,
     pub loc: Rc<SourceInfo>,
 }
 
@@ -42,6 +46,7 @@ pub fn header_statics(units: &[(TranslationUnit, UnitSymbols)]) -> Vec<HeaderSta
         .flat_map(|(tu, symbols)| {
             symbols.symbols.iter().filter_map(|symbol| {
                 (symbol.kind == 0
+                    && !symbol.ignored
                     && symbol.internal
                     && symbol.definition
                     && !tu
@@ -287,6 +292,29 @@ pub fn prepare(units: &mut [(TranslationUnit, UnitSymbols)], diags: &mut Diagnos
             let previous_symbols = entities.entry(key).or_default();
             for (previous_unit, previous, context) in previous_symbols.iter() {
                 if *previous_unit != index {
+                    // Like a contract, these markers belong to the entity, so
+                    // every translation unit must agree on them: put them in
+                    // a shared header.
+                    if previous.ignored != symbol.ignored {
+                        error(
+                            diags,
+                            &symbol.loc,
+                            format!(
+                                "inconsistent _pal_ignore on {} across translation units",
+                                symbol.name
+                            ),
+                        );
+                    }
+                    if previous.admitted != symbol.admitted {
+                        error(
+                            diags,
+                            &symbol.loc,
+                            format!(
+                                "inconsistent _pal_admit on {} across translation units",
+                                symbol.name
+                            ),
+                        );
+                    }
                     if !compatible_signature(previous, symbol) {
                         error(
                             diags,

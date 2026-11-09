@@ -1,0 +1,7 @@
+# Expected translation diagnostic substrings
+ignore_use.c:9: `ignored_fn` is marked _pal_ignore and cannot be used in translated code
+ignore_use.c:11: `ignored_fn` is marked _pal_ignore and cannot be used in translated code
+ignore_use.c:13: `ignored_rec` is marked _pal_ignore and cannot be used in translated code
+ignore_use.c:15: `ignored_int` is marked _pal_ignore and cannot be used in translated code
+ignore_use.c:17: `ignored_global` is marked _pal_ignore and cannot be used in translated code
+ignore_use.c:21: `y` is marked _pal_ignore and cannot be used in translated code
