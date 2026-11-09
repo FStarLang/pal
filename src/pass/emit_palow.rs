@@ -2319,6 +2319,43 @@ fn first_field_not_null<'s>(
     Some((lemma, &first.name))
 }
 
+/// The guarded resource of an optional input parameter, stated at a null
+/// pointer with full permission and the pointee type's zero.
+///
+/// The callee names the pointee value -- and for a const parameter the
+/// permission -- as implicits of its signature, which a call site passing a
+/// null has nothing to solve against. Under a null pointer the guard is `emp`,
+/// so any resource may be introduced there; one with no metavariables left in
+/// it pins both implicits by structural match and asserts nothing about
+/// memory. Only pointees that state no more than a `pts_to` qualify: a
+/// refinement, or the `_own` of an owned pointer field, would be a second
+/// guarded conjunct to introduce.
+fn null_input(tds: &Typedefs, ty: &Type) -> Option<String> {
+    fn bare(tds: &Typedefs, ty: &Type) -> bool {
+        match &tds.resolve(ty).val {
+            TypeT::Int { .. } | TypeT::SizeT | TypeT::Bool => true,
+            TypeT::TypeRef(TypeRefKind::Struct(n)) => tds.structs.get(&*n.val).is_some_and(|si| {
+                si.fields
+                    .iter()
+                    .all(|f| matches!(f.shape, FieldShape::One { .. }) && bare(tds, &f.ty))
+            }),
+            _ => false,
+        }
+    }
+    if refined(tds, ty) || extent(tds, ty) != Some(Extent::One) {
+        return None;
+    }
+    let TypeT::Pointer(pt, _) = &peel(tds, ty).val else {
+        return None;
+    };
+    if !bare(tds, pt) {
+        return None;
+    }
+    let pn = palow_name(tds, pt)?;
+    let zero = zero_value(tds, pt).ok()?;
+    Some(format!("{}_pts_to null 1.0R ({})", pn, zero))
+}
+
 fn is_nullable(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Nullable(_) => true,
@@ -11331,6 +11368,15 @@ pub fn emit_palow(
                     .iter()
                     .map(|a| is_nullable(&tds, &a.ty))
                     .collect(),
+                null_inputs: fndecl
+                    .args
+                    .iter()
+                    .map(|a| {
+                        (a.mode != ParamMode::Out && is_nullable(&tds, &a.ty))
+                            .then(|| null_input(&tds, &a.ty))
+                            .flatten()
+                    })
+                    .collect(),
                 allocated: sig.ret_block.clone(),
             },
         );
@@ -12197,6 +12243,9 @@ struct Callee {
     /// ownership under `unless_null`, which the caller opens again where it
     /// knows which side of the test its argument is on.
     nullables: Vec<bool>,
+    /// For each optional input whose guarded resource a declining call site
+    /// can write down outright, that resource at a null pointer.
+    null_inputs: Vec<Option<String>>,
     /// What the call hands the caller, when the return type grants a block.
     /// The caller has to start tracking it or the ownership the `ensures` just
     /// granted would be left over.
@@ -17586,6 +17635,7 @@ impl<'a> Body<'a> {
         let arrayptr_args = c.arrayptr_args.clone();
         let consumes = c.consumes.clone();
         let nullables = c.nullables.clone();
+        let null_inputs = c.null_inputs.clone();
         let (implicits, ghost_args) = (c.implicits.clone(), c.ghost_args.clone());
         // A `$witness` before a direct call names the callee's `_ghost_arg`s,
         // which appear only inside `pure`s and so cannot be read off the
@@ -17616,6 +17666,7 @@ impl<'a> Body<'a> {
                 values.insert(i, self.arg_value(a)?);
             }
         }
+        let field_close = self.pending_close.len();
         let opened = self.field_args(args, &outs, &consts, |i| {
             !(arr_args.get(i) == Some(&true)
                 || arrayptr_args.get(i) == Some(&true)
@@ -17629,6 +17680,15 @@ impl<'a> Body<'a> {
             }
             if let Some(at) = opened.get(&i) {
                 out += &format!(" {}", at);
+                if nullables.get(i) == Some(&true) {
+                    self.take_back_nullable(
+                        a,
+                        at,
+                        outs.get(i) == Some(&true),
+                        None,
+                        Some(field_close),
+                    );
+                }
                 continue;
             }
             // A literal's address carries no writable ownership. A const
@@ -17752,6 +17812,7 @@ impl<'a> Body<'a> {
                 out += &format!(" {}", fo.at);
                 continue;
             }
+            let close_mark = self.pending_close.len();
             let v = if outs.get(i) == Some(&true) {
                 self.out_arg(a)?
             } else if is_literal(a)
@@ -17782,7 +17843,19 @@ impl<'a> Body<'a> {
                 && plain_ptrs.get(i) != Some(&true)
                 && consumes.get(i) != Some(&true)
             {
-                self.take_back_nullable(a, &v, outs.get(i) == Some(&true));
+                // `&s->f` handed to an `_out` is a field `out_arg` opened
+                // for the call, the same as one `field_args` opened.
+                let out = outs.get(i) == Some(&true);
+                let field = out
+                    && matches!(&strip_casts(a).val, ExprT::Ref(inner)
+                        if matches!(strip_vattr(inner).val, ExprT::Member(..)));
+                self.take_back_nullable(
+                    a,
+                    &v,
+                    out,
+                    null_inputs.get(i).cloned().flatten(),
+                    field.then_some(close_mark),
+                );
             }
             // Passing the address of an object that holds a code pointer
             // hands the validity along with it.
@@ -17858,40 +17931,59 @@ impl<'a> Body<'a> {
     /// while the resource is still in the open. An `_out` callee is handed
     /// storage, anything else an initialized object, which decides the lemma.
     ///
+    /// A field of an object this function holds, opened for the call by
+    /// `field_args`, counts as held too. A declined input is handed a guard
+    /// over a resource written down outright (see `null_input`).
+    ///
     /// Anything else is left alone: a caller's own `_nullable` parameter is
     /// forwarded with its guard untouched, and ownership a hand-written
     /// contract supplies is the author's to open.
-    fn take_back_nullable(&mut self, a: &Expr, v: &str, out: bool) {
+    fn take_back_nullable(
+        &mut self,
+        a: &Expr,
+        v: &str,
+        out: bool,
+        null_input: Option<String>,
+        field_close: Option<usize>,
+    ) {
         if is_zero(strip_casts(a)) {
-            // Only an output's guarded storage needs no witness to introduce;
-            // an initialized pointee's value is left to the caller to name.
-            if out && v == "null" {
+            // An output's guarded storage needs no witness to introduce; an
+            // input's pointee value does, which `null_input` supplies where
+            // it can. Any other is left to the caller to name.
+            if v == "null" {
+                if let Some(r) = null_input.filter(|_| !out) {
+                    self.lines
+                        .push(format!("intro_unless_null_null null ({});", r));
+                } else if !out {
+                    return;
+                }
                 self.pending_close
                     .push("elim_unless_null_null null _;".to_string());
             }
             return;
         }
-        let held = match &strip_casts(a).val {
-            ExprT::Ref(inner) => match &strip_vattr(inner).val {
-                ExprT::Var(x) => self
-                    .slots
-                    .iter()
-                    .rev()
-                    .find(|s| s.name == *x.val)
-                    .is_some_and(|s| s.addr == v && s.array.is_none()),
+        let held = field_close.is_some()
+            || match &strip_casts(a).val {
+                ExprT::Ref(inner) => match &strip_vattr(inner).val {
+                    ExprT::Var(x) => self
+                        .slots
+                        .iter()
+                        .rev()
+                        .find(|s| s.name == *x.val)
+                        .is_some_and(|s| s.addr == v && s.array.is_none()),
+                    _ => false,
+                },
+                ExprT::Var(x) => {
+                    let x = x.val.to_string();
+                    v == format!("var_{}", x)
+                        && (!self.guarded.contains(&x) || self.unguarded.contains(&x))
+                        && (self.owned.iter().any(|o| o.base == x)
+                            || self.outs.iter().any(|o| o.base == x)
+                            || self.out_params.contains(&x)
+                            || self.unguarded.contains(&x))
+                }
                 _ => false,
-            },
-            ExprT::Var(x) => {
-                let x = x.val.to_string();
-                v == format!("var_{}", x)
-                    && (!self.guarded.contains(&x) || self.unguarded.contains(&x))
-                    && (self.owned.iter().any(|o| o.base == x)
-                        || self.outs.iter().any(|o| o.base == x)
-                        || self.out_params.contains(&x)
-                        || self.unguarded.contains(&x))
-            }
-            _ => false,
-        };
+            };
         if !held {
             return;
         }
@@ -17908,8 +18000,13 @@ impl<'a> Body<'a> {
             return;
         };
         self.lines.push(format!("{} {};", pn, v));
-        self.pending_close
-            .push(format!("elim_unless_null {} _;", v));
+        // A field opened for the call is closed again by `field_args`, and
+        // its resource has to be out of the guard before that.
+        let close = format!("elim_unless_null {} _;", v);
+        match field_close {
+            Some(at) => self.pending_close.insert(at, close),
+            None => self.pending_close.push(close),
+        }
     }
 
     /// Open the fields whose addresses a call's arguments are, for the length
