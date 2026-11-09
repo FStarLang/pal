@@ -3998,6 +3998,23 @@ impl<'a> Spec<'a> {
                     .ok_or_else(|| format!("`_Alignof` of {}", describe(self.tds.resolve(t))))?;
                 Ok(format!("{}sz", n))
             }
+            // A struct value is an F* record, so an initialiser is that record:
+            // the named fields given, the rest zeroed, exactly as in a body.
+            // This is what lets a `_pure` function build a struct.
+            ExprT::StructInit(n, inits) => {
+                let Some(si) = self.tds.structs.get(&*n.val) else {
+                    return Err(format!("an initialiser for struct {} in a contract", n.val));
+                };
+                let mut vals = Vec::new();
+                for f in si.fields.iter() {
+                    let v = match inits.iter().find(|(i, _)| *i.val == *f.name) {
+                        Some((_, e)) => self.value(e, w)?,
+                        None => zero_initializer(self.tds, &f.ty)?,
+                    };
+                    vals.push(format!("fld_{} = {}", f.name, v));
+                }
+                Ok(format!("({{ {} }})", record_fields(vals, false)))
+            }
             _ => Err(format!("{} in a contract", expr_kind(e))),
         }
     }
@@ -5876,6 +5893,60 @@ fn emit_fn(
         .cloned()
         .collect();
     let (ens_slprops, ens_props) = split(&ensures_rest);
+    // A clause that fixes the result outright -- `_ensures(return == E)`, with
+    // `E` free of `return` -- is emitted as Pulse's `rewrites_to` rather than
+    // as a `pure` equality. The two assert the same thing, but `rewrites_to`
+    // is the form Pulse's prover reads as a *substitution*: the bound result
+    // is replaced by `E` throughout the context and the goal. That is what a
+    // conditional needs. A call inside a branch binds its result to a
+    // branch-local name, so the branch's postcondition closes over it
+    // existentially, and Pulse's join gives up on an `exists*`. With
+    // `rewrites_to` the local never reaches the postcondition.
+    //
+    // `rewrites_to` is F* equality, so only a result whose C `==` *is* F*
+    // equality qualifies: machine integers, `_Bool`, and struct values, which
+    // C cannot compare at all and a contract compares as records. A float's
+    // `==` is IEEE equality, and a pointer result may sit behind a nullness
+    // guard; both keep the ordinary clause. So does an `E` whose translation
+    // needs a side condition, since `rewrites_to` has nowhere to put one.
+    let mut post_rewrites: Vec<String> = Vec::new();
+    let ens_props: Exprs = {
+        let ret_fty = fstar_type(tds, &decl.ret_type);
+        let mut rest = Vec::new();
+        for e in ens_props {
+            let Some(rhs) = determined_result(&e) else {
+                rest.push(e);
+                continue;
+            };
+            let qualifies = spec.ty_of(rhs).is_ok_and(|ty| {
+                matches!(
+                    peel(tds, &ty).val,
+                    TypeT::Int { .. }
+                        | TypeT::SizeT
+                        | TypeT::PtrdiffT
+                        | TypeT::Bool
+                        | TypeT::TypeRef(TypeRefKind::Struct(_))
+                ) && ret_fty.is_some()
+                    && fstar_type(tds, &ty) == ret_fty
+            });
+            if qualifies {
+                spec.guards.borrow_mut().clear();
+                let mark = spec.defined.borrow().len();
+                let t = spec.value(rhs, When::Post);
+                let clean = spec.guards.borrow().is_empty() && spec.defined.borrow().len() == mark;
+                spec.guards.borrow_mut().clear();
+                spec.defined.borrow_mut().truncate(mark);
+                if let Ok(t) = t
+                    && clean
+                {
+                    post_rewrites.push(format!("rewrites_to {} ({})", ret_name, t));
+                    continue;
+                }
+            }
+            rest.push(e);
+        }
+        rest
+    };
     let mut slprop_err: Option<String> = None;
     let generated_req = req.len();
     for (es, w, into) in [
@@ -6068,6 +6139,7 @@ fn emit_fn(
             // gathered above.
             req.truncate(generated_req);
             owned_post.clear();
+            post_rewrites.clear();
             let why = match contract {
                 Err(why) => why,
                 _ => slprop_err.or(value_err).unwrap_or_default(),
@@ -6230,6 +6302,7 @@ fn emit_fn(
         bodies.push("pure False".to_string());
     }
     bodies.extend(post_props.iter().map(|p| format!("pure ({})", p)));
+    bodies.extend(post_rewrites.iter().cloned());
     // A postcondition that names a `__fp` wrapper is one that hands something
     // about that function on -- a validity, most of the time, and one the
     // body seeded itself. Reading it back off the assembled text is cruder
@@ -23224,6 +23297,52 @@ fn has_effects(e: &Rc<Expr>) -> bool {
         | ExprT::Free(_)
         | ExprT::InlinePulse(..) => true,
         _ => expr_operands(e).into_iter().any(has_effects),
+    }
+}
+
+/// The `E` of a postcondition `return == E` (either way round), when `E` does
+/// not itself mention the result. Elaboration renders a boolean clause as an
+/// slprop through a coercion, which is looked through first.
+fn determined_result(e: &Rc<Expr>) -> Option<&Rc<Expr>> {
+    let mut inner = e;
+    loop {
+        match &inner.val {
+            ExprT::Cast(a, _) | ExprT::VAttr(_, a) => inner = a,
+            _ => break,
+        }
+    }
+    let ExprT::BinOp(BinOp::Eq, l, r) = &inner.val else {
+        return None;
+    };
+    let is_ret = |x: &Rc<Expr>| matches!(&x.val, ExprT::Var(id) if &*id.val == "return");
+    if is_ret(l) && !mentions_return(r) {
+        Some(r)
+    } else if is_ret(r) && !mentions_return(l) {
+        Some(l)
+    } else {
+        None
+    }
+}
+
+/// Conservatively, whether `e` could mention the `return` keyword. Only the
+/// forms a contract is written in are looked into; any other answers `true`,
+/// which costs the `rewrites_to` form rather than soundness.
+fn mentions_return(e: &Expr) -> bool {
+    match &e.val {
+        ExprT::Var(id) => &*id.val == "return",
+        ExprT::BoolLit(_) | ExprT::IntLit(..) | ExprT::FloatLit(..) => false,
+        ExprT::UnOp(_, a)
+        | ExprT::Cast(a, _)
+        | ExprT::Deref(a)
+        | ExprT::Ref(a)
+        | ExprT::Old(a)
+        | ExprT::Member(a, _)
+        | ExprT::VAttr(_, a) => mentions_return(a),
+        ExprT::BinOp(_, a, b) | ExprT::Index(a, b) => mentions_return(a) || mentions_return(b),
+        ExprT::Cond(a, b, c) => mentions_return(a) || mentions_return(b) || mentions_return(c),
+        ExprT::FnCall(_, args) => args.iter().any(|a| mentions_return(a)),
+        ExprT::StructInit(_, inits) => inits.iter().any(|(_, a)| mentions_return(a)),
+        _ => true,
     }
 }
 
