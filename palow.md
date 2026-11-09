@@ -6793,3 +6793,26 @@ new facts about memory.
     with a `_requires`, for one with a pointer parameter and for one whose
     inline Pulse names its result; `test/ensures_determines_result_bad`
     asserts false things of determined calls to callees with real bodies.
+
+    initialized input (whose value the guard would have to name) are left
+    to the author as before. `test/nullable_caller_transfer` supplies,
+    declines and forwards optional outputs, including a local's address,
+    supplies an initialized input and refined structs (one led by a nested
+    struct), and declines an output beside a hand-managed array input.
+
+52. **A caller's pointer slot through an untyped out-parameter.**
+    `f((void const **)&typed_local)` is how every acquire-a-buffer
+    interface is spelled. The old model needed a cell view to carry a
+    `ref (ref T)` across to a `ref core_ref`; under Palow both slots are a
+    `ptr`, so the only thing in the way was the cast, which hid the
+    local's address from the `_out` argument and was refused as "not
+    unwritten storage". A cast is now looked through when the storage it
+    claims has the slot's own Palow type, and nowhere else. What the
+    acquired buffer means is still the callee's `_ensures`: a local whose
+    address a callee with hand-written ownership was handed is
+    dereferenced on the same terms as one a ghost statement names, leaving
+    F* to find the points-to the callee's words grant.
+    `test/core_ref_out_cell` acquires, reads and releases such a buffer;
+    `test/core_ref_out_cell_bad` is the refusal of a cast claiming another
+    Palow type (`(uint32_t *)&int32_local`, `(char **)&int_local`) and of
+    a local array's address.

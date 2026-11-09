@@ -11480,6 +11480,7 @@ pub fn emit_palow(
                     .iter()
                     .map(|a| is_nullable(&tds, &a.ty))
                     .collect(),
+                spliced_own: sig.spliced_own,
                 null_inputs: fndecl
                     .args
                     .iter()
@@ -12358,6 +12359,10 @@ struct Callee {
     /// ownership under `unless_null`, which the caller opens again where it
     /// knows which side of the test its argument is on.
     nullables: Vec<bool>,
+    /// Whether the callee's contract carries ownership written by hand. A
+    /// local whose address it is handed may come back pointing at memory
+    /// that only those words describe; see `Body::author_slots`.
+    spliced_own: bool,
     /// For each optional input whose guarded resource a declining call site
     /// can write down outright, that resource at a null pointer.
     null_inputs: Vec<Option<String>>,
@@ -12442,6 +12447,12 @@ struct Body<'a> {
     keep_reads: bool,
     /// The C objects this body's ghost statements name.
     ghost_names: HashSet<String>,
+    /// Locals whose address was handed to a callee whose contract carries
+    /// hand-written ownership. What such a local points at afterwards is
+    /// what the callee's words say, which the emitter cannot read, so a
+    /// dereference through it is left to slprop matching, as for a local a
+    /// ghost statement names.
+    author_slots: HashSet<String>,
     /// Whether that branch is the tail of the function -- the shape an
     /// early `return` is lowered into, where each arm is everything that
     /// is left and nothing follows the `if` at all. There is no join to
@@ -13778,6 +13789,7 @@ impl<'a> Body<'a> {
                 // slprop matching, on the same terms a spliced contract gets.
                 ExprT::Var(v)
                     if self.ghost_names.contains(&*v.val.to_string())
+                        || self.author_slots.contains(&*v.val.to_string())
                         || self.params.contains(&*v.val.to_string()) =>
                 {
                     self.rvalue(inner)
@@ -17762,6 +17774,7 @@ impl<'a> Body<'a> {
         let arrayptr_args = c.arrayptr_args.clone();
         let consumes = c.consumes.clone();
         let nullables = c.nullables.clone();
+        let callee_spliced = c.spliced_own;
         let null_inputs = c.null_inputs.clone();
         let (implicits, ghost_args) = (c.implicits.clone(), c.ghost_args.clone());
         // A `$witness` before a direct call names the callee's `_ghost_arg`s,
@@ -17963,6 +17976,13 @@ impl<'a> Body<'a> {
             // it could read the object, or free it a second time.
             if consumes.get(i) == Some(&true) {
                 self.give_away(a)?;
+            }
+            if callee_spliced
+                && let ExprT::Ref(inner) = &strip_casts(a).val
+                && let ExprT::Var(x) = &strip_vattr(inner).val
+                && self.slots.iter().any(|s| s.name == *x.val)
+            {
+                self.author_slots.insert(x.val.to_string());
             }
             if nullables.get(i) == Some(&true)
                 && arr_args.get(i) != Some(&true)
@@ -18386,9 +18406,18 @@ impl<'a> Body<'a> {
         if is_zero(strip_casts(a)) {
             return Ok("null".to_string());
         }
-        if let ExprT::Ref(inner) = &strip_vattr(a).val
+        // A cast on the address is looked through only when the storage it
+        // claims is the slot's own: `(void const **)&typed_ptr` hands over a
+        // pointer slot as a pointer slot, which under Palow is one type.
+        if let ExprT::Ref(inner) = &strip_casts(a).val
             && let ExprT::Var(v) = &strip_vattr(inner).val
             && let Some(i) = self.slots.iter().rposition(|s| s.name == *v.val)
+            && (matches!(strip_vattr(a).val, ExprT::Ref(..))
+                || self.slots[i].array.is_none()
+                    && self.ty_of(a).ok().is_some_and(|t| {
+                        matches!(&peel(self.tds, &t).val, TypeT::Pointer(pt, _)
+                        if palow_name(self.tds, pt).as_deref() == Some(&*self.slots[i].palow_ty))
+                    }))
         {
             // C's `_out` says the callee writes the object, not that the
             // object was never written before. Palow's contract asks for the
@@ -24108,6 +24137,7 @@ fn emit_body(
             ghost_stmt_names(&defn.body, &mut out);
             out
         },
+        author_slots: HashSet::new(),
         tail_branch: false,
         in_guard: false,
         inlining: 0,
