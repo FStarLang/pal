@@ -1,0 +1,3 @@
+# Expected translation diagnostic substrings
+_pal_ignore on a definition leaves an earlier declaration translated; use _pal_admit
+or put _pal_ignore on the first declaration

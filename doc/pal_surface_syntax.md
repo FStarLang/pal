@@ -319,8 +319,70 @@ Notes:
 - `_pure` — function has no effects; callable in spec position.
 - `_total` — the function terminates. Accepted, but currently ignored: function pointers are always the divergent kind (`of_fn_div`, `call_div`).
 - `_rec` — recursive (must be paired with `_decreases`).
+- `_pal_ignore` — omit a declaration from translation.
+- `_pal_admit` — trust a function's contract.
 - `_memset_zero` — the function is a `memset(p, 0, n)` wrapper, and calls to it are translated as such (`test/memset`).
 - `_pulse_opaque_to_smt` — on a pure global, emit its value `opaque_to_smt`, so that a large initializer is not unfolded by the SMT solver (`test/global_array_tactic`).
+
+## Ignoring declarations and admitting functions
+
+`_pal_admit` keeps a function's signature and contract but skips translating and
+verifying its body. Use it for implementations verified elsewhere or trusted,
+including bodies with unsupported constructs such as inline assembly. Callers
+use the contract without a proof of the implementation:
+
+```c
+_pal_admit
+int platform_identity(int x) _ensures(return == x) {
+    __asm__ volatile ("" : "+r"(x));
+    return x;
+}
+```
+
+Contracts on an earlier prototype are retained. `_pal_admit` applies only to
+functions; `_pal_ignore` takes precedence if both markers are present.
+
+`_pal_ignore` omits declarations entirely: functions, typedefs, structs/unions,
+enums, and variables, including block-scope declarations. Record fields and nested types are not
+translated; variable initializers are not translated or evaluated in the model.
+Mark the declaration itself, not individual fields.
+
+Attach the marker to the typedef name or the struct/union/enum tag:
+
+```c
+typedef long double platform_float _pal_ignore;
+struct _pal_ignore platform_state { int signed_bits : 3; };
+typedef struct _pal_ignore { long double value; } platform_record _pal_ignore;
+```
+
+The typedef and its record are separate declarations: mark both to omit both.
+
+Ignoring a type does not make it opaque. Translated code that uses an ignored
+function, type, variable, or field of an ignored record is rejected with an
+error at the use (`test/ignore_use`).
+
+For a function with a separate prototype, put `_pal_ignore` on the first
+declaration to omit the function entirely. Clang inherits the marker on later
+declarations in the same translation unit. Marking only the definition leaves
+the earlier prototype translated and is an error; use `_pal_admit` if retaining
+that prototype and its contract is intended.
+
+A function definition without an earlier declaration can use `_pal_ignore`
+directly. Markers do not retroactively remove earlier declarations, and putting
+either marker after a definition is too late to skip its body.
+
+Like a contract, both markers belong to the entity, so every translation unit
+that declares it must agree on them: a function admitted in one file but
+declared or defined without `_pal_admit` in another is an error, and likewise
+for `_pal_ignore` (`test/admit_multifile`). Put the marked declaration in a
+shared header (`test/admit_shared_header`).
+
+Both markers are no-ops in ordinary C builds. Clang still parses and type-checks
+the source; neither marker hides invalid C.
+
+`test/ignore_functions`, `test/admit_contract`, `test/ignore_declarations`,
+`test/ignore_definition`, `test/ignore_use`, `test/admit_multifile`, and
+`test/admit_shared_header` exercise these forms.
 
 ## Global variables
 

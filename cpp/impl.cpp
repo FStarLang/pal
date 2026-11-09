@@ -11,6 +11,7 @@
 #endif
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <unordered_set>
 #include <vector>
@@ -397,13 +398,60 @@ public:
            d->hasAttr<IFuncAttr>() || d->hasAttr<WeakRefAttr>();
   }
 
+  static bool hasAnnotation(const Decl *decl, llvm::StringRef name) {
+    for (auto *attr : decl->specific_attrs<AnnotateAttr>())
+      if (attr->getAnnotation() == name && attr->args_size() == 0)
+        return true;
+    return false;
+  }
+
+  // Whether `d` names an entity `_pal_ignore` leaves untranslated: a record
+  // whose definition is ignored, or a declaration none of whose
+  // redeclarations (so far) is translated.
+  static bool isIgnored(const Decl *d) {
+    if (auto *rd = dyn_cast<RecordDecl>(d); rd && rd->getDefinition())
+      return hasAnnotation(rd->getDefinition(), "pal-ignore");
+    for (auto *r : d->redecls())
+      if (!hasAnnotation(r, "pal-ignore"))
+        return false;
+    return true;
+  }
+
+  static bool isAdmitted(const FunctionDecl *fd) {
+    for (auto *r : fd->redecls())
+      if (hasAnnotation(r, "pal-admit"))
+        return true;
+    return false;
+  }
+
+  std::set<std::pair<const Decl *, unsigned>> reportedIgnoredUses;
+
+  // Translated code cannot refer to an entity `_pal_ignore` omits. Report the
+  // use once, so the caller can substitute an error node instead of leaving a
+  // dangling name for later passes to trip over.
+  bool reportIgnoredUse(const NamedDecl *d, SourceRange range) {
+    if (!isIgnored(d))
+      return false;
+    auto key = std::make_pair(
+        d, sm.getExpansionLoc(range.getBegin()).getRawEncoding());
+    if (reportedIgnoredUses.insert(key).second)
+      ctx.report_diag(getRange(range), true,
+                      toStr("`" + d->getNameAsString() +
+                            "` is marked _pal_ignore and cannot be used in "
+                            "translated code"));
+    return true;
+  }
+
   void collectLinkage(DeclContext *dc) {
     for (auto *d : dc->decls()) {
       if (d->isInvalidDecl())
         continue;
+      // Ignored declarations are still recorded, so that linkage can reject a
+      // translation unit that ignores an entity another one translates.
+      bool ignored = isIgnored(d);
       auto *function = dyn_cast<FunctionDecl>(d);
       auto *object = dyn_cast<VarDecl>(d);
-      if ((function || object) && isLinkerAlias(d) &&
+      if (!ignored && (function || object) && isLinkerAlias(d) &&
           (astCtx->getSourceManager().isWrittenInMainFile(
                astCtx->getSourceManager().getExpansionLoc(d->getLocation())) ||
            (function && function->doesThisDeclarationHaveABody()) ||
@@ -426,6 +474,7 @@ public:
                          toStr(fd->getType().getCanonicalType().getAsString()),
                          !fd->hasExternalFormalLinkage(),
                          fd->doesThisDeclarationHaveABody(), fd->isInlined(),
+                         ignored, isAdmitted(fd),
                          getRange(fd->getSourceRange()));
       } else if (auto *vd = dyn_cast<VarDecl>(d); vd && vd->isFileVarDecl()) {
         ctx.add_c_symbol(toStr(vd->getName()), 1,
@@ -433,7 +482,7 @@ public:
                          !vd->hasExternalFormalLinkage(),
                          vd->isThisDeclarationADefinition() !=
                              VarDecl::DeclarationOnly,
-                         false, getRange(vd->getSourceRange()));
+                         false, ignored, false, getRange(vd->getSourceRange()));
       } else if (auto *rd = dyn_cast<RecordDecl>(d);
                  rd && rd->isCompleteDefinition()) {
         if (rd->getIdentifier()) {
@@ -450,21 +499,24 @@ public:
               signature += ":" + std::to_string(field->getBitWidthValue());
           }
           ctx.add_c_symbol(toStr(rd->getName()), rd->isUnion() ? 3 : 2,
-                           toStr(signature), false, false, false,
-                           getRange(rd->getSourceRange()));
+                           toStr(signature), false, false, false, ignored,
+                           false, getRange(rd->getSourceRange()));
         }
-        collectLinkage(rd);
+        if (!ignored)
+          collectLinkage(rd);
       } else if (auto *td = dyn_cast<TypedefNameDecl>(d)) {
         ctx.add_c_symbol(
             toStr(td->getName()), 4,
             toStr(td->getUnderlyingType().getCanonicalType().getAsString()),
-            false, false, false, getRange(td->getSourceRange()));
+            false, false, false, ignored, false,
+            getRange(td->getSourceRange()));
       } else if (auto *ed = dyn_cast<EnumDecl>(d)) {
         for (auto *constant : ed->enumerators()) {
           SmallString<32> value;
           constant->getInitVal().toString(value, 10);
           ctx.add_c_symbol(toStr(constant->getName()), 5,
                            toStr(StringRef(value)), false, false, false,
+                           ignored, false,
                            getRange(constant->getSourceRange()));
         }
       }
@@ -598,6 +650,8 @@ public:
 
   void trRecordDecl(Rc<ir::Ident> ident, RecordDecl *decl,
                     AnonNameGen *liftStructs) {
+    if (hasAnnotation(decl, "pal-ignore"))
+      return;
     auto key = recordKey(decl);
     if (!decl->isCompleteDefinition()) {
       if (decl->getTagKind() == TagTypeKind::Struct) {
@@ -716,6 +770,8 @@ public:
     } else if (auto typeOfExpr = dyn_cast<TypeOfExprType>(t)) {
       return trQualType(typeOfExpr->desugar(), range, liftStructs);
     } else if (auto tydef = dyn_cast<TypedefType>(t)) {
+      if (reportIgnoredUse(tydef->getDecl(), range))
+        return mk_type_err(std::move(loc));
       auto id = ctx.mk_ident(toStr(tydef->getDecl()->getName()), loc.clone());
       return mk_type_typedef(std::move(loc), std::move(id));
 #if LLVM_VERSION_MAJOR < 22
@@ -750,6 +806,8 @@ public:
           trQualType(arr->getElementType(), /* TODO */ range, liftStructs));
     } else if (auto rec = dyn_cast<RecordType>(t)) {
       auto decl = rec->getDecl();
+      if (reportIgnoredUse(decl, range))
+        return mk_type_err(std::move(loc));
       auto key = recordKey(decl);
       Rc<ir::Ident> name;
       if (auto it = structNames.find(key); it != structNames.end()) {
@@ -993,6 +1051,9 @@ public:
     if (auto generic = dyn_cast<GenericSelectionExpr>(e)) {
       return trLValue(generic->getResultExpr());
     } else if (auto dre = dyn_cast<DeclRefExpr>(e)) {
+      if (reportIgnoredUse(dre->getDecl(), e->getSourceRange()))
+        return mk_lvalue_err(std::move(loc),
+                             trQualType(e->getType(), e->getSourceRange()));
       auto id = symbolIdent(dre->getDecl(), loc.clone());
       return mk_lvalue_var(std::move(loc), std::move(id));
     } else if (auto p = dyn_cast<ParenExpr>(e)) {
@@ -1007,6 +1068,10 @@ public:
       }
     } else if (auto m = dyn_cast<MemberExpr>(e)) {
       auto *md = m->getMemberDecl();
+      if (auto *rd = dyn_cast<RecordDecl>(md->getDeclContext());
+          rd && reportIgnoredUse(rd, e->getSourceRange()))
+        return mk_lvalue_err(std::move(loc),
+                             trQualType(e->getType(), e->getSourceRange()));
       std::string nameStr;
       if (auto *fd = dyn_cast<FieldDecl>(md))
         nameStr = fieldNameStr(fd);
@@ -1835,6 +1900,10 @@ public:
         if (auto *dre = dyn_cast<DeclRefExpr>(
                 uo->getSubExpr()->IgnoreParenImpCasts())) {
           if (auto *fd = dyn_cast<FunctionDecl>(dre->getDecl())) {
+            if (reportIgnoredUse(fd, dre->getSourceRange()))
+              return mk_rvalue_err(
+                  std::move(loc),
+                  trQualType(e->getType(), e->getSourceRange()));
             auto id = symbolIdent(fd, loc.clone());
             return mk_rvalue_fnref(std::move(loc), std::move(id));
           }
@@ -2011,6 +2080,9 @@ public:
       }
     } else if (auto *c = dyn_cast<CallExpr>(e)) {
       if (auto fd = c->getDirectCallee()) {
+        if (reportIgnoredUse(fd, c->getCallee()->getSourceRange()))
+          return mk_rvalue_err(std::move(loc),
+                               trQualType(c->getType(), c->getSourceRange()));
         if (fd->getName() == "__builtin_mul_overflow" && c->getNumArgs() == 3) {
           auto lhsType = c->getArg(0)->getType();
           auto rhsType = c->getArg(1)->getType();
@@ -2373,6 +2445,9 @@ public:
       // A bare reference to a function (function-to-pointer decay): produce a
       // function reference, identical to `&func`.
       if (auto *fd = dyn_cast<FunctionDecl>(dre->getDecl())) {
+        if (reportIgnoredUse(fd, e->getSourceRange()))
+          return mk_rvalue_err(std::move(loc),
+                               trQualType(e->getType(), e->getSourceRange()));
         auto id = symbolIdent(fd, loc.clone());
         return mk_rvalue_fnref(std::move(loc), std::move(id));
       }
@@ -2386,6 +2461,10 @@ public:
       // already renders a value base as a record field selection rather than a
       // reference projection.
       auto *md = m->getMemberDecl();
+      if (auto *rd = dyn_cast<RecordDecl>(md->getDeclContext());
+          rd && reportIgnoredUse(rd, e->getSourceRange()))
+        return mk_rvalue_err(std::move(loc),
+                             trQualType(e->getType(), e->getSourceRange()));
       std::string nameStr;
       if (auto *fd = dyn_cast<FieldDecl>(md))
         nameStr = fieldNameStr(fd);
@@ -2494,7 +2573,8 @@ public:
           if (auto *ds = dyn_cast<DeclStmt>(s)) {
             bool allStaticAsserts = true;
             for (auto *d : ds->decls()) {
-              if (!isa<StaticAssertDecl>(d)) {
+              if (!isa<StaticAssertDecl>(d) &&
+                  !hasAnnotation(d, "pal-ignore")) {
                 allStaticAsserts = false;
               }
             }
@@ -2757,6 +2837,8 @@ public:
       hoistRValueMembers(stmts, ifs->getCond());
     } else if (auto *ds = dyn_cast<DeclStmt>(stmt)) {
       for (auto *d : ds->decls()) {
+        if (hasAnnotation(d, "pal-ignore"))
+          continue;
         if (auto *vd = dyn_cast<VarDecl>(d)) {
           hoistAddressedCompoundLiterals(stmts, vd->getInit());
           hoistRValueMembers(stmts, vd->getInit());
@@ -3560,6 +3642,8 @@ public:
       return trStmt(stmts, subStmt);
     } else if (auto *ds = dyn_cast<DeclStmt>(stmt)) {
       for (auto d : ds->decls()) {
+        if (hasAnnotation(d, "pal-ignore"))
+          continue;
         auto dloc = getRange(d->getSourceRange());
         if (auto vd = dyn_cast<VarDecl>(d)) {
           // A `static const` with an initializer holds the same value on
@@ -3779,7 +3863,25 @@ public:
   }
 
   rust::Unit HandleDecl(Decl *D) {
+    if (hasAnnotation(D, "pal-ignore")) {
+      if (auto *fd = dyn_cast<FunctionDecl>(D);
+          fd && fd->doesThisDeclarationHaveABody()) {
+        for (auto *previous = fd->getPreviousDecl(); previous;
+             previous = previous->getPreviousDecl()) {
+          if (!hasAnnotation(previous, "pal-ignore")) {
+            ctx.report_diag(
+                getRange(D->getSourceRange()), true,
+                "_pal_ignore on a definition leaves an earlier declaration "
+                "translated; use _pal_admit to retain the prototype and "
+                "contract, or put _pal_ignore on the first declaration"_rs);
+            break;
+          }
+        }
+      }
+      return {};
+    }
     if (auto *FD = dyn_cast<FunctionDecl>(D)) {
+      bool admit = hasAnnotation(FD, "pal-admit");
       // Include block
       if (FD->getName().starts_with("__pal_include_anchor")) {
         std::optional<unsigned> code;
@@ -3981,7 +4083,7 @@ public:
           trQualType(FD->getReturnType(), FD->getReturnTypeSourceRange()),
           FD->getReturnType(), FD->getReturnTypeSourceRange()));
       for (auto attr : FD->getAttrs()) {
-        if (FD->hasBody() && attr->isInherited())
+        if (FD->hasBody() && !admit && attr->isInherited())
           continue;
         if (auto req = isUnaryAttrOf(attr, "pal-requires")) {
           builder.requires(std::move(req.value()));
@@ -4011,7 +4113,8 @@ public:
                               snippets);
         }
       }
-      if (FD->hasBody() && ctx.selects_function_body(toStr(FD->getName()))) {
+      if (FD->hasBody() && !admit &&
+          ctx.selects_function_body(toStr(FD->getName()))) {
         auto &sm = astCtx->getSourceManager();
         bool outer = inSystemBody;
         inSystemBody =
@@ -4020,7 +4123,7 @@ public:
         inSystemBody = outer;
         return ctx.add_fn_defn(std::move(builder), std::move(body));
       } else {
-        if (FD->doesThisDeclarationHaveABody()) {
+        if (FD->doesThisDeclarationHaveABody() && !admit) {
           std::string message =
               "--only-function excludes body of `" + FD->getName().str() +
               "`; only its external declaration is translated";
