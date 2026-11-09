@@ -6770,3 +6770,26 @@ new facts about memory.
     `test/rewrites_to_post` covers arithmetic, `_Bool`, `_old(*p)` and a read
     through a non-const pointer, each once over a body that meets it and once
     over one that must be rejected for its `rewrites_to`.
+
+51. **A determined call in an assertion.** `_ensures(return ==
+    (_Bool)_inline_pulse(f $(A) $(B)))` is a `rewrites_to` too: the
+    antiquotations are checked for `return`, and the verbatim text for the
+    name the result is bound to (`ret_f`), which inline Pulse can write out;
+    a clause that names it keeps the ordinary equality. That is the only
+    way to say "this function decides that predicate", and it lets an
+    `_assert` name such a call. The rule that nothing is lifted out of an
+    assertion still holds, but Pulse reads a call whose postcondition is a
+    `rewrites_to` as the term it names,
+    without running it, so the call is left in the assertion as a read is.
+    Pulse does not check the callee's precondition when it does this, so the
+    exception is limited to callees whose whole emitted precondition is
+    trivial: no `_requires`, only by-value scalar or struct parameters (no
+    pointer, `_nullable`, `_out`, `_consumes` or refinement), no implicit
+    binders, and nothing but `requires emp` in the signature. Any other call
+    in an assertion is still refused. Divergence is not a precondition: the
+    assertion is about the term `E`, which is what the call would return if
+    it returned. `test/ensures_determines_result` asserts a determined call;
+    `test/ensures_determines_result_requires` is the refusal, for a callee
+    with a `_requires`, for one with a pointer parameter and for one whose
+    inline Pulse names its result; `test/ensures_determines_result_bad`
+    asserts false things of determined calls to callees with real bodies.
