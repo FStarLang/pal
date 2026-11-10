@@ -16735,7 +16735,7 @@ impl<'a> Body<'a> {
                     let suffix = match &peel(self.tds, to).val {
                         TypeT::Int { signed, width } => Some(int_suffix(*signed, *width)?),
                         TypeT::SizeT => Some("sz"),
-                        TypeT::PtrdiffT => Some("L"),
+                        TypeT::PtrdiffT => Some(int_suffix(true, 8 * self.tds.ptr_bytes as u32)?),
                         _ => None,
                     };
                     if let Some(suffix) = suffix {
