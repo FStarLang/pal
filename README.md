@@ -7,7 +7,7 @@
 # PAL
 
 
-### Proof Annotated Language for C
+### Proof Annotation Language for C
 
 [![CI](https://github.com/FStarLang/pal/actions/workflows/ci.yml/badge.svg)](https://github.com/FStarLang/pal/actions/workflows/ci.yml)
 [![Rust 2024](https://img.shields.io/badge/Rust-2024_edition-DEA584.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
