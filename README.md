@@ -7,7 +7,7 @@
 # PAL
 
 
-### Proof Annotated Language for C
+### Proof Annotation Language for C
 
 [![CI](https://github.com/FStarLang/pal/actions/workflows/ci.yml/badge.svg)](https://github.com/FStarLang/pal/actions/workflows/ci.yml)
 [![Rust 2024](https://img.shields.io/badge/Rust-2024_edition-DEA584.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -62,7 +62,7 @@ it passes, the implementation satisfies the spec. More availabe at [`examples/`]
 | LLVM dev headers | 20.x | `llvm-config`, `libclang-cpp20-dev`, `libclang-20-dev` |
 | g++ | recent | builds the C++ FFI ([`cpp/impl.cpp`](cpp/impl.cpp)) |
 | Rust | 2024 edition | compiles the PAL binary |
-| F\*/Pulse | nightly 2026-11-07 | verifies generated `.fst` output |
+| F\*/Pulse | nightly 2026-11-10 | verifies generated `.fst` output |
 
 ### Setup (Ubuntu / Debian)
 

@@ -176,6 +176,8 @@ impl<'a> Ctx<'a> {
         internal: bool,
         definition: bool,
         inline: bool,
+        ignored: bool,
+        admitted: bool,
         loc: Rc<SourceInfo>,
     ) {
         self.symbols.symbols.push(crate::pass::linkage::CSymbol {
@@ -185,6 +187,8 @@ impl<'a> Ctx<'a> {
             internal,
             definition,
             inline,
+            ignored,
+            admitted,
             loc,
         });
     }

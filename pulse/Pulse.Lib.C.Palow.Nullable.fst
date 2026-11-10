@@ -41,6 +41,9 @@ ghost fn intro_unless_null (a: ptr) (p: slprop)
   }
 }
 
+(* Ambiguity is harmless here: every guard on a null pointer is `emp`, so a
+   call that declines several optional outputs can discard them in any order. *)
+[@@allow_ambiguous]
 ghost fn elim_unless_null_null (a: ptr) (p: slprop)
   requires unless_null a p
   requires pure (is_null a)

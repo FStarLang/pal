@@ -976,19 +976,7 @@ impl<'a> Elaborator<'a> {
                     return;
                 };
                 if !env.vtype_eq(x_ty.clone(), v_ty.clone()) {
-                    // Don't cast if the only difference is pointer kind refinement
-                    let x_whnf = env.vtype_whnf(x_ty.clone());
-                    let v_whnf = env.vtype_whnf(v_ty.clone());
-                    let is_kind_refinement = matches!(
-                        (&x_whnf.val, &v_whnf.val),
-                        (
-                            TypeT::Pointer(_, PointerKind::Unknown | PointerKind::Ref),
-                            TypeT::Pointer(_, PointerKind::Array)
-                        )
-                    );
-                    if !is_kind_refinement {
-                        cast_to(v, x_ty.to_rc());
-                    }
+                    cast_to(v, x_ty.to_rc());
                 }
             }
             StmtT::If {

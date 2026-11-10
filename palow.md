@@ -691,6 +691,24 @@ so we do not need a per-array-type axiomatization, and the existing
 today a dedicated `MallocFlex` special case — become an ordinary struct
 followed by an `array_repr` chunk, with no special support in the translator.
 
+A `_refine` on a struct declaration is a fact about every value of the struct,
+so an `_array` of it carries the fact for every element. The struct's module
+names the value-level refinement `struct_X__refine (x: struct_X) : prop`, and a
+contract (or a loop invariant that rebinds the array's sequence) states
+`seq_forall struct_X__refine xs` beside the array's points-to. `seq_forall` is
+opaque to SMT; `Pulse.Lib.C.Palow.Array` exposes it through patterned lemmas
+that fire on a concrete read (`Seq.index xs i`) and on the sequences the array
+operations build (`Seq.upd`, `Seq.slice`, `Seq.append`, `Seq.create`). A
+`_nullable` array states it under `not (is_null p) ==>`. An `_out` array has no
+elements on entry, so it carries the fact only in its postcondition: the
+function leaves through `array_somes_forall`, which asks every cell to hold a
+value satisfying the refinement (a loop that fills the array says so in its
+invariant, e.g. `_forall(size_t j, j < i ==> a[j].v < 100)`) and gives back
+`seq_forall` of the sequence it claims. A struct refinement that states
+ownership, or is otherwise not a proposition about the value (one calling a
+`_pure` C function, today), cannot be spread over a sequence, and an array of
+such a struct is refused rather than given a weaker contract.
+
 ### Effective types
 
 C's effective-type rules (C11 6.5p6-7) are what license a compiler's
@@ -1510,9 +1528,10 @@ new facts about memory.
   completes the tracked `_out`, including before a later whole-object write.
   `nullable_out` covers scalar and record outputs, early returns, forwarding,
   addressed parameters, exact values, and null/non-null callers.
-  Callers introduce and eliminate nullable ownership explicitly, as for
-  other nullable parameters; a non-null caller derives non-nullness before
-  wrapping its storage. Nullable output arrays remain unsupported, and a
+  A caller takes back what it handed an optional parameter (entry 48):
+  a declined output's empty guard is discarded, and a supplied pointer whose
+  ownership PAL emitted comes back out of the guard. Nullable output arrays
+  remain unsupported, and a
   null-path witness requires a type whose ghost zero value can be constructed.
   `nullable_out_uninit`, `nullable_out_unchecked`, `nullable_out_rebind`, and
   `out_param_null` reject unwritten outputs, unchecked writes, rebinding, and
@@ -6678,3 +6697,122 @@ new facts about memory.
     after the parameter is walked down by a loop;
     `test/label_old_param_bad` claims the walked parameter is unchanged;
     `test/label_old_param_shadowed` is the refusal.
+
+48. **Taking back what was handed to an optional parameter.** A callee
+    states a `_nullable` parameter's ownership as `unless_null p (..)` on
+    both sides, which is right for it and wrong for a caller that knows
+    which side of the test its own argument is on: until now a caller that
+    supplied an optional output could not read what it had asked to be
+    written, and one that declined it was left holding a guard over
+    nothing. Both had to be spelled out with ghost steps. A call now does
+    it: a `NULL` passed to a `_nullable _out` is followed by
+    `elim_unless_null_null null _` (marked `allow_ambiguous`, since a call
+    may decline several), and a supplied pointer whose ownership PAL
+    emitted -- the address of a local, or a parameter the contract grants
+    -- gets `T_pts_to[_uninit]_not_null p` before the call, while the
+    resource is still in the open, and `elim_unless_null p _` after it.
+    Which lemma follows from the callee's mode: an `_out` is handed
+    storage, anything else an initialized object. The pointee is looked
+    at through any refinement, `_plain` or `_nullable` wrapper. Struct
+    types gain `<s>_pts_to_uninit_not_null`, and `uint32_t` and `ptr` the
+    scalar ones they lacked; a struct's lemma goes through its field at
+    offset zero, which may now itself be a struct that has one. A union,
+    or a struct led by an array, has none, and its guard is left alone. A
+    caller's own `_nullable` parameter is forwarded with its guard
+    untouched, since the caller cannot say which way the test goes, and a
+    `_plain` or hand-granted argument, an array, and a declined
+    initialized input (whose value the guard would have to name; see entry
+    49) are left to the author as before. `test/nullable_caller_transfer`
+    supplies, declines and forwards optional outputs, including a local's
+    address, supplies an initialized input and refined structs (one led by
+    a nested struct), and declines an output beside a hand-managed array
+    input.
+
+49. **Declining an optional input, and supplying a borrowed member.** A
+    `_nullable` input (const or not) names its pointee value -- and, if
+    const, its permission -- as implicits of the callee's signature, which a
+    call passing `NULL` has nothing to solve against. Under a null pointer
+    the guard is `emp`, so a call now introduces it outright:
+    `intro_unless_null_null null (T_pts_to null 1.0R <zero>)` before and
+    `elim_unless_null_null null _` after, which pins both implicits by
+    structural match and asserts nothing about memory. Only pointees that
+    state nothing beyond a `pts_to` qualify -- scalars and structs of them;
+    a refinement or an owned pointer field would be a second guarded
+    conjunct, and an array has no canonical length -- so those are still
+    written by hand (`test/nullable`, `test/struct_pointee_refine`). The
+    take-back of entry 48 also covers `&s->f` (and `&u->m`), a field
+    opened for the call -- by `field_args` for an input or a union member,
+    and by `out_arg` for a single struct field handed to an `_out` -- or
+    a field of a local still being filled: the field's resource is taken
+    back out of the guard before the field is closed. An input field of
+    an object held in contract-stated pieces, and an array field, are left
+    alone.
+    `test/nullable_const_in` declines, forwards, and supplies a member of
+    a borrowed struct; `test/nullable_field_args` supplies struct fields
+    and union members, singly and two of one struct, as inputs and
+    outputs.
+
+50. **A postcondition that determines the result.** `_ensures(return == E)`,
+    with `E` free of `return`, is emitted as `rewrites_to ret E` rather than
+    `pure (ret == E)`. It is the same fact, but `rewrites_to` is the form
+    Pulse's prover reads as a substitution, which is what a conditional needs:
+    a call in a branch binds its result to a branch-local name, and with an
+    ordinary equality that name would survive into the branch's
+    postcondition under an `exists*` the join cannot get past. `rewrites_to`
+    is F\* equality, so only a result whose `==` is F\* equality qualifies --
+    machine integers, `_Bool`, and struct values, which C cannot compare and
+    a contract compares as records. Floats (IEEE `==`), pointers (possibly
+    behind a nullness guard) and an `E` whose translation carries a side
+    condition keep the ordinary clause. A struct initialiser is now also a
+    contract term -- the record, with unnamed fields zeroed, as in a body --
+    so a `_pure` function can build a struct. `test/rvalue_member_branch`
+    projects a call result twice, once inside a null-guarded branch;
+    `test/rewrites_to_post` covers arithmetic, `_Bool`, `_old(*p)` and a read
+    through a non-const pointer, each once over a body that meets it and once
+    over one that must be rejected for its `rewrites_to`.
+
+51. **A determined call in an assertion.** `_ensures(return ==
+    (_Bool)_inline_pulse(f $(A) $(B)))` is a `rewrites_to` too: the
+    antiquotations are checked for `return`, and the verbatim text for the
+    name the result is bound to (`ret_f`), which inline Pulse can write out;
+    a clause that names it keeps the ordinary equality. That is the only
+    way to say "this function decides that predicate", and it lets an
+    `_assert` name such a call. The rule that nothing is lifted out of an
+    assertion still holds, but Pulse reads a call whose postcondition is a
+    `rewrites_to` as the term it names,
+    without running it, so the call is left in the assertion as a read is.
+    Pulse does not check the callee's precondition when it does this, so the
+    exception is limited to callees whose whole emitted precondition is
+    trivial: no `_requires`, only by-value scalar or struct parameters (no
+    pointer, `_nullable`, `_out`, `_consumes` or refinement), no implicit
+    binders, and nothing but `requires emp` in the signature. Any other call
+    in an assertion is still refused. Divergence is not a precondition: the
+    assertion is about the term `E`, which is what the call would return if
+    it returned. `test/ensures_determines_result` asserts a determined call;
+    `test/ensures_determines_result_requires` is the refusal, for a callee
+    with a `_requires`, for one with a pointer parameter and for one whose
+    inline Pulse names its result; `test/ensures_determines_result_bad`
+    asserts false things of determined calls to callees with real bodies.
+
+    initialized input (whose value the guard would have to name) are left
+    to the author as before. `test/nullable_caller_transfer` supplies,
+    declines and forwards optional outputs, including a local's address,
+    supplies an initialized input and refined structs (one led by a nested
+    struct), and declines an output beside a hand-managed array input.
+
+52. **A caller's pointer slot through an untyped out-parameter.**
+    `f((void const **)&typed_local)` is how every acquire-a-buffer
+    interface is spelled. The old model needed a cell view to carry a
+    `ref (ref T)` across to a `ref core_ref`; under Palow both slots are a
+    `ptr`, so the only thing in the way was the cast, which hid the
+    local's address from the `_out` argument and was refused as "not
+    unwritten storage". A cast is now looked through when the storage it
+    claims has the slot's own Palow type, and nowhere else. What the
+    acquired buffer means is still the callee's `_ensures`: a local whose
+    address a callee with hand-written ownership was handed is
+    dereferenced on the same terms as one a ghost statement names, leaving
+    F* to find the points-to the callee's words grant.
+    `test/core_ref_out_cell` acquires, reads and releases such a buffer;
+    `test/core_ref_out_cell_bad` is the refusal of a cast claiming another
+    Palow type (`(uint32_t *)&int32_local`, `(char **)&int_local`) and of
+    a local array's address.
