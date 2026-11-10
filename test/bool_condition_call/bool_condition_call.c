@@ -57,3 +57,16 @@ uint16_t walk(struct holder h)
     }
     return n;
 }
+
+/* `advance`'s result is a term over the cursor's new value. Stored in a local
+ * in one arm of an `if`, it must not tie the local to that value, or the join
+ * separates the cursor's points-to from its ownership. */
+bool step(struct cursor *c, bool go)
+  _requires(c->pos <= c->len)
+{
+    bool more = false;
+    if (go) {
+        more = advance(c);
+    }
+    return more;
+}

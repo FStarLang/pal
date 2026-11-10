@@ -2431,6 +2431,10 @@ struct FnSurface {
     /// `rewrites_to`, which is what lets Pulse read a call to this function
     /// in a specification as a term.
     determined: bool,
+    /// Whether that `rewrites_to` names one of the postcondition's own
+    /// witnesses, so that a call's result *is* a term over values the caller
+    /// only knows existentially. See `Body::store`.
+    determined_by_witness: bool,
     /// Whether the emitted precondition is trivial: no `preserves`, every
     /// `requires` is `emp`, and no implicit binders. Pulse reads a call in a
     /// specification without checking the callee's precondition, so only a
@@ -6639,6 +6643,10 @@ fn emit_fn(
             && (!(req_slprops.is_empty() && ens_slprops.is_empty()) || refine_own_spliced.take()),
         contract: contract_ok,
         determined: !post_rewrites.is_empty(),
+        determined_by_witness: post_rewrites.iter().any(|r| {
+            r.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
+                .any(|w| fresh.iter().any(|(b, _, _)| b == w))
+        }),
         trivial_pre,
         fp,
         fp_wits: wits.len(),
@@ -11419,6 +11427,7 @@ pub fn emit_palow(
                 },
                 void: matches!(tds.resolve(&fndecl.ret_type).val, TypeT::Void),
                 contract: sig.contract,
+                determined_by_witness: sig.determined_by_witness,
                 // Pulse reads such a call in a specification as the term its
                 // `rewrites_to` names, and checks none of the callee's
                 // precondition while doing so. So the callee must have none:
@@ -12320,6 +12329,9 @@ struct Callee {
     /// were not its specification says only what memory comes back, and a
     /// caller that has a contract of its own has nothing to prove it with.
     contract: bool,
+    /// Whether the callee's `rewrites_to` names a postcondition witness. See
+    /// `Body::store`.
+    determined_by_witness: bool,
     /// Whether a call to this function may stand in a specification. See
     /// `Body::inline`.
     spec_call: bool,
@@ -12561,6 +12573,9 @@ struct Body<'a> {
     /// the value the callee's postcondition binds, so the term that was
     /// seeded is no longer the term to put down.
     laundered: HashSet<String>,
+    /// The temporaries bound to the results of calls whose `rewrites_to`
+    /// names a postcondition witness. See `store`.
+    witness_results: HashSet<String>,
     /// The functions whose validity this function's `ensures` hands on. One of
     /// these is not the body's to put down on the way out.
     post_valid: &'a HashSet<String>,
@@ -17508,6 +17523,13 @@ impl<'a> Body<'a> {
                 let outer_own = std::mem::take(&mut self.own_open);
                 let call = self.call(name, args)?;
                 self.lines.push(format!("let {} = {};", t, call));
+                if self
+                    .callees
+                    .get(&*name.val.to_string())
+                    .is_some_and(|c| c.determined_by_witness)
+                {
+                    self.witness_results.insert(t.clone());
+                }
                 // A validity seeded while evaluating the arguments was seeded
                 // for this call. The callee hands it back -- it is a fact, not
                 // a resource anyone consumes -- so it has to be put down here
@@ -19785,6 +19807,24 @@ impl<'a> Body<'a> {
     /// Store into an lvalue, choosing the initialising store when the target
     /// is a slot that has not been written yet.
     fn store(&mut self, lhs: &Expr, pn: &str, value: &str) -> Result<(), String> {
+        // A call whose `rewrites_to` names its postcondition's witnesses
+        // returns a value that is a term over them. Stored as it is, the
+        // memory's points-to would mention those witnesses too, and when the
+        // store sits in one arm of an `if` Pulse's join abstracts the
+        // witnesses apart from the ownership they also index -- the object's
+        // points-to and its deep ownership come out at two different values.
+        // A copy under a fresh name, equal by an ordinary `pure`, keeps the
+        // stored value out of that.
+        if self.inlining == 0
+            && value
+                .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
+                .any(|w| self.witness_results.contains(w))
+        {
+            let t = self.fresh("copy");
+            self.lines
+                .push(format!("let {} = value_copy {};", t, value));
+            return self.store(lhs, pn, &t);
+        }
         if !matches!(lhs.val, ExprT::Var(_)) {
             self.union_values.clear();
         }
@@ -24202,6 +24242,7 @@ fn emit_body(
         divergent: false,
         seeded: Vec::new(),
         laundered: HashSet::new(),
+        witness_results: HashSet::new(),
         post_valid: &sig.post_valid,
         ret_spliced: sig.ret_spliced,
         gotos: Vec::new(),
