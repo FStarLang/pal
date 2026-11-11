@@ -82,6 +82,11 @@ val range_unchanged_in (c: bytes) (s e: nat) (b2: bytes) (i j k l: nat)
           (ensures  slice c k l == slice b2 (k - s) (l - s))
           [SMTPat (range_unchanged (slice c s e) b2 i j); SMTPat (slice c k l)]
 
+(* A witness of a property known to have one, for ghost code: how the load
+   of an island picks the member value its bytes are the representation of. *)
+val ov_pick (#t: Type) (q: t -> prop)
+  : Ghost (erased t) (requires exists v. q v) (ensures fun v -> q (reveal v))
+
 (* What putting a member's bytes back in front of the rest of the union is. *)
 val append_overlay (u: bytes) (c: bytes { len c <= len u })
   : Lemma (append c (slice u (len c) (len u)) == overlay u 0 c 0)

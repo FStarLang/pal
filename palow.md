@@ -1464,9 +1464,19 @@ modelled instead as its bytes:
   so such a union keeps its tagged model everywhere, and a field of it inside
   an overlay is an *island*: its type there is `union_U__island`, a member-less
   overlay union of the same size and alignment, i.e. the field's bytes, which
-  the view does not look into. Code that reads or writes an island field
-  inside an overlay is rejected (a whole-value use of an overlay union, or a
-  member it does not have); `_unchanged` of it works as for any region.
+  the view does not look into. An island is loaded and stored whole, as a
+  value of `U`'s tagged type, when `U`'s first member can be read whole
+  (`union_U__island_load`/`_store` at an offset into bytes, and
+  `union_U__island_read`/`_write` on an island object of its own, for a
+  field reached through a pointer to its struct). A load needs
+  `union_U__island_readable b` -- the bytes are a representation of a `U`
+  whose first member is live, which a contract writes
+  `s.Field.M0._active` -- and returns that value; a store writes some
+  representation of the value (what the padding gets is not said) and no
+  other byte, so the other views' fields keep theirs. The outer overlay
+  union's `union_V_union_U__island_read`/`_write` do the same at a constant
+  offset. Reading a member of an island, or an island whose first member
+  holds a union, is rejected; `_unchanged` of it works as for any region.
   Members of an overlay union may be structs, unions, scalars (with the same
   `is`/`get`/`focus` functions as a struct member) or integer arrays (whose
   elements are reached by the scalar accessors below, at constant
@@ -1520,8 +1530,9 @@ claimed not to change `Generic.Parameters[8]`, which it overlaps),
 pointer, `bool` and `size_t` leaves; a lower layer whose parameter area is
 an anonymous union of byte arrays the upper layer stores pointers into, and
 which promises it `_unchanged`; a nested union with a scalar member; an
-island, a named union also returned by value; an array of one-byte
-bit-field structs);
+island, a named union also returned by value, loaded and stored whole both
+through a pointer to its struct and through the outer overlay; an array of
+one-byte bit-field structs);
 `overlay_union_unchanged_bad` (a store into a region promised `_unchanged`).
 
 Limitations:

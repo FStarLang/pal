@@ -160,3 +160,31 @@ void Lower_Reset(LOWER_REQUEST* Request)
 {
     Request->Common.Length = 0;
 }
+
+/* An island loaded and stored whole, the way a status is saved and replaced:
+   the store changes the island's bytes and no others. */
+CODE_PLUS Lower_SwapSaved(LOWER_REQUEST* Request, CODE_PLUS Code)
+    _requires(Request->Saved.Status._active)
+    _ensures(Request->Common.Length == _old(Request->Common.Length))
+    _ensures(_unchanged(Request->Parameters))
+    _ensures(_unchanged(Request->Result))
+    _ensures(_unchanged(Request->Stack))
+{
+    CODE_PLUS prev = Request->Saved;
+    Request->Saved = Code;
+    return prev;
+}
+
+/* The same through the outer overlay: the other view's fields survive. */
+CODE_PLUS Upper_SwapSaved(UPPER_REQUEST* Request, CODE_PLUS Code)
+    _requires(Request->Lower.Saved.Status._active)
+    _requires(Request->Params._active && Request->Lower._active)
+    _ensures(Request->Params._active)
+    _ensures(Request->Params.Cursor == _old(Request->Params.Cursor))
+    _ensures(Request->Params.Count == _old(Request->Params.Count))
+    _ensures(_unchanged(Request->Lower.Common))
+{
+    CODE_PLUS prev = Request->Lower.Saved;
+    Request->Lower.Saved = Code;
+    return prev;
+}

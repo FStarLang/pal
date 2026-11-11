@@ -56,6 +56,10 @@ let range_unchanged_in (c: bytes) (s e: nat) (b2: bytes) (i j k l: nat)
   = range_unchanged_sub (slice c s e) b2 i j (k - s) (l - s);
     slice_slice c s e (k - s) (l - s)
 
+let ov_pick #t q =
+  let v = FStar.IndefiniteDescription.indefinite_description_ghost t q in
+  hide v
+
 let append_overlay (u: bytes) (c: bytes { len c <= len u })
   : Lemma (append c (slice u (len c) (len u)) == overlay u 0 c 0)
   = Seq.lemma_eq_intro (append c (slice u (len c) (len u))) (overlay u 0 c 0)

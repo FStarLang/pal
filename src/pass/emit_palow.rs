@@ -1243,6 +1243,9 @@ struct UnionInfo {
     /// For an overlay union, the integer types that have a byte-level read
     /// and write at a constant offset (`union_X_<int>_read`/`_write`).
     ints: Vec<String>,
+    /// For an overlay union, the islands among its leaves that are loaded and
+    /// stored whole (`union_X_union_I_read`/`_write`), by their C names.
+    islands: Vec<String>,
 }
 
 struct Typedefs<'a> {
@@ -3852,6 +3855,18 @@ impl<'a> Spec<'a> {
                         describe(self.tds.resolve(&uty))
                     ));
                 };
+                if let Some(orig) = u.val.strip_suffix("__island") {
+                    return match island_member(self.tds, orig) {
+                        Some((m0, _)) if *m0 == *m.val => {
+                            Ok(format!("(union_{}_active {})", u.val, self.value(obj, w)?))
+                        }
+                        _ => Err(format!(
+                            "`_active` on member `{}` of `{}` inside an overlay; only the \
+                             member a whole value is loaded through can be asked about",
+                            m.val, orig
+                        )),
+                    };
+                }
                 if is_overlay(self.tds, &u.val) {
                     return Ok(format!(
                         "(union_{}_active_{} {})",
@@ -7497,6 +7512,7 @@ fn collect_union(
             align,
             overlay: false,
             ints: Vec::new(),
+            islands: Vec::new(),
         },
     );
     Chunk {
@@ -7719,6 +7735,29 @@ fn island_name(u: &str) -> String {
     format!("{}__island", u)
 }
 
+/// The islands found among the fields of a struct that has an overlay view,
+/// or of an overlay union, by the C names of the unions they are twins of.
+fn view_islands(tds: &Typedefs, ty: &Type, out: &mut BTreeSet<String>) {
+    let ty = flat_array(tds, ty).map_or(ty, |(e, _)| e);
+    match &peel(tds, ty).val {
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+            if let Some(si) = tds.structs.get(&*n.val) {
+                for f in &si.fields {
+                    view_islands(tds, &f.ty, out);
+                }
+            }
+        }
+        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+            if let Some(orig) = n.val.strip_suffix("__island") {
+                out.insert(orig.to_string());
+            } else if let Some(ui) = tds.unions.get(&*n.val) {
+                out.extend(ui.islands.iter().cloned());
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The scalar types found among the leaves of a struct that has an overlay
 /// view, or of an overlay union.
 fn view_ints(tds: &Typedefs, ty: &Type, out: &mut BTreeSet<String>) {
@@ -7891,13 +7930,121 @@ fn collect_island(
             align: l.align,
             overlay: true,
             ints: Vec::new(),
+            islands: Vec::new(),
         },
     );
+    let mut code = emit_overlay_union(tds, &name);
+    code += &emit_island_access(tds, &ud.name.val);
     Some(Chunk {
         module: format!("Union_{}", name),
-        code: emit_overlay_union(tds, &name),
+        code,
         origin: None,
     })
+}
+
+/// The member an island is loaded through: the first one, when its value can
+/// be read whole with nothing to choose inside it (`value_read_guard`).
+fn island_member(tds: &Typedefs, u: &str) -> Option<(String, String)> {
+    let ui = tds.unions.get(u).filter(|ui| !ui.overlay)?;
+    let m = ui.members.first()?;
+    if !matches!(m.shape, FieldShape::One { .. })
+        || value_reader(tds, &m.ty).is_none()
+        || value_read_guard(tds, &m.ty, "v").is_some()
+    {
+        return None;
+    }
+    Some((m.name.clone(), field_type(tds, &m.ty)?))
+}
+
+/// The whole-value load and store of an island at a constant offset into an
+/// overlay's bytes. What a store writes is a representation of the value --
+/// which bytes the padding gets is not said -- and nothing else; a load needs
+/// the bytes to be a representation of a value of the first member, which is
+/// the member the tagged model reads a whole value through.
+fn emit_island_access(tds: &Typedefs, u: &str) -> String {
+    let Some((m0, t0)) = island_member(tds, u) else {
+        return String::new();
+    };
+    let ui = &tds.unions[u];
+    let (n, al) = (ui.size, ui.align);
+    let un = format!("union_{}", u);
+    let isl = format!("union_{}", island_name(u));
+    let k = format!("Union_{}_{}", u, m0);
+    let sl = format!("(slice u (SizeT.v o) (SizeT.v o + {n}))");
+    format!(
+        "(* The bytes are those of a `{u}` whose `{m0}` is live: what a whole-value\n   \
+         load of the island needs. *)\n\
+         let {isl}_readable (b: bytes) : prop = exists (v: {t0}). {un}_repr ({k} v) b\n\n\
+         let {isl}_active (b: bytes) : GTot (r: bool {{ r = true <==> {isl}_readable b }}) =\n  \
+         FStar.IndefiniteDescription.strong_excluded_middle ({isl}_readable b)\n\n\
+         fn {isl}_load (a: ptr) (al: SizeT.t) (o: SizeT.t) (#p: perm) (#u: erased bytes)\n\
+         \x20 preserves mem_pts_to a p u\n\
+         \x20 requires pure (SizeT.v o + {n} <= len u /\\ SizeT.fits (SizeT.v o + {n}) /\\ aligned a al /\\\n\
+         \x20                SizeT.v al % {al} == 0 /\\ SizeT.v o % {al} == 0 /\\ {isl}_readable {sl})\n\
+         \x20 returns  x : {un}\n\
+         \x20 ensures  pure (SizeT.v o + {n} <= len u /\\ {k}? x /\\ {un}_repr x {sl})\n\
+         {{\n  \
+         mem_carve a o {n}sz;\n  \
+         assert_norm (pow2 32 % {al} == 0);\n  \
+         aligned_field a al o {un}_alignof;\n  \
+         mem_share (a +! o);\n  \
+         let w = ov_pick (fun (v: {t0}) -> {un}_repr ({k} v) {sl});\n  \
+         {un}_conceal (a +! o) #(p /. 2.0R) #{sl} #({k} (reveal w));\n  \
+         let x = {un}_{m0}_read (a +! o);\n  \
+         {un}_reveal (a +! o);\n  \
+         mem_gather (a +! o) #(p /. 2.0R) #(p /. 2.0R) #{sl};\n  \
+         rewrite (mem_pts_to (a +! o) (p /. 2.0R +. p /. 2.0R) {sl})\n       \
+         as (mem_pts_to (a +! o) p {sl});\n  \
+         mem_uncarve a o {n}sz;\n  \
+         x\n}}\n\n\
+         fn {isl}_store (a: ptr) (al: SizeT.t) (o: SizeT.t) (x: {un}) (#u: erased bytes)\n\
+         \x20 requires mem_pts_to a 1.0R u\n\
+         \x20 requires pure (SizeT.v o + {n} <= len u /\\ SizeT.fits (SizeT.v o + {n}) /\\ aligned a al /\\\n\
+         \x20                SizeT.v al % {al} == 0 /\\ SizeT.v o % {al} == 0)\n\
+         \x20 ensures  exists* (c: bytes). mem_pts_to a 1.0R (overlay u 0 c (SizeT.v o))\n\
+         \x20            ** pure (len c == {n} /\\ {un}_repr x c)\n\
+         {{\n  \
+         mem_carve a o {n}sz;\n  \
+         assert_norm (pow2 32 % {al} == 0);\n  \
+         aligned_field a al o {un}_alignof;\n  \
+         {un}_claim_uninit (a +! o) #{sl};\n  \
+         {un}_write_uninit (a +! o) x;\n  \
+         {un}_reveal (a +! o);\n  \
+         with c. assert (mem_pts_to (a +! o) 1.0R c);\n  \
+         {un}_repr_len x c;\n  \
+         mem_uncarve a o {n}sz #c;\n}}\n\n\
+         (* The same, where the island is an object of its own: a field reached\n   \
+         through a pointer to the struct rather than through the overlay. *)\n\
+         fn {isl}_read (a: ptr) (#p: perm) (#u: erased {isl})\n\
+         \x20 preserves {isl}_pts_to a p u\n\
+         \x20 requires pure ({isl}_readable u)\n\
+         \x20 returns  x : {un}\n\
+         \x20 ensures  pure ({k}? x /\\ {un}_repr x u)\n\
+         {{\n  \
+         unfold {isl}_pts_to a p u;\n  \
+         mem_share a;\n  \
+         let w = ov_pick (fun (v: {t0}) -> {un}_repr ({k} v) u);\n  \
+         {un}_conceal a #(p /. 2.0R) #(reveal u) #({k} (reveal w));\n  \
+         let x = {un}_{m0}_read a;\n  \
+         {un}_reveal a;\n  \
+         mem_gather a #(p /. 2.0R) #(p /. 2.0R) #(reveal u);\n  \
+         rewrite (mem_pts_to a (p /. 2.0R +. p /. 2.0R) u) as (mem_pts_to a p u);\n  \
+         fold {isl}_pts_to a p u;\n  \
+         x\n}}\n\n\
+         fn {isl}_write (a: ptr) (x: {un}) (#u: erased {isl})\n\
+         \x20 requires {isl}_pts_to a 1.0R u\n\
+         \x20 ensures  exists* (c: {isl}). {isl}_pts_to a 1.0R c ** pure ({un}_repr x c)\n\
+         {{\n  \
+         unfold {isl}_pts_to a 1.0R u;\n  \
+         {un}_claim_uninit a #(reveal u);\n  \
+         {un}_write_uninit a x;\n  \
+         {un}_reveal a;\n  \
+         with c. assert (mem_pts_to a 1.0R c);\n  \
+         {un}_repr_len x c;\n  \
+         let c' : erased {isl} = hide #{isl} c;\n  \
+         rewrite (mem_pts_to a 1.0R c) as (mem_pts_to a 1.0R (reveal c'));\n  \
+         fold {isl}_pts_to a 1.0R (reveal c');\n}}\n\n"
+    )
 }
 
 /// An `_overlay` union: every member has to be a struct with an overlay view
@@ -7916,6 +8063,7 @@ fn collect_overlay_union(
     };
     let mut members = Vec::new();
     let mut ints: BTreeSet<String> = BTreeSet::new();
+    let mut islands: BTreeSet<String> = BTreeSet::new();
     for f in &ud.fields {
         let mname = f.val.name().val.to_string();
         let mty = f.val.logical_type(&f.loc);
@@ -7987,6 +8135,7 @@ fn collect_overlay_union(
             return skip(format!("member `{}` has no Palow type", mname));
         };
         view_ints(tds, &mty, &mut ints);
+        view_islands(tds, &mty, &mut islands);
         members.push(UnionMember {
             name: mname,
             ty: mty,
@@ -8004,6 +8153,10 @@ fn collect_overlay_union(
         .into_iter()
         .filter(|t| ov_leaf(tds, t).is_some_and(|l| align % l.size == 0))
         .collect();
+    let islands = islands
+        .into_iter()
+        .filter(|u| island_member(tds, u).is_some() && align % tds.unions[u.as_str()].align == 0)
+        .collect();
     tds.unions.insert(
         name.clone(),
         UnionInfo {
@@ -8012,6 +8165,7 @@ fn collect_overlay_union(
             align,
             overlay: true,
             ints,
+            islands,
         },
     );
     Chunk {
@@ -8226,6 +8380,41 @@ fn emit_overlay_union(tds: &Typedefs, name: &str) -> String {
              SizeT.fits_at_least_16 (SizeT.v o + {n});\n  \
              ov_{t}_write a {un}_alignof o x;\n  \
              fold {un}_pts_to a 1.0R (overlay u 0 ({t}_bytes x) (SizeT.v o));\n}}\n\n"
+        );
+    }
+    for i in &ui.islands {
+        let il = &tds.unions[i.as_str()];
+        let (n, al) = (il.size, il.align);
+        let tun = format!("union_{}", i);
+        let isl = format!("union_{}", island_name(i));
+        let (m0, _) = island_member(tds, i).unwrap();
+        let k = format!("Union_{}.Union_{}_{}", i, i, m0);
+        let sl = format!("(slice u (SizeT.v o) (SizeT.v o + {n}))");
+        c += &format!(
+            "(* A whole `{i}` at byte `o`, an island in the bytes. *)\n\
+             fn {un}_{isl}_read (a: ptr) (o: SizeT.t) (#p: perm) (#u: erased {un})\n\
+             \x20 preserves {un}_pts_to a p u\n\
+             \x20 requires pure (SizeT.v o + {n} <= {n_all} /\\ SizeT.v o % {al} == 0 /\\\n\
+             \x20                {isl}_readable {sl})\n\
+             \x20 returns  x : {tun}\n\
+             \x20 ensures  pure (SizeT.v o + {n} <= {n_all} /\\ {k}? x /\\ {tun}_repr x {sl})\n\
+             {{\n  \
+             unfold {un}_pts_to a p u;\n  \
+             SizeT.fits_at_least_16 (SizeT.v o + {n});\n  \
+             let x = {isl}_load a {un}_alignof o;\n  \
+             fold {un}_pts_to a p u;\n  \
+             x\n}}\n\n\
+             fn {un}_{isl}_write (a: ptr) (o: SizeT.t) (x: {tun}) (#u: erased {un})\n\
+             \x20 requires {un}_pts_to a 1.0R u\n\
+             \x20 requires pure (SizeT.v o + {n} <= {n_all} /\\ SizeT.v o % {al} == 0)\n\
+             \x20 ensures  exists* (c: bytes). {un}_pts_to a 1.0R (overlay u 0 c (SizeT.v o))\n\
+             \x20            ** pure (len c == {n} /\\ {tun}_repr x c)\n\
+             {{\n  \
+             unfold {un}_pts_to a 1.0R u;\n  \
+             SizeT.fits_at_least_16 (SizeT.v o + {n});\n  \
+             {isl}_store a {un}_alignof o x;\n  \
+             with c. assert (mem_pts_to a 1.0R (overlay u 0 c (SizeT.v o)));\n  \
+             fold {un}_pts_to a 1.0R (overlay u 0 c (SizeT.v o));\n}}\n\n"
         );
     }
     // The storage layer every type publishes, so that an overlay union can be
@@ -15245,8 +15434,22 @@ impl<'a> Body<'a> {
         let Some(pn) = palow_name(self.tds, &ety) else {
             return Ok(None);
         };
-        let Some(OvLeaf { size: n, .. }) = ov_leaf(self.tds, &pn) else {
-            return Ok(None);
+        // An island is loaded and stored whole, aligned as its union is.
+        let island = match &peel(self.tds, &ety).val {
+            TypeT::TypeRef(TypeRefKind::Union(u)) => u
+                .val
+                .strip_suffix("__island")
+                .filter(|o| island_member(self.tds, o).is_some())
+                .map(|o| o.to_string()),
+            _ => None,
+        };
+        let (n, al) = match (&island, ov_leaf(self.tds, &pn)) {
+            (Some(o), _) => (
+                self.tds.unions[o.as_str()].size,
+                self.tds.unions[o.as_str()].align,
+            ),
+            (None, Some(OvLeaf { size, .. })) => (size, size),
+            (None, None) => return Ok(None),
         };
         // Walk up the path, adding up offsets, and remember the outermost
         // overlay union seen with the offset into it.
@@ -15302,7 +15505,11 @@ impl<'a> Body<'a> {
             return Ok(None);
         };
         let ui = &self.tds.unions[&uname];
-        if !ui.ints.contains(&pn) || o % n != 0 || o + n > ui.size {
+        let known = match &island {
+            Some(i) => ui.islands.contains(i),
+            None => ui.ints.contains(&pn),
+        };
+        if !known || o % al != 0 || o + n > ui.size {
             return Err(format!(
                 "a {} at byte {} of the overlay union `{}`, which it has no aligned access for",
                 pn, o, uname
@@ -18202,7 +18409,7 @@ impl<'a> Body<'a> {
                 };
                 let f = self.access(e, false)?;
                 self.lines.extend(f.open_read.iter().cloned());
-                let t = if self.union_of(e).is_some() {
+                let t = if self.union_of(e).is_some() && !f.pn.ends_with("__island") {
                     self.read_union_value(e, &f.at, &hint)?
                 } else {
                     let t = self.fresh(&hint);
