@@ -14883,14 +14883,20 @@ impl<'a> Body<'a> {
                 }
                 ExprT::Index(b, i) => {
                     let Ok(bty) = self.ty_of(b) else { break };
-                    if !matches!(peel(self.tds, &bty).val, TypeT::FixedArray(..)) {
-                        break;
-                    }
-                    let (Some(k), Some((et, _))) =
-                        (const_index(&i.val), flat_array(self.tds, &bty))
-                    else {
+                    // The direct element type, not the flattened one: the
+                    // outer subscript of `a[i][j]` steps over whole rows.
+                    let TypeT::FixedArray(et, len) = &peel(self.tds, &bty).val else {
                         break;
                     };
+                    let Some(k) = const_index(&i.val) else {
+                        break;
+                    };
+                    if k >= *len {
+                        return Err(format!(
+                            "subscript {} is out of bounds of an array of {} elements",
+                            k, len
+                        ));
+                    }
                     let Some(es) = palow_sizeof(self.tds, et) else {
                         break;
                     };

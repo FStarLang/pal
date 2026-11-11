@@ -104,3 +104,17 @@ void Mount_Complete(MOUNT_REQUEST* Request)
 {
     Generic_Complete(&Request->Generic);
 }
+
+/* The outer subscript of a two-dimensional array steps over whole rows:
+   `P[1][0]` is byte 4, not byte 1. */
+typedef struct _ROWS { uint8_t P[2][4]; } ROWS;
+typedef struct _FLAT { uint8_t Q[8]; } FLAT;
+typedef union _overlay _GRID { ROWS Rows; FLAT Flat; } GRID;
+
+void Grid_Set(GRID* g)
+    _requires(g->Flat._active)
+    _ensures(g->Flat.Q[4] == 7)
+    _ensures(g->Flat.Q[1] == _old(g->Flat.Q[1]))
+{
+    g->Rows.P[1][0] = 7;
+}

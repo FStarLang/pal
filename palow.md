@@ -1466,15 +1466,18 @@ What is rejected:
   union. C11 6.2.6.1p7 leaves the bytes of other members unspecified after a
   member store, so the frame property cannot be claimed; write fields instead.
 - Reading a field whose bytes were never written (`overlay_union_unread_bad`).
+- A constant subscript past the end of its array, even when its bytes are
+  inside the union (`overlay_union_oob_bad`).
 
 Tests: `overlay_union` (scalar stores through three views of a layered
 request, each keeping the fields of the others that it does not overlap; a
 constant subscript into a byte array; lending an arm to a callee, including
 one whose contract promises a byte array back element by element, after which
-the fields of other views stored in those bytes are still known);
+the fields of other views stored in those bytes are still known; a
+two-dimensional subscript, whose outer index steps over whole rows);
 `overlay_union_unread_bad`, `overlay_union_clobber_bad` (a store into `Params`
 claimed not to change `Generic.Parameters[8]`, which it overlaps),
-`overlay_union_whole_bad`.
+`overlay_union_whole_bad`, `overlay_union_2d_bad`, `overlay_union_oob_bad`.
 
 Limitations:
 
