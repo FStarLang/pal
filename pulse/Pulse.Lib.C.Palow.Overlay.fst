@@ -5,6 +5,7 @@ module Pulse.Lib.C.Palow.Overlay
 #lang-pulse
 open Pulse
 open Pulse.Lib.C.Palow.Bytes
+open Pulse.Lib.C.Palow.Encoding
 open Pulse.Lib.C.Palow.Ptr
 open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Scalar
@@ -24,6 +25,7 @@ module I16 = FStar.Int16
 module I32 = FStar.Int32
 module I64 = FStar.Int64
 module M = FStar.Math.Lemmas
+module T = Pulse.Lib.C.Palow.Target
 
 let slice_slice (b: bytes) (i: nat) (j: nat { i <= j /\ j <= len b })
                 (k: nat) (l: nat { k <= l /\ l <= j - i })
@@ -40,6 +42,23 @@ let overlay_slice (b: bytes) (o: nat) (n: nat { o + n <= len b })
   : Lemma (overlay b 0 (slice b o (o + n)) o == b)
           [SMTPat (overlay b 0 (slice b o (o + n)) o)]
   = overlay_self b o n
+
+let range_unchanged_sub (b1 b2: bytes) (i j k l: nat)
+  : Lemma (requires range_unchanged b1 b2 i j /\ i <= k /\ k <= l /\ l <= j)
+          (ensures  slice b1 k l == slice b2 k l)
+  = slice_slice b1 i j (k - i) (l - i);
+    slice_slice b2 i j (k - i) (l - i)
+
+let range_unchanged_in (c: bytes) (s e: nat) (b2: bytes) (i j k l: nat)
+  : Lemma (requires s <= e /\ e <= len c /\ range_unchanged (slice c s e) b2 i j /\
+                    s + i <= k /\ k <= l /\ l <= s + j)
+          (ensures  slice c k l == slice b2 (k - s) (l - s))
+  = range_unchanged_sub (slice c s e) b2 i j (k - s) (l - s);
+    slice_slice c s e (k - s) (l - s)
+
+let ov_pick #t q =
+  let v = FStar.IndefiniteDescription.indefinite_description_ghost t q in
+  hide v
 
 let append_overlay (u: bytes) (c: bytes { len c <= len u })
   : Lemma (append c (slice u (len c) (len u)) == overlay u 0 c 0)
@@ -146,6 +165,29 @@ let array_repr_view (#t: Type) (t_repr: t -> bytes -> prop) (esize: pos) (n: nat
     in
     FStar.Classical.forall_intro aux2;
     Seq.lemma_eq_intro (array_view esize n f b) xs
+
+let array_view_g_repr #t t_repr esize n ok f lem b
+  = reveal_opaque (`%array_view_ok) (array_view_ok esize n ok b);
+    reveal_opaque (`%array_view_g) (array_view_g esize n f b);
+    let xs = array_view_g esize n f b in
+    let aux (i: nat { i < Seq.length xs }) : Lemma (t_repr (Seq.index xs i) (elem_bytes esize b i)) =
+      elem_in esize n i;
+      lem (slice b (esize * i) (esize * i + esize))
+    in
+    FStar.Classical.forall_intro aux;
+    array_repr_o_eq t_repr esize xs b
+
+let array_repr_view_g #t t_repr esize n ok f lem xs b
+  = reveal_opaque (`%array_view_ok) (array_view_ok esize n ok b);
+    reveal_opaque (`%array_view_g) (array_view_g esize n f b);
+    array_repr_o_eq t_repr esize xs b;
+    let aux (i: nat { i < n }) : Lemma (ok (slice b (esize * i) (esize * i + esize)) /\
+                                       Seq.index (array_view_g esize n f b) i == Seq.index xs i) =
+      elem_in esize n i;
+      lem (Seq.index xs i) (slice b (esize * i) (esize * i + esize))
+    in
+    FStar.Classical.forall_intro aux;
+    Seq.lemma_eq_intro (array_view_g esize n f b) xs
 
 let uint8_t_view_repr (b: bytes)
   : Lemma (requires plain b /\ len b == 1) (ensures uint8_t_repr (uint8_t_of_bytes b) b)
@@ -553,4 +595,176 @@ fn ov_int64_t_write (a: ptr) (al: SZ.t) (o: SZ.t) (x: I64.t) (#u: erased bytes)
   int64_t_write_uninit (a +! o) x;
   int64_t_to_mem (a +! o);
   mem_uncarve a o 8sz;
+}
+
+(* bool *)
+let bool_t_view_repr (b: bytes)
+  : Lemma (requires bool_t_view_ok b) (ensures bool_t_repr (bool_t_of_bytes b) b)
+  = encode_decode b
+
+let bool_t_repr_view (x: bool) (b: bytes)
+  : Lemma (requires bool_t_repr x b) (ensures bool_t_view_ok b /\ bool_t_of_bytes b == x)
+  = decode_encode_exact 1 None (if x then 1 else 0)
+
+let bool_t_of_bytes_bytes (x: bool)
+  : Lemma (bool_t_view_ok (bool_t_bytes x) /\ bool_t_of_bytes (bool_t_bytes x) == x)
+  = bool_t_repr_view x (bool_t_bytes x)
+
+fn ov_bool_t_read (a: ptr) (al: SZ.t) (o: SZ.t) (#p: perm) (#u: erased bytes)
+  preserves mem_pts_to a p u
+  requires pure (SZ.v o + 1 <= len u /\ SZ.fits (SZ.v o + 1) /\ aligned a al /\
+                 bool_t_view_ok (slice u (SZ.v o) (SZ.v o + 1)))
+  returns  x : bool
+  ensures  pure (SZ.v o + 1 <= len u /\ x == bool_t_of_bytes (slice u (SZ.v o) (SZ.v o + 1)))
+{
+  mem_carve a o 1sz;
+  let c = Ghost.hide (slice u (SZ.v o) (SZ.v o + 1));
+  bool_t_view_repr c;
+  bool_t_conceal (a +! o) #p #c #(bool_t_of_bytes c);
+  let x = bool_t_read (a +! o);
+  bool_t_reveal (a +! o);
+  with c'. assert (mem_pts_to (a +! o) p c');
+  rewrite (mem_pts_to (a +! o) p c') as (mem_pts_to (a +! o) p c);
+  mem_uncarve a o 1sz;
+  rewrite (mem_pts_to a p (overlay u 0 c (SZ.v o))) as (mem_pts_to a p u);
+  x
+}
+
+fn ov_bool_t_write (a: ptr) (al: SZ.t) (o: SZ.t) (x: bool) (#u: erased bytes)
+  requires mem_pts_to a 1.0R u
+  requires pure (SZ.v o + 1 <= len u /\ SZ.fits (SZ.v o + 1) /\ aligned a al)
+  ensures  mem_pts_to a 1.0R (overlay u 0 (bool_t_bytes x) (SZ.v o))
+{
+  mem_carve a o 1sz;
+  bool_t_claim_uninit (a +! o);
+  bool_t_write_uninit (a +! o) x;
+  bool_t_reveal (a +! o);
+  with c'. assert (mem_pts_to (a +! o) 1.0R c');
+  rewrite (mem_pts_to (a +! o) 1.0R c') as (mem_pts_to (a +! o) 1.0R (bool_t_bytes x));
+  mem_uncarve a o 1sz;
+}
+
+(* size_t *)
+let size_t_of_bytes (b: bytes) : SZ.t =
+  if bytes_nat b < T.addr_limit then SZ.uint_to_t (bytes_nat b) else 0sz
+
+let size_t_view_repr (b: bytes)
+  : Lemma (requires plain b /\ len b == SZ.v size_t_sizeof)
+          (ensures  size_t_repr (size_t_of_bytes b) b)
+  = encode_decode b; T.addr_limit_pow2 ()
+
+let size_t_repr_view (x: SZ.t) (b: bytes)
+  : Lemma (requires size_t_repr x b)
+          (ensures  plain b /\ len b == SZ.v size_t_sizeof /\ size_t_of_bytes b == x)
+  = size_t_repr_no_prov x b;
+    T.addr_limit_pow2 ();
+    decode_encode_exact (SZ.v size_t_sizeof) None (SZ.v x)
+
+let size_t_of_bytes_bytes (x: SZ.t)
+  : Lemma (plain (size_t_bytes x) /\ size_t_of_bytes (size_t_bytes x) == x)
+  = size_t_repr_view x (size_t_bytes x)
+
+fn ov_size_t_read (a: ptr) (al: SZ.t) (o: SZ.t) (#p: perm) (#u: erased bytes)
+  preserves mem_pts_to a p u
+  requires pure (SZ.v o + SZ.v size_t_sizeof <= len u /\ SZ.fits (SZ.v o + SZ.v size_t_sizeof) /\
+                 aligned a al /\ SZ.v al % SZ.v size_t_sizeof == 0 /\
+                 SZ.v o % SZ.v size_t_sizeof == 0 /\
+                 plain (slice u (SZ.v o) (SZ.v o + SZ.v size_t_sizeof)))
+  returns  x : SZ.t
+  ensures  pure (SZ.v o + SZ.v size_t_sizeof <= len u /\
+                 x == size_t_of_bytes (slice u (SZ.v o) (SZ.v o + SZ.v size_t_sizeof)))
+{
+  mem_carve a o size_t_sizeof;
+  assert_norm (pow2 32 % 8 == 0 /\ pow2 32 % 4 == 0);
+  aligned_field a al o size_t_alignof;
+  let c = Ghost.hide (slice u (SZ.v o) (SZ.v o + SZ.v size_t_sizeof));
+  size_t_view_repr c;
+  size_t_conceal (a +! o) #p #c #(size_t_of_bytes c);
+  let x = size_t_read (a +! o);
+  size_t_reveal (a +! o);
+  with c'. assert (mem_pts_to (a +! o) p c');
+  rewrite (mem_pts_to (a +! o) p c') as (mem_pts_to (a +! o) p c);
+  mem_uncarve a o size_t_sizeof;
+  rewrite (mem_pts_to a p (overlay u 0 c (SZ.v o))) as (mem_pts_to a p u);
+  x
+}
+
+fn ov_size_t_write (a: ptr) (al: SZ.t) (o: SZ.t) (x: SZ.t) (#u: erased bytes)
+  requires mem_pts_to a 1.0R u
+  requires pure (SZ.v o + SZ.v size_t_sizeof <= len u /\ SZ.fits (SZ.v o + SZ.v size_t_sizeof) /\
+                 aligned a al /\ SZ.v al % SZ.v size_t_sizeof == 0 /\
+                 SZ.v o % SZ.v size_t_sizeof == 0)
+  ensures  mem_pts_to a 1.0R (overlay u 0 (size_t_bytes x) (SZ.v o))
+{
+  mem_carve a o size_t_sizeof;
+  assert_norm (pow2 32 % 8 == 0 /\ pow2 32 % 4 == 0);
+  aligned_field a al o size_t_alignof;
+  size_t_claim_uninit (a +! o);
+  size_t_write_uninit (a +! o) x;
+  size_t_reveal (a +! o);
+  with c'. assert (mem_pts_to (a +! o) 1.0R c');
+  rewrite (mem_pts_to (a +! o) 1.0R c') as (mem_pts_to (a +! o) 1.0R (size_t_bytes x));
+  mem_uncarve a o size_t_sizeof;
+}
+
+(* pointers *)
+let ptr_of_bytes (b: bytes) : GTot ptr =
+  if FStar.IndefiniteDescription.strong_excluded_middle (ptr_view_ok b)
+  then FStar.IndefiniteDescription.indefinite_description_ghost ptr (fun x -> ptr_repr x b)
+  else null
+
+let ptr_view_repr (b: bytes)
+  : Lemma (requires ptr_view_ok b) (ensures ptr_repr (ptr_of_bytes b) b)
+  = ()
+
+let ptr_repr_view (x: ptr) (b: bytes)
+  : Lemma (requires ptr_repr x b) (ensures ptr_view_ok b /\ ptr_of_bytes b == x)
+  = ptr_view_repr b;
+    ptr_repr_injective x (ptr_of_bytes b) b
+
+let ptr_of_bytes_bytes (x: ptr)
+  : Lemma (ptr_view_ok (ptr_bytes x) /\ ptr_of_bytes (ptr_bytes x) == x)
+  = ptr_repr_view x (ptr_bytes x)
+
+fn ov_ptr_read (a: ptr) (al: SZ.t) (o: SZ.t) (#p: perm) (#u: erased bytes)
+  preserves mem_pts_to a p u
+  requires pure (SZ.v o + SZ.v ptr_sizeof <= len u /\ SZ.fits (SZ.v o + SZ.v ptr_sizeof) /\
+                 aligned a al /\ SZ.v al % SZ.v ptr_sizeof == 0 /\
+                 SZ.v o % SZ.v ptr_sizeof == 0 /\
+                 ptr_view_ok (slice u (SZ.v o) (SZ.v o + SZ.v ptr_sizeof)))
+  returns  x : ptr
+  ensures  pure (SZ.v o + SZ.v ptr_sizeof <= len u /\
+                 x == ptr_of_bytes (slice u (SZ.v o) (SZ.v o + SZ.v ptr_sizeof)))
+{
+  mem_carve a o ptr_sizeof;
+  assert_norm (pow2 32 % 8 == 0 /\ pow2 32 % 4 == 0);
+  aligned_field a al o ptr_alignof;
+  let c = Ghost.hide (slice u (SZ.v o) (SZ.v o + SZ.v ptr_sizeof));
+  ptr_view_repr c;
+  ptr_conceal (a +! o) #p #c #(ptr_of_bytes c);
+  let x = ptr_read (a +! o);
+  ptr_reveal (a +! o);
+  with c'. assert (mem_pts_to (a +! o) p c');
+  rewrite (mem_pts_to (a +! o) p c') as (mem_pts_to (a +! o) p c);
+  mem_uncarve a o ptr_sizeof;
+  rewrite (mem_pts_to a p (overlay u 0 c (SZ.v o))) as (mem_pts_to a p u);
+  x
+}
+
+fn ov_ptr_write (a: ptr) (al: SZ.t) (o: SZ.t) (x: ptr) (#u: erased bytes)
+  requires mem_pts_to a 1.0R u
+  requires pure (SZ.v o + SZ.v ptr_sizeof <= len u /\ SZ.fits (SZ.v o + SZ.v ptr_sizeof) /\
+                 aligned a al /\ SZ.v al % SZ.v ptr_sizeof == 0 /\
+                 SZ.v o % SZ.v ptr_sizeof == 0)
+  ensures  mem_pts_to a 1.0R (overlay u 0 (ptr_bytes x) (SZ.v o))
+{
+  mem_carve a o ptr_sizeof;
+  assert_norm (pow2 32 % 8 == 0 /\ pow2 32 % 4 == 0);
+  aligned_field a al o ptr_alignof;
+  ptr_claim_uninit (a +! o);
+  ptr_write_uninit (a +! o) x;
+  ptr_reveal (a +! o);
+  with c'. assert (mem_pts_to (a +! o) 1.0R c');
+  rewrite (mem_pts_to (a +! o) 1.0R c') as (mem_pts_to (a +! o) 1.0R (ptr_bytes x));
+  mem_uncarve a o ptr_sizeof;
 }

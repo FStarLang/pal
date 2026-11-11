@@ -86,6 +86,7 @@ fn readable_field(tds: &Typedefs, ty: &Type) -> bool {
         TypeT::TypeRef(TypeRefKind::Union(n)) => tds
             .unions
             .get(&*n.val)
+            .filter(|ui| !ui.overlay)
             .and_then(|ui| ui.members.first())
             .is_some_and(|m| {
                 matches!(m.shape, FieldShape::One { .. }) && readable_field(tds, &m.ty)
@@ -1132,6 +1133,128 @@ fn is_overlay(tds: &Typedefs, u: &str) -> bool {
     tds.unions.get(u).is_some_and(|x| x.overlay)
 }
 
+/// Where a place lies in the `_overlay` unions on its path, as found by
+/// walking up from the place to its base.
+struct OverlayPath {
+    /// The outermost overlay union reached by struct fields, overlay members
+    /// and constant subscripts only: the union expression, its C name, and the
+    /// place's byte offset in it.
+    root: Option<(Expr, String, u64)>,
+    /// No root was found, but the place is inside an overlay union further up:
+    /// the steps between them (a bit-field, a variable subscript) do not fix
+    /// its offset.
+    opaque: bool,
+}
+
+/// The byte offset of a place in the outermost overlay union on its path; see
+/// `OverlayPath`. Shared by the body, which reads and writes a leaf at that
+/// offset, and the specification, which states `_unchanged` of that range, so
+/// that both agree on where the place is. A constant subscript is scaled by
+/// the size of the indexed array's direct element type -- the outer index of
+/// `a[i][j]` steps over whole rows -- and has to be in bounds.
+fn overlay_path(
+    tds: &Typedefs,
+    ty_of: &dyn Fn(&Expr) -> Option<Rc<Type>>,
+    e: &Expr,
+) -> Result<OverlayPath, String> {
+    let mut off: u64 = 0;
+    let mut root: Option<(Expr, String, u64)> = None;
+    let mut cur = e.clone();
+    let mut stopped = false;
+    loop {
+        match &strip_vattr(&cur).val.clone() {
+            ExprT::Member(b, f) => {
+                let Some(bty) = ty_of(b) else { break };
+                match &peel(tds, &bty).val {
+                    TypeT::TypeRef(TypeRefKind::Struct(sn)) => {
+                        if bitfield_at(tds, &bty, &f.val).is_some() {
+                            stopped = true;
+                            break;
+                        }
+                        let Some(fld) = tds
+                            .structs
+                            .get(&*sn.val)
+                            .and_then(|si| si.fields.iter().find(|x| *x.name == *f.val))
+                        else {
+                            stopped = true;
+                            break;
+                        };
+                        off += fld.offset;
+                    }
+                    TypeT::TypeRef(TypeRefKind::Union(un)) if is_overlay(tds, &un.val) => {
+                        root = Some(((**b).clone(), un.val.to_string(), off));
+                    }
+                    _ => {
+                        stopped = true;
+                        break;
+                    }
+                }
+                cur = (**b).clone();
+            }
+            ExprT::Index(b, i) => {
+                let Some(bty) = ty_of(b) else { break };
+                let TypeT::FixedArray(et, len) = &peel(tds, &bty).val else {
+                    stopped = true;
+                    break;
+                };
+                let Some(k) = const_index(&i.val) else {
+                    stopped = true;
+                    break;
+                };
+                if k >= *len {
+                    return Err(format!(
+                        "subscript {} is out of bounds of an array of {} elements",
+                        k, len
+                    ));
+                }
+                let Some(es) = palow_sizeof(tds, et) else {
+                    stopped = true;
+                    break;
+                };
+                off += k * es;
+                cur = (**b).clone();
+            }
+            _ => break,
+        }
+    }
+    // Where the walk stopped short, is there an overlay union further up?
+    let mut opaque = false;
+    if stopped && root.is_none() {
+        let mut up = cur;
+        loop {
+            let b = match &strip_vattr(&up).val {
+                ExprT::Member(b, _) | ExprT::Index(b, _) => (**b).clone(),
+                _ => break,
+            };
+            if let Some(bty) = ty_of(&b)
+                && let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(tds, &bty).val
+                && is_overlay(tds, &un.val)
+            {
+                opaque = true;
+                break;
+            }
+            up = b;
+        }
+    }
+    Ok(OverlayPath { root, opaque })
+}
+
+/// Whether a value of `ty` has part of an overlay union in it. Such a value
+/// is bytes, pointer provenance and all, so it is not something a program can
+/// hold, and there is no whole-value reader or writer for it: the fields are
+/// read and written one at a time.
+fn holds_overlay(tds: &Typedefs, ty: &Type) -> bool {
+    match &peel(tds, ty).val {
+        TypeT::TypeRef(TypeRefKind::Union(n)) => is_overlay(tds, &n.val),
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => tds
+            .structs
+            .get(&*n.val)
+            .is_some_and(|si| si.fields.iter().any(|f| holds_overlay(tds, &f.ty))),
+        TypeT::FixedArray(..) => flat_array(tds, ty).is_some_and(|(t, _)| holds_overlay(tds, t)),
+        _ => false,
+    }
+}
+
 /// The value of field `f` of the struct value `x`, where `bty` is the
 /// struct's type. An ordinary field is a projection; a bit-field is the bits
 /// it occupies of the unit's value.
@@ -1226,6 +1349,9 @@ struct UnionInfo {
     /// For an overlay union, the integer types that have a byte-level read
     /// and write at a constant offset (`union_X_<int>_read`/`_write`).
     ints: Vec<String>,
+    /// For an overlay union, the islands among its leaves that are loaded and
+    /// stored whole (`union_X_union_I_read`/`_write`), by their C names.
+    islands: Vec<String>,
 }
 
 struct Typedefs<'a> {
@@ -2673,10 +2799,18 @@ impl<'a> Spec<'a> {
     }
 
     fn ty_of(&self, e: &Expr) -> Result<Rc<Type>, String> {
-        self.env
+        let t = self
+            .env
             .infer_expr(e)
             .map(|t| t.to_rc())
-            .map_err(|_| "a subexpression whose type could not be inferred".to_string())
+            .map_err(|_| "a subexpression whose type could not be inferred".to_string())?;
+        if let ExprT::Member(b, f) = &e.val
+            && let Ok(bt) = self.env.infer_expr(b)
+            && let Some(it) = island_field(self.tds, &bt.to_rc(), &f.val)
+        {
+            return Ok(it);
+        }
+        Ok(t)
     }
 
     /// The name whose storage a `_live` clause is talking about: `_live(s.x)`
@@ -2744,6 +2878,67 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// The outermost `_overlay` union a place lies in, and the place's byte
+    /// offset in it, when every step from there to the place is a struct
+    /// field, an overlay member or a constant array index. `None` when the
+    /// place is not inside an overlay; an error when it is but the path
+    /// leaves the bytes the overlay's layout fixes (a bit-field, a variable
+    /// index), or a constant subscript is out of bounds.
+    fn overlay_root(&self, lv: &Expr) -> Result<Option<(Expr, u64)>, String> {
+        let ty = self.ty_of(lv)?;
+        let path = overlay_path(self.tds, &|x| self.ty_of(x).ok(), lv)?;
+        if let Some((r, _, o)) = path.root {
+            return Ok(Some((r, o)));
+        }
+        if path.opaque {
+            return Err(
+                "a place inside an overlay union at an offset that is not constant (a \
+                 bit-field or a variable subscript is on the path)"
+                    .to_string(),
+            );
+        }
+        // The whole of an overlay union is its bytes, so it is its own root.
+        if let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(self.tds, &ty).val
+            && is_overlay(self.tds, &un.val)
+        {
+            return Ok(Some((lv.clone(), 0)));
+        }
+        Ok(None)
+    }
+
+    /// `_unchanged(lv)`: the object `lv` names has the bytes it had on
+    /// entry. Inside an `_overlay` union that is a statement about a byte
+    /// range of the outermost overlay union on the path -- the object's
+    /// offset and size in it -- so it holds of storage whose bytes are not
+    /// readable as any member, such as an opaque `char` array another layer
+    /// has stored pointers over. Anywhere else it is equality of values.
+    fn unchanged(&self, lv: &Expr, w: When) -> Result<String, String> {
+        if !matches!(w, When::Post) {
+            return Err("`_unchanged` outside a postcondition".to_string());
+        }
+        let ty = self.ty_of(lv)?;
+        let root = self.overlay_root(lv)?;
+        match root {
+            Some((r, o)) => {
+                let n = palow_sizeof(self.tds, &ty).ok_or_else(|| {
+                    format!("`_unchanged` of {}", describe(self.tds.resolve(&ty)))
+                })?;
+                Ok(format!(
+                    "(Pulse.Lib.C.Palow.Overlay.range_unchanged {} {} {} {})",
+                    self.value(&r, w)?,
+                    self.value(&r, When::Old)?,
+                    o,
+                    o + n
+                ))
+            }
+            None => Ok(format!(
+                "({} == {})",
+                self.value(lv, w)?,
+                self.value(lv, When::Old)?
+            )),
+        }
+    }
+
     /// A specification expression in proposition position.
     fn prop(&self, e: &Expr, w: When) -> Result<String, String> {
         match &e.val {
@@ -2751,6 +2946,7 @@ impl<'a> Spec<'a> {
                 self.prop(inner, w)
             }
             ExprT::Old(inner) => self.prop(inner, When::Old),
+            ExprT::Unchanged(lv) => self.unchanged(lv, w),
             ExprT::InlinePulse(code, _) => flatten_fragment(&self.inline_pulse(code, w)?),
             // `_live(x)` says the storage exists. A loop invariant restates the
             // whole ownership frame anyway, so by the time this is read the
@@ -3742,6 +3938,38 @@ impl<'a> Spec<'a> {
                         describe(self.tds.resolve(&uty))
                     ));
                 };
+                if let Some(orig) = u.val.strip_suffix("__island") {
+                    return match island_member(self.tds, orig) {
+                        Some((m0, _)) if *m0 == *m.val => {
+                            // Inside an overlay the island is a byte range
+                            // of the root, and saying so directly is what
+                            // the root's whole-value load and store speak
+                            // of; the chain of views down to it is not
+                            // something the prover unfolds cheaply.
+                            let v = self.value(obj, w)?;
+                            if let Some((r, o)) = self.overlay_root(obj)?
+                                && let Some(n) = palow_sizeof(self.tds, &uty)
+                            {
+                                let rv = self.value(&r, w)?;
+                                if rv != v {
+                                    return Ok(format!(
+                                        "(union_{}_active (slice {} {} {}))",
+                                        u.val,
+                                        rv,
+                                        o,
+                                        o + n
+                                    ));
+                                }
+                            }
+                            Ok(format!("(union_{}_active {})", u.val, v))
+                        }
+                        _ => Err(format!(
+                            "`_active` on member `{}` of `{}` inside an overlay; only the \
+                             member a whole value is loaded through can be asked about",
+                            m.val, orig
+                        )),
+                    };
+                }
                 if is_overlay(self.tds, &u.val) {
                     return Ok(format!(
                         "(union_{}_active_{} {})",
@@ -7058,13 +7286,19 @@ fn struct_elem_refine(tds: &Typedefs, env: &Env, name: &str) -> Option<String> {
 
 fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<Chunk> {
     let layouts = crate::layout::LayoutCtx::of_tu(tu);
-    let reach = overlay_reach(tu, tds);
+    let (reach, islands) = overlay_reach(tu, tds);
     let mut code: Vec<Chunk> = Vec::new();
     for decl in &tu.decls {
         if let DeclT::UnionDefn(ud) = &decl.val {
-            let mut c = collect_union(tds, &layouts, ud);
+            let overlay = ud.overlay || reach.contains(&format!("union {}", ud.name.val));
+            let mut c = collect_union(tds, &layouts, ud, overlay);
             c.origin = origin_of(decl);
             code.push(c);
+            if islands.contains(&*ud.name.val)
+                && let Some(c) = collect_island(tds, &layouts, ud)
+            {
+                code.push(c);
+            }
             continue;
         }
         let DeclT::StructDefn(sd) = &decl.val else {
@@ -7162,7 +7396,22 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
             }
             i = j;
         }
+        let in_overlay = reach.contains(&format!("struct {}", name));
         for (fname, fty, off) in plan {
+            let fty = match &peel(tds, &fty).val {
+                TypeT::TypeRef(TypeRefKind::Union(n))
+                    if in_overlay && tds.unions.contains_key(&island_name(&n.val)) =>
+                {
+                    Rc::new(Type {
+                        val: TypeT::TypeRef(TypeRefKind::Union(Rc::new(Ident {
+                            val: island_name(&n.val).into(),
+                            loc: n.loc.clone(),
+                        }))),
+                        loc: fty.loc.clone(),
+                    })
+                }
+                _ => fty,
+            };
             let (Some(shape), true) = (field_shape(tds, &fty), field_type(tds, &fty).is_some())
             else {
                 ok = false;
@@ -7271,7 +7520,7 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
         let elem_refine = struct_elem_refine(tds, env, &name);
         tds.structs.get_mut(&name).unwrap().elem_refine = elem_refine;
         let mut sc = emit_struct(tds, &name);
-        if reach.contains(&name)
+        if reach.contains(&format!("struct {}", name))
             && let Some(v) = emit_struct_view(tds, &name)
         {
             sc += &v;
@@ -7296,6 +7545,7 @@ fn collect_union(
     tds: &mut Typedefs,
     layouts: &crate::layout::LayoutCtx,
     ud: &crate::ir::UnionDefn,
+    overlay: bool,
 ) -> Chunk {
     let name = ud.name.val.to_string();
     let key = TypeRefKind::Union(ud.name.clone());
@@ -7318,7 +7568,7 @@ fn collect_union(
     };
     tds.aggregate_layouts
         .insert(format!("union {}", name), (size, align));
-    if ud.overlay {
+    if overlay {
         return collect_overlay_union(tds, ud, size, align);
     }
     let mut members = Vec::new();
@@ -7365,6 +7615,7 @@ fn collect_union(
             align,
             overlay: false,
             ints: Vec::new(),
+            islands: Vec::new(),
         },
     );
     Chunk {
@@ -7389,29 +7640,129 @@ fn collect_union(
 // model cannot state. See palow.md, "Overlay unions".
 // ---------------------------------------------------------------------------
 
-/// The integer types an overlay union reads and writes at a byte offset, with
-/// their size and F* type. `size_t` is left out: its width is the target's,
-/// and `Pulse.Lib.C.Palow.Overlay` is stated at fixed widths.
-fn ov_int(pn: &str) -> Option<(u64, &'static str)> {
-    match pn {
-        "uint8_t" => Some((1, "UInt8.t")),
-        "int8_t" => Some((1, "Int8.t")),
-        "uint16_t" => Some((2, "UInt16.t")),
-        "int16_t" => Some((2, "Int16.t")),
-        "uint32_t" => Some((4, "UInt32.t")),
-        "int32_t" => Some((4, "Int32.t")),
-        "uint64_t" => Some((8, "UInt64.t")),
-        "int64_t" => Some((8, "Int64.t")),
-        _ => None,
-    }
+/// A scalar an overlay union reads and writes at a byte offset: its size, its
+/// F* type, and the predicate on its bytes that makes them readable at that
+/// type (`Pulse.Lib.C.Palow.Overlay`). An integer is readable when its bytes
+/// are plain; a `bool` when they are also 0 or 1; a pointer when they are some
+/// pointer's representation, provenance and all.
+struct OvLeaf {
+    size: u64,
+    fty: &'static str,
+    ok: &'static str,
 }
 
-/// The structs an `_overlay` union reaches through its members, at any
-/// depth. Only these get an overlay view: it is a proof obligation for every
-/// struct that has one, and nothing else needs it.
-fn overlay_reach(tu: &TranslationUnit, tds: &Typedefs) -> HashSet<String> {
+fn ov_leaf(tds: &Typedefs, pn: &str) -> Option<OvLeaf> {
+    let (size, fty, ok) = match pn {
+        "uint8_t" => (1, "UInt8.t", "plain"),
+        "int8_t" => (1, "Int8.t", "plain"),
+        "uint16_t" => (2, "UInt16.t", "plain"),
+        "int16_t" => (2, "Int16.t", "plain"),
+        "uint32_t" => (4, "UInt32.t", "plain"),
+        "int32_t" => (4, "Int32.t", "plain"),
+        "uint64_t" => (8, "UInt64.t", "plain"),
+        "int64_t" => (8, "Int64.t", "plain"),
+        "bool_t" => (1, "bool", "bool_t_view_ok"),
+        "size_t" => (tds.ptr_bytes, "SizeT.t", "plain"),
+        "ptr" => (tds.ptr_bytes, "ptr", "ptr_view_ok"),
+        _ => return None,
+    };
+    Some(OvLeaf { size, fty, ok })
+}
+
+/// The leaves an array field of a viewed struct may have: the fixed-width
+/// integers, whose bytes are readable exactly when they are plain.
+fn ov_array_leaf(pn: &str) -> bool {
+    matches!(
+        pn,
+        "uint8_t"
+            | "int8_t"
+            | "uint16_t"
+            | "int16_t"
+            | "uint32_t"
+            | "int32_t"
+            | "uint64_t"
+            | "int64_t"
+    )
+}
+
+/// The named unions the translation unit uses as whole values: as a
+/// parameter, a return value, a global or a local.
+fn value_unions(tu: &TranslationUnit, tds: &Typedefs) -> HashSet<String> {
+    fn note(tds: &Typedefs, t: &Type, out: &mut HashSet<String>) {
+        // An array of unions holds whole values too.
+        let t = flat_array(tds, t).map_or(t, |(e, _)| e);
+        if let TypeT::TypeRef(TypeRefKind::Union(n)) = &peel(tds, t).val {
+            out.insert(n.val.to_string());
+        }
+    }
+    fn stmts(tds: &Typedefs, ss: &Stmts, out: &mut HashSet<String>) {
+        for st in ss {
+            match &st.val {
+                StmtT::Decl(_, t)
+                | StmtT::Let(_, t, _)
+                | StmtT::DeclStackArray { elem_type: t, .. } => note(tds, t, out),
+                StmtT::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    stmts(tds, then_branch, out);
+                    stmts(tds, else_branch, out);
+                }
+                StmtT::Match {
+                    branches,
+                    default_branch,
+                    ..
+                } => {
+                    for b in branches.iter() {
+                        stmts(tds, &b.body, out);
+                    }
+                    stmts(tds, default_branch, out);
+                }
+                StmtT::While { body, .. } | StmtT::GotoBlock { body, .. } => stmts(tds, body, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    for d in &tu.decls {
+        let decl = match &d.val {
+            DeclT::FnDefn(f) => {
+                stmts(tds, &f.body, &mut out);
+                &f.decl
+            }
+            DeclT::FnDecl(f) => f,
+            DeclT::GlobalVar(g) => {
+                note(tds, &g.ty, &mut out);
+                continue;
+            }
+            _ => continue,
+        };
+        note(tds, &decl.ret_type, &mut out);
+        for a in &decl.args {
+            note(tds, &a.ty, &mut out);
+        }
+    }
+    out
+}
+
+/// The aggregates an `_overlay` union reaches through its members and their
+/// fields, at any depth, as `struct X` and `union X`; and the islands among
+/// the unions it reaches, by name.
+///
+/// Only the structs reached get an overlay view: it is a proof obligation for
+/// every struct that has one, and nothing else needs it. A union reached is an
+/// overlay union too, `_overlay` or not: it is part of the same bytes, which
+/// every layer sees through its own members, so a union of alternative names
+/// inside a layer is punned exactly as the outer one is -- unless the program
+/// uses it as a whole value somewhere (`value_unions`). An overlay union has
+/// no whole values, so such a union keeps its tagged model, and inside an
+/// overlay it is an island: a run of bytes the view does not look into, typed
+/// `union_X__island`, whose members are not reached through it.
+fn overlay_reach(tu: &TranslationUnit, tds: &Typedefs) -> (HashSet<String>, HashSet<String>) {
     let mut defs: HashMap<String, Vec<Rc<Type>>> = HashMap::new();
     let mut stack: Vec<String> = Vec::new();
+    let mut marked: HashSet<String> = HashSet::new();
     for d in &tu.decls {
         match &d.val {
             DeclT::StructDefn(sd) => {
@@ -7425,6 +7776,7 @@ fn overlay_reach(tu: &TranslationUnit, tds: &Typedefs) -> HashSet<String> {
             }
             DeclT::UnionDefn(ud) => {
                 if ud.overlay {
+                    marked.insert(ud.name.val.to_string());
                     stack.push(format!("union {}", ud.name.val));
                 }
                 defs.insert(
@@ -7438,7 +7790,9 @@ fn overlay_reach(tu: &TranslationUnit, tds: &Typedefs) -> HashSet<String> {
             _ => {}
         }
     }
+    let values = value_unions(tu, tds);
     let mut seen: HashSet<String> = HashSet::new();
+    let mut islands: HashSet<String> = HashSet::new();
     while let Some(k) = stack.pop() {
         if !seen.insert(k.clone()) {
             continue;
@@ -7447,17 +7801,71 @@ fn overlay_reach(tu: &TranslationUnit, tds: &Typedefs) -> HashSet<String> {
             let t = flat_array(tds, t).map_or(&**t, |(e, _)| e);
             match &peel(tds, t).val {
                 TypeT::TypeRef(TypeRefKind::Struct(n)) => stack.push(format!("struct {}", n.val)),
-                TypeT::TypeRef(TypeRefKind::Union(n)) => stack.push(format!("union {}", n.val)),
+                TypeT::TypeRef(TypeRefKind::Union(n))
+                    if marked.contains(&*n.val) || !values.contains(&*n.val) =>
+                {
+                    stack.push(format!("union {}", n.val))
+                }
+                TypeT::TypeRef(TypeRefKind::Union(n)) => {
+                    islands.insert(n.val.to_string());
+                }
                 _ => {}
             }
         }
     }
-    seen.into_iter()
-        .filter_map(|k| k.strip_prefix("struct ").map(str::to_string))
-        .collect()
+    (seen, islands)
 }
 
-/// The integer types found among the leaves of a struct that has an overlay
+/// The type a field of a struct value of type `bty` has when it is an island
+/// (see `overlay_reach`): the field's C type is the named union, but inside an
+/// overlay what it holds is the union's bytes.
+fn island_field(tds: &Typedefs, bty: &Type, f: &str) -> Option<Rc<Type>> {
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, bty).val else {
+        return None;
+    };
+    let fld = tds
+        .structs
+        .get(&*n.val)?
+        .fields
+        .iter()
+        .find(|x| x.name == f)?;
+    match &peel(tds, &fld.ty).val {
+        TypeT::TypeRef(TypeRefKind::Union(u)) if u.val.ends_with("__island") => {
+            Some(fld.ty.clone())
+        }
+        _ => None,
+    }
+}
+
+/// The name of the byte-valued twin of the island union `u`.
+fn island_name(u: &str) -> String {
+    format!("{}__island", u)
+}
+
+/// The islands found among the fields of a struct that has an overlay view,
+/// or of an overlay union, by the C names of the unions they are twins of.
+fn view_islands(tds: &Typedefs, ty: &Type, out: &mut BTreeSet<String>) {
+    let ty = flat_array(tds, ty).map_or(ty, |(e, _)| e);
+    match &peel(tds, ty).val {
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+            if let Some(si) = tds.structs.get(&*n.val) {
+                for f in &si.fields {
+                    view_islands(tds, &f.ty, out);
+                }
+            }
+        }
+        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+            if let Some(orig) = n.val.strip_suffix("__island") {
+                out.insert(orig.to_string());
+            } else if let Some(ui) = tds.unions.get(&*n.val) {
+                out.extend(ui.islands.iter().cloned());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The scalar types found among the leaves of a struct that has an overlay
 /// view, or of an overlay union.
 fn view_ints(tds: &Typedefs, ty: &Type, out: &mut BTreeSet<String>) {
     match &peel(tds, ty).val {
@@ -7466,7 +7874,7 @@ fn view_ints(tds: &Typedefs, ty: &Type, out: &mut BTreeSet<String>) {
                 for f in &si.fields {
                     match &f.shape {
                         FieldShape::One { pn } | FieldShape::Array { pn, .. }
-                            if ov_int(pn).is_some() =>
+                            if ov_leaf(tds, pn).is_some() =>
                         {
                             out.insert(pn.clone());
                         }
@@ -7485,13 +7893,13 @@ fn view_ints(tds: &Typedefs, ty: &Type, out: &mut BTreeSet<String>) {
 }
 
 /// The overlay view of a struct: `_view_ok b`, that the bytes of every field
-/// are plain (initialised) bytes; `_view b`, the value they read as; and the
-/// two lemmas that make these the same thing as `_repr` where it holds. The
-/// padding is in neither, which is the point: a struct read through a range
-/// of bytes does not care what its padding holds.
+/// are readable as it (see `ov_leaf`); `_view b`, the ghost value they read
+/// as; and the two lemmas that make these the same thing as `_repr` where it
+/// holds. The padding is in neither, which is the point: a struct read
+/// through a range of bytes does not care what its padding holds.
 ///
-/// `None` when the struct does not qualify. Every field has to be an
-/// integer, an array of integers, a struct with a view, or an overlay union;
+/// `None` when the struct does not qualify. Every field has to be a leaf, an
+/// array of integers, a struct with a view, or an overlay union;
 /// and nothing may be refined, since the view builds values of the field
 /// types from arbitrary bytes.
 fn emit_struct_view(tds: &Typedefs, name: &str) -> Option<String> {
@@ -7509,20 +7917,22 @@ fn emit_struct_view(tds: &Typedefs, name: &str) -> Option<String> {
         let (o, n, fname) = (f.offset, f.size, &f.name);
         let sl = format!("(slice b {} {})", o, o + n);
         match &f.shape {
-            FieldShape::One { pn } if ov_int(pn).is_some() => {
-                let fty = ov_int(pn).unwrap().1;
-                if field_type(tds, &f.ty).as_deref() != Some(fty) {
+            FieldShape::One { pn } if ov_leaf(tds, pn).is_some() => {
+                let leaf = ov_leaf(tds, pn).unwrap();
+                if field_type(tds, &f.ty).as_deref() != Some(leaf.fty) || leaf.size != n {
                     return None;
                 }
-                ok.push(format!("plain {}", sl));
+                ok.push(format!("{} {}", leaf.ok, sl));
                 vw.push(format!("fld_{} = {}_of_bytes {}", fname, pn, sl));
                 l1.push(format!("{}_view_repr {}", pn, sl));
                 l2.push(format!("{}_repr_view x.fld_{} {}", pn, fname, sl));
             }
             FieldShape::Array { pn, esize, len }
-                if ov_int(pn).is_some_and(|(k, _)| k == *esize) && *len > 0 =>
+                if ov_array_leaf(pn)
+                    && ov_leaf(tds, pn).is_some_and(|l| l.size == *esize)
+                    && *len > 0 =>
             {
-                let fty = ov_int(pn).unwrap().1;
+                let fty = ov_leaf(tds, pn).unwrap().fty;
                 if fstar_type(tds, flat_array(tds, &f.ty)?.0).as_deref() != Some(fty) {
                     return None;
                 }
@@ -7536,6 +7946,24 @@ fn emit_struct_view(tds: &Typedefs, name: &str) -> Option<String> {
                 ));
                 l2.push(format!(
                     "{pn}_repr_view_all (); array_repr_view {pn}_repr {esize} {len} {pn}_of_bytes x.fld_{fname} {sl}"
+                ));
+            }
+            FieldShape::Array { pn, esize, len }
+                if *len > 0
+                    && matches!(
+                        &peel(tds, flat_array(tds, &f.ty)?.0).val,
+                        TypeT::TypeRef(TypeRefKind::Struct(t))
+                            if tds.structs.get(&*t.val).is_some_and(|x| x.view && x.size == *esize)
+                    ) =>
+            {
+                let args = format!("{pn}_repr {esize} {len} {pn}_view_ok {pn}_view");
+                ok.push(format!("array_view_ok {esize} {len} {pn}_view_ok {sl}"));
+                vw.push(format!(
+                    "fld_{fname} = array_view_g {esize} {len} {pn}_view {sl}"
+                ));
+                l1.push(format!("array_view_g_repr {args} {pn}_view_repr {sl}"));
+                l2.push(format!(
+                    "array_repr_view_g {args} {pn}_repr_view x.fld_{fname} {sl}"
                 ));
             }
             FieldShape::One { pn } => match &peel(tds, &f.ty).val {
@@ -7571,7 +7999,7 @@ fn emit_struct_view(tds: &Typedefs, name: &str) -> Option<String> {
          open Pulse.Lib.C.Palow.Pun\n\
          open Pulse.Lib.C.Palow.Overlay\n\n\
          let {sn}_view_ok (b: bytes {{ len b == {sz} }}) : prop =\n  {ok}\n\n\
-         let {sn}_view (b: bytes {{ len b == {sz} }}) : {sn} =\n  {{ {vw} }}\n\n\
+         let {sn}_view (b: bytes {{ len b == {sz} }}) : GTot {sn} =\n  {{ {vw} }}\n\n\
          let {sn}_view_repr (b: bytes {{ len b == {sz} }})\n  \
          : Lemma (requires {sn}_view_ok b) (ensures {sn}_repr ({sn}_view b) b)\n  \
          = {l1}\n\n\
@@ -7583,6 +8011,147 @@ fn emit_struct_view(tds: &Typedefs, name: &str) -> Option<String> {
         l1 = or_unit(&l1),
         l2 = or_unit(&l2),
     ))
+}
+
+/// The byte-valued twin of a named union that an overlay reaches: an overlay
+/// union of the same size and alignment with no members, so that a struct
+/// inside the overlay can hold the union's bytes without the view having to
+/// choose which of its members they are. The union's own, tagged type is
+/// unchanged; the twin is only what the field holds inside the overlay.
+fn collect_island(
+    tds: &mut Typedefs,
+    layouts: &crate::layout::LayoutCtx,
+    ud: &crate::ir::UnionDefn,
+) -> Option<Chunk> {
+    let l = layouts
+        .table
+        .get(&LayoutKey::of_type_ref(&TypeRefKind::Union(
+            ud.name.clone(),
+        )))?;
+    let name = island_name(&ud.name.val);
+    tds.unions.insert(
+        name.clone(),
+        UnionInfo {
+            members: Vec::new(),
+            size: l.size,
+            align: l.align,
+            overlay: true,
+            ints: Vec::new(),
+            islands: Vec::new(),
+        },
+    );
+    let mut code = emit_overlay_union(tds, &name);
+    code += &emit_island_access(tds, &ud.name.val);
+    Some(Chunk {
+        module: format!("Union_{}", name),
+        code,
+        origin: None,
+    })
+}
+
+/// The member an island is loaded through: the first one, when its value can
+/// be read whole with nothing to choose inside it (`value_read_guard`).
+fn island_member(tds: &Typedefs, u: &str) -> Option<(String, String)> {
+    let ui = tds.unions.get(u).filter(|ui| !ui.overlay)?;
+    let m = ui.members.first()?;
+    if !matches!(m.shape, FieldShape::One { .. })
+        || value_reader(tds, &m.ty).is_none()
+        || value_read_guard(tds, &m.ty, "v").is_some()
+    {
+        return None;
+    }
+    Some((m.name.clone(), field_type(tds, &m.ty)?))
+}
+
+/// The whole-value load and store of an island at a constant offset into an
+/// overlay's bytes. What a store writes is a representation of the value --
+/// which bytes the padding gets is not said -- and nothing else; a load needs
+/// the bytes to be a representation of a value of the first member, which is
+/// the member the tagged model reads a whole value through.
+fn emit_island_access(tds: &Typedefs, u: &str) -> String {
+    let Some((m0, t0)) = island_member(tds, u) else {
+        return String::new();
+    };
+    let ui = &tds.unions[u];
+    let (n, al) = (ui.size, ui.align);
+    let un = format!("union_{}", u);
+    let isl = format!("union_{}", island_name(u));
+    let k = format!("Union_{}_{}", u, m0);
+    let sl = format!("(slice u (SizeT.v o) (SizeT.v o + {n}))");
+    format!(
+        "(* The bytes are those of a `{u}` whose `{m0}` is live: what a whole-value\n   \
+         load of the island needs. *)\n\
+         let {isl}_readable (b: bytes) : prop = exists (v: {t0}). {un}_repr ({k} v) b\n\n\
+         let {isl}_active (b: bytes) : GTot (r: bool {{ r = true <==> {isl}_readable b }}) =\n  \
+         FStar.IndefiniteDescription.strong_excluded_middle ({isl}_readable b)\n\n\
+         fn {isl}_load (a: ptr) (al: SizeT.t) (o: SizeT.t) (#p: perm) (#u: erased bytes)\n\
+         \x20 preserves mem_pts_to a p u\n\
+         \x20 requires pure (SizeT.v o + {n} <= len u /\\ SizeT.fits (SizeT.v o + {n}) /\\ aligned a al /\\\n\
+         \x20                SizeT.v al % {al} == 0 /\\ SizeT.v o % {al} == 0 /\\ {isl}_readable {sl})\n\
+         \x20 returns  x : {un}\n\
+         \x20 ensures  pure (SizeT.v o + {n} <= len u /\\ {k}? x /\\ {un}_repr x {sl})\n\
+         {{\n  \
+         mem_carve a o {n}sz;\n  \
+         assert_norm (pow2 32 % {al} == 0);\n  \
+         aligned_field a al o {un}_alignof;\n  \
+         mem_share (a +! o);\n  \
+         let w = ov_pick (fun (v: {t0}) -> {un}_repr ({k} v) {sl});\n  \
+         {un}_conceal (a +! o) #(p /. 2.0R) #{sl} #({k} (reveal w));\n  \
+         let x = {un}_{m0}_read (a +! o);\n  \
+         {un}_reveal (a +! o);\n  \
+         mem_gather (a +! o) #(p /. 2.0R) #(p /. 2.0R) #{sl};\n  \
+         rewrite (mem_pts_to (a +! o) (p /. 2.0R +. p /. 2.0R) {sl})\n       \
+         as (mem_pts_to (a +! o) p {sl});\n  \
+         mem_uncarve a o {n}sz;\n  \
+         x\n}}\n\n\
+         fn {isl}_store (a: ptr) (al: SizeT.t) (o: SizeT.t) (x: {un}) (#u: erased bytes)\n\
+         \x20 requires mem_pts_to a 1.0R u\n\
+         \x20 requires pure (SizeT.v o + {n} <= len u /\\ SizeT.fits (SizeT.v o + {n}) /\\ aligned a al /\\\n\
+         \x20                SizeT.v al % {al} == 0 /\\ SizeT.v o % {al} == 0)\n\
+         \x20 ensures  exists* (c: bytes). mem_pts_to a 1.0R (overlay u 0 c (SizeT.v o))\n\
+         \x20            ** pure (len c == {n} /\\ {un}_repr x c)\n\
+         {{\n  \
+         mem_carve a o {n}sz;\n  \
+         assert_norm (pow2 32 % {al} == 0);\n  \
+         aligned_field a al o {un}_alignof;\n  \
+         {un}_claim_uninit (a +! o) #{sl};\n  \
+         {un}_write_uninit (a +! o) x;\n  \
+         {un}_reveal (a +! o);\n  \
+         with c. assert (mem_pts_to (a +! o) 1.0R c);\n  \
+         {un}_repr_len x c;\n  \
+         mem_uncarve a o {n}sz #c;\n}}\n\n\
+         (* The same, where the island is an object of its own: a field reached\n   \
+         through a pointer to the struct rather than through the overlay. *)\n\
+         fn {isl}_read (a: ptr) (#p: perm) (#u: erased {isl})\n\
+         \x20 preserves {isl}_pts_to a p u\n\
+         \x20 requires pure ({isl}_readable u)\n\
+         \x20 returns  x : {un}\n\
+         \x20 ensures  pure ({k}? x /\\ {un}_repr x u)\n\
+         {{\n  \
+         unfold {isl}_pts_to a p u;\n  \
+         mem_share a;\n  \
+         let w = ov_pick (fun (v: {t0}) -> {un}_repr ({k} v) u);\n  \
+         {un}_conceal a #(p /. 2.0R) #(reveal u) #({k} (reveal w));\n  \
+         let x = {un}_{m0}_read a;\n  \
+         {un}_reveal a;\n  \
+         mem_gather a #(p /. 2.0R) #(p /. 2.0R) #(reveal u);\n  \
+         rewrite (mem_pts_to a (p /. 2.0R +. p /. 2.0R) u) as (mem_pts_to a p u);\n  \
+         fold {isl}_pts_to a p u;\n  \
+         x\n}}\n\n\
+         fn {isl}_write (a: ptr) (x: {un}) (#u: erased {isl})\n\
+         \x20 requires {isl}_pts_to a 1.0R u\n\
+         \x20 ensures  exists* (c: {isl}). {isl}_pts_to a 1.0R c ** pure ({un}_repr x c)\n\
+         {{\n  \
+         unfold {isl}_pts_to a 1.0R u;\n  \
+         {un}_claim_uninit a #(reveal u);\n  \
+         {un}_write_uninit a x;\n  \
+         {un}_reveal a;\n  \
+         with c. assert (mem_pts_to a 1.0R c);\n  \
+         {un}_repr_len x c;\n  \
+         let c' : erased {isl} = hide #{isl} c;\n  \
+         rewrite (mem_pts_to a 1.0R c) as (mem_pts_to a 1.0R (reveal c'));\n  \
+         fold {isl}_pts_to a 1.0R (reveal c');\n}}\n\n"
+    )
 }
 
 /// An `_overlay` union: every member has to be a struct with an overlay view
@@ -7601,9 +8170,41 @@ fn collect_overlay_union(
     };
     let mut members = Vec::new();
     let mut ints: BTreeSet<String> = BTreeSet::new();
+    let mut islands: BTreeSet<String> = BTreeSet::new();
     for f in &ud.fields {
         let mname = f.val.name().val.to_string();
         let mty = f.val.logical_type(&f.loc);
+        let pn = palow_name(tds, &mty);
+        // An array of integers is a member too -- the bytes under a name --
+        // but one that is only read and written element by element, at a
+        // constant subscript, through the union's scalar accessors.
+        if let Some((et, len)) = flat_array(tds, &mty) {
+            let epn = palow_name(tds, et).filter(|p| ov_array_leaf(p));
+            let esize = epn.as_deref().and_then(|p| ov_leaf(tds, p)).map(|l| l.size);
+            let (Some(epn), Some(esize)) = (epn, esize) else {
+                return skip(format!(
+                    "`_overlay` member `{}` is an array of {}; an array member of an overlay \
+                     union has to be of fixed-width integers",
+                    mname,
+                    describe(tds.resolve(et))
+                ));
+            };
+            if esize * len > size {
+                return skip(format!("member `{}` is larger than the union", mname));
+            }
+            ints.insert(epn.clone());
+            members.push(UnionMember {
+                name: mname,
+                ty: mty,
+                shape: FieldShape::Array {
+                    pn: epn,
+                    esize,
+                    len,
+                },
+                size: esize * len,
+            });
+            continue;
+        }
         let msize = match &peel(tds, &mty).val {
             TypeT::TypeRef(TypeRefKind::Struct(n))
                 if tds.structs.get(&*n.val).is_some_and(|x| x.view) =>
@@ -7615,10 +8216,20 @@ fn collect_overlay_union(
             {
                 tds.unions[&*n.val].size
             }
+            _ if pn
+                .as_deref()
+                .and_then(|p| ov_leaf(tds, p))
+                .is_some_and(|l| field_type(tds, &mty).as_deref() == Some(l.fty)) =>
+            {
+                let p = pn.as_deref().unwrap();
+                ints.insert(p.to_string());
+                ov_leaf(tds, p).unwrap().size
+            }
             _ => {
                 return skip(format!(
                     "`_overlay` member `{}` is {}; a member of an overlay union has to be a \
-                     struct of integers, integer arrays and such structs, or another overlay union",
+                     scalar, an array of integers, a struct of such fields, or another overlay \
+                     union",
                     mname,
                     describe(tds.resolve(&mty))
                 ));
@@ -7627,10 +8238,11 @@ fn collect_overlay_union(
         if msize > size {
             return skip(format!("member `{}` is larger than the union", mname));
         }
-        let Some(pn) = palow_name(tds, &mty) else {
+        let Some(pn) = pn else {
             return skip(format!("member `{}` has no Palow type", mname));
         };
         view_ints(tds, &mty, &mut ints);
+        view_islands(tds, &mty, &mut islands);
         members.push(UnionMember {
             name: mname,
             ty: mty,
@@ -7646,7 +8258,11 @@ fn collect_overlay_union(
     // be aligned, so a type wider than the union's alignment gets none.
     let ints = ints
         .into_iter()
-        .filter(|t| ov_int(t).is_some_and(|(n, _)| align % n == 0))
+        .filter(|t| ov_leaf(tds, t).is_some_and(|l| align % l.size == 0))
+        .collect();
+    let islands = islands
+        .into_iter()
+        .filter(|u| island_member(tds, u).is_some() && align % tds.unions[u.as_str()].align == 0)
         .collect();
     tds.unions.insert(
         name.clone(),
@@ -7656,6 +8272,7 @@ fn collect_overlay_union(
             align,
             overlay: true,
             ints,
+            islands,
         },
     );
     Chunk {
@@ -7676,7 +8293,12 @@ fn collect_overlay_union(
 /// - `_focus_m` / `_unfocus_m`: lend the member as its own type, keeping the
 ///   bytes past it exactly (`_rest_m`), and take it back. Coming back, only
 ///   the member's own range has changed: `overlay u 0 c 0`.
+/// - `_focus_read_m` / `_unfocus_read_m`, for a struct member: the same lend
+///   for a read, which gives the union back with exactly the bytes it had.
 /// - `_switch_m`: the member's storage, for a callee to fill.
+/// - `_as_m` / `_of_m` (`pulse_intro`), when `m` is an overlay union of the
+///   same size and alignment: the conversions a pointer cast between the two
+///   needs, which the prover applies where it has to.
 ///
 /// And per integer type `t` among the leaves, `_t_read` / `_t_write` at a
 /// byte offset, which is how the body reads and writes a scalar field
@@ -7707,12 +8329,20 @@ fn emit_overlay_union(tds: &Typedefs, name: &str) -> String {
     {
         let mut cs: Vec<String> = Vec::new();
         let mut ps: Vec<String> = Vec::new();
-        for m in &ui.members {
+        for m in ui
+            .members
+            .iter()
+            .filter(|m| matches!(m.shape, FieldShape::One { .. }))
+        {
             let pn = m.shape.pn();
             if let Some(al) = m.shape.aligned_at("a") {
                 cs.push(al);
                 ps.push(format!("aligned_divides a {un}_alignof {pn}_alignof"));
             }
+        }
+        if cs.is_empty() {
+            cs.push("True".to_string());
+            ps.push("()".to_string());
         }
         c += &format!(
             "let {un}_member_aligned (a: ptr)\n  \
@@ -7732,25 +8362,38 @@ fn emit_overlay_union(tds: &Typedefs, name: &str) -> String {
          exists* b. mem_pts_to a 1.0R b\n             \
          ** pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof)\n\n"
     );
-    for m in &ui.members {
+    // An array member has no functions of its own: its elements are read and
+    // written by the scalar accessors below, at constant subscripts.
+    for m in ui
+        .members
+        .iter()
+        .filter(|m| matches!(m.shape, FieldShape::One { .. }))
+    {
         let f = &m.name;
         let tp = m.shape.pn();
         let sz = m.size;
-        let is_struct = matches!(
-            &peel(tds, &m.ty).val,
-            TypeT::TypeRef(TypeRefKind::Struct(_))
-        );
-        let (is_def, get_def) = match is_struct {
-            true => (
+        let leaf = ov_leaf(tds, tp);
+        let is_union = matches!(&peel(tds, &m.ty).val, TypeT::TypeRef(TypeRefKind::Union(_)));
+        // A struct member or a scalar one is read through its view; a nested
+        // overlay union is bytes, like this one, and always readable.
+        let is_struct = !is_union;
+        let (is_def, get_def) = match (&leaf, is_union) {
+            (Some(l), _) => (
+                format!("{} (slice u 0 {sz})", l.ok),
+                format!("{tp}_of_bytes (slice u 0 {sz})"),
+            ),
+            (None, false) => (
                 format!("{tp}_view_ok (slice u 0 {sz})"),
                 format!("{tp}_view (slice u 0 {sz})"),
             ),
-            false => ("True".to_string(), format!("slice u 0 {sz}")),
+            (None, true) => ("True".to_string(), format!("slice u 0 {sz}")),
         };
+        // The getter's type: a leaf's F* type, not its C name.
+        let gty = leaf.as_ref().map_or(tp, |l| l.fty);
         c += &format!(
             "(* Member `{f}`: readable when its bytes are, and then what they read as. *)\n\
              let {un}_is_{f} (u: {un}) : prop = {is_def}\n\
-             let {un}_get_{f} (u: {un}) : {tp} = {get_def}\n\
+             let {un}_get_{f} (u: {un}) : GTot {gty} = {get_def}\n\
              let {un}_active_{f} (u: {un}) : GTot (b: bool {{ b = true <==> {un}_is_{f} u }}) =\n  \
              FStar.IndefiniteDescription.strong_excluded_middle ({un}_is_{f} u)\n\n\
              (* Everything but member `{f}`, exactly: what a focus on it leaves behind. *)\n\
@@ -7773,9 +8416,50 @@ fn emit_overlay_union(tds: &Typedefs, name: &str) -> String {
             "  {tp}_conceal a #p #(slice u 0 {sz}) #({un}_get_{f} u);\n  \
              fold {un}_rest_{f} a p u;\n}}\n\n"
         );
+        if is_struct && leaf.is_none() {
+            c += &format!(
+                "(* A read-only lend of member `{f}`: the view gets half the permission and\n   \
+                 the other half keeps the member's bytes, so when the view comes back\n   \
+                 they are known to be exactly the ones lent, padding included. *)\n\
+                 let {un}_rest_read_{f} (a: ptr) (p: perm) (u: {un}) : slprop =\n  \
+                 mem_pts_to a (p /. 2.0R) (slice u 0 {sz}) ** {un}_rest_{f} a p u\n\n\
+                 ghost fn {un}_focus_read_{f} (a: ptr) (#p: perm) (#u: {un})\n\
+                 \x20 requires {un}_pts_to a p u\n\
+                 \x20 requires pure ({un}_is_{f} u)\n\
+                 \x20 ensures  {tp}_pts_to a (p /. 2.0R) ({un}_get_{f} u)\n\
+                 \x20 ensures  {un}_rest_read_{f} a p u\n\
+                 {{\n  \
+                 unfold {un}_pts_to a p u;\n  \
+                 {un}_member_aligned a;\n  \
+                 mem_split a {sz}sz;\n  \
+                 mem_share a #p #(slice u 0 {sz});\n  \
+                 {tp}_view_repr (slice u 0 {sz});\n  \
+                 {tp}_conceal a #(p /. 2.0R) #(slice u 0 {sz}) #({un}_get_{f} u);\n  \
+                 fold {un}_rest_{f} a p u;\n  \
+                 fold {un}_rest_read_{f} a p u;\n}}\n\n\
+                 ghost fn {un}_unfocus_read_{f} (a: ptr) (#p: perm) (#u: {un})\n\
+                 \x20 requires {tp}_pts_to a (p /. 2.0R) ({un}_get_{f} u)\n\
+                 \x20 requires {un}_rest_read_{f} a p u\n\
+                 \x20 ensures  {un}_pts_to a p u\n\
+                 {{\n  \
+                 {tp}_reveal a #(p /. 2.0R) #({un}_get_{f} u);\n  \
+                 with c. assert (mem_pts_to a (p /. 2.0R) c ** pure ({tp}_repr ({un}_get_{f} u) c));\n  \
+                 unfold {un}_rest_read_{f} a p u;\n  \
+                 {tp}_repr_len ({un}_get_{f} u) c;\n  \
+                 mem_gather a #(p /. 2.0R) #(p /. 2.0R) #(slice u 0 {sz}) #c;\n  \
+                 rewrite (mem_pts_to a (p /. 2.0R +. p /. 2.0R) (slice u 0 {sz}))\n    \
+                 as (mem_pts_to a p (slice u 0 {sz}));\n  \
+                 unfold {un}_rest_{f} a p u;\n  \
+                 mem_join a #p #(slice u 0 {sz}) #(slice u {sz} {n_all}) {sz}sz;\n  \
+                 slice_append u {sz};\n  \
+                 rewrite (mem_pts_to a p (append (slice u 0 {sz}) (slice u {sz} (len u))))\n    \
+                 as (mem_pts_to a p u);\n  \
+                 fold {un}_pts_to a p u;\n}}\n\n"
+            );
+        }
         if is_struct {
             c += &format!(
-                "ghost fn {un}_unfocus_{f} (a: ptr) (#p: perm) (#u: {un}) (#v: {tp})\n\
+                "ghost fn {un}_unfocus_{f} (a: ptr) (#p: perm) (#u: {un}) (#v: {gty})\n\
                  \x20 requires {tp}_pts_to a p v\n\
                  \x20 requires {un}_rest_{f} a p u\n\
                  \x20 ensures  exists* (c: bytes).\n\
@@ -7790,7 +8474,7 @@ fn emit_overlay_union(tds: &Typedefs, name: &str) -> String {
             );
         } else {
             c += &format!(
-                "ghost fn {un}_unfocus_{f} (a: ptr) (#p: perm) (#u: {un}) (#v: {tp})\n\
+                "ghost fn {un}_unfocus_{f} (a: ptr) (#p: perm) (#u: {un}) (#v: {gty})\n\
                  \x20 requires {tp}_pts_to a p v\n\
                  \x20 requires {un}_rest_{f} a p u\n\
                  \x20 ensures  {un}_pts_to a p (overlay u 0 v 0)\n\
@@ -7819,14 +8503,59 @@ fn emit_overlay_union(tds: &Typedefs, name: &str) -> String {
              fold {un}_rest_{f} a 1.0R u;\n}}\n\n"
         );
     }
+    // A member that is itself an overlay union of the same size and alignment
+    // is the whole object under another name: the two points-to are the same
+    // bytes, so a pointer cast between them -- `(BASE*)derived`, or a
+    // containing-record cast back -- changes no value. The prover applies
+    // these conversions itself wherever one view is held and the other is
+    // asked for, however the pointer got there.
+    for m in &ui.members {
+        let TypeT::TypeRef(TypeRefKind::Union(inner)) = &peel(tds, &m.ty).val else {
+            continue;
+        };
+        let Some(ii) = tds.unions.get(&*inner.val) else {
+            continue;
+        };
+        if !matches!(m.shape, FieldShape::One { .. })
+            || !ii.overlay
+            || m.size != n_all
+            || ii.size != n_all
+            || ii.align != ui.align
+        {
+            continue;
+        }
+        let (f, tp) = (&m.name, m.shape.pn());
+        c += &format!(
+            "(* Member `{f}` is the whole object as another overlay union: the same\n   \
+             bytes, so either view is the other. *)\n\
+             [@@pulse_intro]\n\
+             ghost fn {un}_as_{f} (a: ptr) (#p: perm) (#u: {un})\n\
+             \x20 requires {un}_pts_to a p u\n\
+             \x20 ensures  {tp}_pts_to a p u\n\
+             {{\n  \
+             unfold {un}_pts_to a p u;\n  \
+             fold {tp}_pts_to a p u;\n}}\n\n\
+             [@@pulse_intro]\n\
+             ghost fn {un}_of_{f} (a: ptr) (#p: perm) (#u: {tp})\n\
+             \x20 requires {tp}_pts_to a p u\n\
+             \x20 ensures  {un}_pts_to a p u\n\
+             {{\n  \
+             unfold {tp}_pts_to a p u;\n  \
+             fold {un}_pts_to a p u;\n}}\n\n"
+        );
+    }
     for t in &ui.ints {
-        let (n, mt) = ov_int(t).unwrap();
+        let OvLeaf {
+            size: n,
+            fty: mt,
+            ok,
+        } = ov_leaf(tds, t).unwrap();
         c += &format!(
             "(* A {t} at byte `o`, through whichever members name it. *)\n\
              fn {un}_{t}_read (a: ptr) (o: SizeT.t) (#p: perm) (#u: erased {un})\n\
              \x20 preserves {un}_pts_to a p u\n\
              \x20 requires pure (SizeT.v o + {n} <= {n_all} /\\ SizeT.v o % {n} == 0 /\\\n\
-             \x20                plain (slice u (SizeT.v o) (SizeT.v o + {n})))\n\
+             \x20                {ok} (slice u (SizeT.v o) (SizeT.v o + {n})))\n\
              \x20 returns  x : {mt}\n\
              \x20 ensures  pure (SizeT.v o + {n} <= {n_all} /\\\n\
              \x20                x == {t}_of_bytes (slice u (SizeT.v o) (SizeT.v o + {n})))\n\
@@ -7845,6 +8574,41 @@ fn emit_overlay_union(tds: &Typedefs, name: &str) -> String {
              SizeT.fits_at_least_16 (SizeT.v o + {n});\n  \
              ov_{t}_write a {un}_alignof o x;\n  \
              fold {un}_pts_to a 1.0R (overlay u 0 ({t}_bytes x) (SizeT.v o));\n}}\n\n"
+        );
+    }
+    for i in &ui.islands {
+        let il = &tds.unions[i.as_str()];
+        let (n, al) = (il.size, il.align);
+        let tun = format!("union_{}", i);
+        let isl = format!("union_{}", island_name(i));
+        let (m0, _) = island_member(tds, i).unwrap();
+        let k = format!("Union_{}.Union_{}_{}", i, i, m0);
+        let sl = format!("(slice u (SizeT.v o) (SizeT.v o + {n}))");
+        c += &format!(
+            "(* A whole `{i}` at byte `o`, an island in the bytes. *)\n\
+             fn {un}_{isl}_read (a: ptr) (o: SizeT.t) (#p: perm) (#u: erased {un})\n\
+             \x20 preserves {un}_pts_to a p u\n\
+             \x20 requires pure (SizeT.v o + {n} <= {n_all} /\\ SizeT.v o % {al} == 0 /\\\n\
+             \x20                {isl}_readable {sl})\n\
+             \x20 returns  x : {tun}\n\
+             \x20 ensures  pure (SizeT.v o + {n} <= {n_all} /\\ {k}? x /\\ {tun}_repr x {sl})\n\
+             {{\n  \
+             unfold {un}_pts_to a p u;\n  \
+             SizeT.fits_at_least_16 (SizeT.v o + {n});\n  \
+             let x = {isl}_load a {un}_alignof o;\n  \
+             fold {un}_pts_to a p u;\n  \
+             x\n}}\n\n\
+             fn {un}_{isl}_write (a: ptr) (o: SizeT.t) (x: {tun}) (#u: erased {un})\n\
+             \x20 requires {un}_pts_to a 1.0R u\n\
+             \x20 requires pure (SizeT.v o + {n} <= {n_all} /\\ SizeT.v o % {al} == 0)\n\
+             \x20 ensures  exists* (c: bytes). {un}_pts_to a 1.0R (overlay u 0 c (SizeT.v o))\n\
+             \x20            ** pure (len c == {n} /\\ {tun}_repr x c)\n\
+             {{\n  \
+             unfold {un}_pts_to a 1.0R u;\n  \
+             SizeT.fits_at_least_16 (SizeT.v o + {n});\n  \
+             {isl}_store a {un}_alignof o x;\n  \
+             with c. assert (mem_pts_to a 1.0R (overlay u 0 c (SizeT.v o)));\n  \
+             fold {un}_pts_to a 1.0R (overlay u 0 c (SizeT.v o));\n}}\n\n"
         );
     }
     // The storage layer every type publishes, so that an overlay union can be
@@ -10256,41 +11020,46 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         forget = forget
     );
 
-    let mut write = String::new();
-    write += &format!("  unfold {}_pts_to_uninit a;\n", sn);
-    for f in &si.fields {
-        match &f.shape {
-            FieldShape::One { .. } | FieldShape::Unaligned { .. } => {
-                write += &format!(
-                    "  {} (a +! {}_offsetof_{}) x.fld_{};\n",
-                    f.shape.write_fn(),
-                    sn,
-                    f.name,
-                    f.name
-                );
-            }
-            FieldShape::Flex { .. } => write += NO_FLEX_STORAGE,
-            FieldShape::Array { pn, esize, len } => {
-                write += &format!(
-                    "  {}_fill (a +! {}_offsetof_{}) x.fld_{};\n",
-                    fill_name(pn, *esize, *len),
-                    sn,
-                    f.name,
-                    f.name
-                );
+    // A struct with an overlay union in it is written field by field; see
+    // `holds_overlay`.
+    let writable = !si.fields.iter().any(|f| holds_overlay(tds, &f.ty));
+    if writable {
+        let mut write = String::new();
+        write += &format!("  unfold {}_pts_to_uninit a;\n", sn);
+        for f in &si.fields {
+            match &f.shape {
+                FieldShape::One { .. } | FieldShape::Unaligned { .. } => {
+                    write += &format!(
+                        "  {} (a +! {}_offsetof_{}) x.fld_{};\n",
+                        f.shape.write_fn(),
+                        sn,
+                        f.name,
+                        f.name
+                    );
+                }
+                FieldShape::Flex { .. } => write += NO_FLEX_STORAGE,
+                FieldShape::Array { pn, esize, len } => {
+                    write += &format!(
+                        "  {}_fill (a +! {}_offsetof_{}) x.fld_{};\n",
+                        fill_name(pn, *esize, *len),
+                        sn,
+                        f.name,
+                        f.name
+                    );
+                }
             }
         }
+        c += &format!(
+            "fn {sn}_write_uninit (a: ptr) (x: {sn})\n\
+             \x20 requires {sn}_pts_to_uninit a\n\
+             {iv}\
+             \x20 ensures  {sn}_pts_to a 1.0R x\n\
+             {{\n{write}  fold {sn}_pts_to a 1.0R x;\n}}\n\n",
+            iv = struct_inv_req(si, &sn, "x"),
+            sn = sn,
+            write = write
+        );
     }
-    c += &format!(
-        "fn {sn}_write_uninit (a: ptr) (x: {sn})\n\
-         \x20 requires {sn}_pts_to_uninit a\n\
-         {iv}\
-         \x20 ensures  {sn}_pts_to a 1.0R x\n\
-         {{\n{write}  fold {sn}_pts_to a 1.0R x;\n}}\n\n",
-        iv = struct_inv_req(si, &sn, "x"),
-        sn = sn,
-        write = write
-    );
 
     // Overwriting a whole structure that already holds a value. Going through
     // `_forget` rather than writing the fields in place is not a detour: both
@@ -10345,15 +11114,17 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         );
     }
 
-    c += &format!(
-        "fn {sn}_write (a: ptr) (x: {sn}) (#y: erased {sn})\n\
-         \x20 requires {sn}_pts_to a 1.0R y\n\
-         {iv}\
-         \x20 ensures  {sn}_pts_to a 1.0R x\n\
-         {{\n  {sn}_forget a;\n  {sn}_write_uninit a x;\n}}\n\n",
-        iv = struct_inv_req(si, &sn, "x"),
-        sn = sn
-    );
+    if writable {
+        c += &format!(
+            "fn {sn}_write (a: ptr) (x: {sn}) (#y: erased {sn})\n\
+             \x20 requires {sn}_pts_to a 1.0R y\n\
+             {iv}\
+             \x20 ensures  {sn}_pts_to a 1.0R x\n\
+             {{\n  {sn}_forget a;\n  {sn}_write_uninit a x;\n}}\n\n",
+            iv = struct_inv_req(si, &sn, "x"),
+            sn = sn
+        );
+    }
     c
 }
 
@@ -10588,6 +11359,7 @@ fn collect_array_fill_expr(tds: &Typedefs, e: &Expr, out: &mut BTreeMap<String, 
         | ExprT::Deref(x)
         | ExprT::Member(x, _)
         | ExprT::Live(x)
+        | ExprT::Unchanged(x)
         | ExprT::Old(x)
         | ExprT::ContainerOf(x, _, _)
         | ExprT::VAttr(_, x) => collect_array_fill_expr(tds, x, out),
@@ -11117,6 +11889,7 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         | ExprT::Cast(x, _)
         | ExprT::ContainerOf(x, _, _)
         | ExprT::Old(x)
+        | ExprT::Unchanged(x)
         | ExprT::Forall(_, _, x)
         | ExprT::Exists(_, _, x)
         | ExprT::UnionInit(_, _, x)
@@ -13341,10 +14114,18 @@ impl<'a> Body<'a> {
     }
 
     fn ty_of(&self, e: &Expr) -> Result<Rc<Type>, String> {
-        self.env
+        let t = self
+            .env
             .infer_expr(e)
             .map(|t| t.to_rc())
-            .map_err(|_| "the type of a subexpression could not be inferred".to_string())
+            .map_err(|_| "the type of a subexpression could not be inferred".to_string())?;
+        if let ExprT::Member(b, f) = &e.val
+            && let Ok(bt) = self.env.infer_expr(b)
+            && let Some(it) = island_field(self.tds, &bt.to_rc(), &f.val)
+        {
+            return Ok(it);
+        }
+        Ok(t)
     }
 
     /// Make a union arm the live one, leaving its storage uninitialised.
@@ -14847,70 +15628,33 @@ impl<'a> Body<'a> {
         let Some(pn) = palow_name(self.tds, &ety) else {
             return Ok(None);
         };
-        let Some((n, _)) = ov_int(&pn) else {
-            return Ok(None);
+        // An island is loaded and stored whole, aligned as its union is.
+        let island = match &peel(self.tds, &ety).val {
+            TypeT::TypeRef(TypeRefKind::Union(u)) => u
+                .val
+                .strip_suffix("__island")
+                .filter(|o| island_member(self.tds, o).is_some())
+                .map(|o| o.to_string()),
+            _ => None,
         };
-        // Walk up the path, adding up offsets, and remember the outermost
-        // overlay union seen with the offset into it.
-        let mut off: u64 = 0;
-        let mut root: Option<(Expr, String, u64)> = None;
-        let mut cur = e.clone();
-        loop {
-            match &strip_vattr(&cur).val.clone() {
-                ExprT::Member(b, f) => {
-                    let Ok(bty) = self.ty_of(b) else { break };
-                    match &peel(self.tds, &bty).val {
-                        TypeT::TypeRef(TypeRefKind::Struct(sn)) => {
-                            if bitfield_at(self.tds, &bty, &f.val).is_some() {
-                                break;
-                            }
-                            let Some(fld) = self
-                                .tds
-                                .structs
-                                .get(&*sn.val)
-                                .and_then(|si| si.fields.iter().find(|x| *x.name == *f.val))
-                            else {
-                                break;
-                            };
-                            off += fld.offset;
-                        }
-                        TypeT::TypeRef(TypeRefKind::Union(un)) if is_overlay(self.tds, &un.val) => {
-                            root = Some(((**b).clone(), un.val.to_string(), off));
-                        }
-                        _ => break,
-                    }
-                    cur = (**b).clone();
-                }
-                ExprT::Index(b, i) => {
-                    let Ok(bty) = self.ty_of(b) else { break };
-                    // The direct element type, not the flattened one: the
-                    // outer subscript of `a[i][j]` steps over whole rows.
-                    let TypeT::FixedArray(et, len) = &peel(self.tds, &bty).val else {
-                        break;
-                    };
-                    let Some(k) = const_index(&i.val) else {
-                        break;
-                    };
-                    if k >= *len {
-                        return Err(format!(
-                            "subscript {} is out of bounds of an array of {} elements",
-                            k, len
-                        ));
-                    }
-                    let Some(es) = palow_sizeof(self.tds, et) else {
-                        break;
-                    };
-                    off += k * es;
-                    cur = (**b).clone();
-                }
-                _ => break,
-            }
-        }
+        let (n, al) = match (&island, ov_leaf(self.tds, &pn)) {
+            (Some(o), _) => (
+                self.tds.unions[o.as_str()].size,
+                self.tds.unions[o.as_str()].align,
+            ),
+            (None, Some(OvLeaf { size, .. })) => (size, size),
+            (None, None) => return Ok(None),
+        };
+        let root = overlay_path(self.tds, &|x| self.ty_of(x).ok(), &e)?.root;
         let Some((root, uname, o)) = root else {
             return Ok(None);
         };
         let ui = &self.tds.unions[&uname];
-        if !ui.ints.contains(&pn) || o % n != 0 || o + n > ui.size {
+        let known = match &island {
+            Some(i) => ui.islands.contains(i),
+            None => ui.ints.contains(&pn),
+        };
+        if !known || o % al != 0 || o + n > ui.size {
             return Err(format!(
                 "a {} at byte {} of the overlay union `{}`, which it has no aligned access for",
                 pn, o, uname
@@ -15871,6 +16615,29 @@ impl<'a> Body<'a> {
                 ),
                 false => e,
             })?;
+            // Reading through a struct arm of an overlay union lends it for
+            // reading only, so the union comes back with the very bytes it
+            // had: a `preserves` of it is kept, padding and all.
+            if !writing
+                && self.overlay_of(b2).is_some()
+                && matches!(
+                    &peel(self.tds, &*self.field_ty(b2, f2)?).val,
+                    TypeT::TypeRef(TypeRefKind::Struct(_))
+                )
+            {
+                let un = self.union_of(b2).unwrap_or_default();
+                let read = |s: &String, op: &str| {
+                    let plain = format!("{}_{}_{} {};", un, op, f2.val, f.at);
+                    match *s == plain {
+                        true => format!("{}_{}_read_{} {};", un, op, f2.val, f.at),
+                        false => s.clone(),
+                    }
+                };
+                self.lines
+                    .extend(f.open_read.iter().map(|s| read(s, "focus")));
+                let close: Vec<String> = f.close_read.iter().map(|s| read(s, "unfocus")).collect();
+                return Ok((f.at, close.clone(), close));
+            }
             self.lines.extend(f.open_read.iter().cloned());
             return Ok((f.at, f.close_read, f.close_write));
         }
@@ -17551,10 +18318,17 @@ impl<'a> Body<'a> {
         let nslots = self.slots.len();
         let blocks: Vec<(bool, bool)> = self.blocks.iter().map(|b| (b.freed, b.checked)).collect();
         let outer = std::mem::take(&mut self.lines);
+        let active = self.active.clone();
+        let union_values = self.union_values.clone();
         let v = self.rvalue(e);
         let close = std::mem::take(&mut self.pending_close);
         self.lines.extend(close);
         self.close_own();
+        // The arm may not run, so what it learns about live members does not
+        // hold after the join; only what held before it and still does.
+        self.active.retain(|a, m| active.get(a) == Some(m));
+        self.union_values
+            .retain(|a, v| union_values.get(a) == Some(v));
         let lines = std::mem::replace(&mut self.lines, outer);
         let v = v?;
         let now: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
@@ -17810,7 +18584,7 @@ impl<'a> Body<'a> {
                 };
                 let f = self.access(e, false)?;
                 self.lines.extend(f.open_read.iter().cloned());
-                let t = if self.union_of(e).is_some() {
+                let t = if self.union_of(e).is_some() && !f.pn.ends_with("__island") {
                     self.read_union_value(e, &f.at, &hint)?
                 } else {
                     let t = self.fresh(&hint);
@@ -24094,6 +24868,7 @@ fn subst_var(e: &Rc<Expr>, from: &str, to: &Rc<Expr>) -> Option<Rc<Expr>> {
         ExprT::Deref(x) => at(ExprT::Deref(go(x)?)),
         ExprT::Ref(x) => at(ExprT::Ref(go(x)?)),
         ExprT::Live(x) => at(ExprT::Live(go(x)?)),
+        ExprT::Unchanged(x) => at(ExprT::Unchanged(go(x)?)),
         ExprT::Old(x) => at(ExprT::Old(go(x)?)),
         ExprT::Member(x, f) => at(ExprT::Member(go(x)?, f.clone())),
         ExprT::Index(x, i) => at(ExprT::Index(go(x)?, go(i)?)),
@@ -24702,6 +25477,50 @@ fn derived_ptr(e: &Expr) -> bool {
     }
 }
 
+/// `T *q = NULL; ... q = &place;` is C's way of declaring an alias at the top
+/// of a block and binding it later, and the `NULL` is never read: the next
+/// top-level statement to mention `q` overwrites it. That dead store is a
+/// second rebinding of `q`, which would make it an object in `alias_map`'s
+/// eyes, so it is dropped here. `None` when there was nothing to do.
+fn drop_dead_alias_inits(body: &Stmts) -> Option<Stmts> {
+    let assigned_ref = |st: &Stmt| match &st.val {
+        StmtT::Assign(lhs, rhs) if matches!(&strip_vattr(rhs).val, ExprT::Ref(_)) => {
+            lvalue_name(lhs)
+        }
+        _ => None,
+    };
+    let mut dead = HashSet::new();
+    for (i, st) in body.iter().enumerate() {
+        let StmtT::Assign(lhs, rhs) = &st.val else {
+            continue;
+        };
+        let Some(q) = lvalue_name(lhs) else {
+            continue;
+        };
+        if !matches!(&strip_casts(rhs).val, ExprT::IntLit(n, _) if **n == BigInt::ZERO) {
+            continue;
+        }
+        let next = body[i + 1..].iter().find(|s| {
+            let mut t = Touched::default();
+            touch_stmts(&vec![(*s).clone()], &mut t);
+            t.vars.contains(&q) || t.rebound.contains_key(&q)
+        });
+        if next.and_then(|s| assigned_ref(s)).as_ref() == Some(&q) {
+            dead.insert(i);
+        }
+    }
+    if dead.is_empty() {
+        return None;
+    }
+    Some(
+        body.iter()
+            .enumerate()
+            .filter(|(i, _)| !dead.contains(i))
+            .map(|(_, s)| s.clone())
+            .collect(),
+    )
+}
+
 /// `q = &a[i++]` and `q = a + i++` evaluate the index once, but an alias
 /// stands for its place at every use and would evaluate it each time. Binding
 /// the index first -- `__pal_idx_n = i++; q = &a[__pal_idx_n]` -- keeps the
@@ -24853,6 +25672,17 @@ fn emit_body(
                 ..defn.clone()
             };
             &hoisted
+        }
+        None => defn,
+    };
+    let undead;
+    let defn = match drop_dead_alias_inits(&defn.body) {
+        Some(body) => {
+            undead = FnDefn {
+                body,
+                ..defn.clone()
+            };
+            &undead
         }
         None => defn,
     };
@@ -25696,9 +26526,11 @@ fn expr_kind(e: &Expr) -> &'static str {
         ExprT::UnOp(..) => "a unary operator",
         ExprT::ContainerOf(..) => "`_container_of`",
         ExprT::InlinePulse(..) => "inline Pulse",
-        ExprT::Live(..) | ExprT::Old(..) | ExprT::Forall(..) | ExprT::Exists(..) => {
-            "a specification construct"
-        }
+        ExprT::Live(..)
+        | ExprT::Unchanged(..)
+        | ExprT::Old(..)
+        | ExprT::Forall(..)
+        | ExprT::Exists(..) => "a specification construct",
         _ => "this expression",
     }
 }

@@ -448,6 +448,7 @@ impl<'a> Checker<'a> {
                 self.check_inline_pulse_code(env, code);
             }
             ExprT::Live(lval) => self.check_rvalue(env, lval),
+            ExprT::Unchanged(lval) => self.check_lvalue(env, lval),
             ExprT::Old(rval) => self.check_rvalue(env, rval),
             ExprT::Forall(var, ty, body) | ExprT::Exists(var, ty, body) => {
                 self.check_type(env, ty);

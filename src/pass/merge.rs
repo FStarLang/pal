@@ -83,6 +83,7 @@ fn rename_expr_in_place(expr: &mut Expr, renames: &HashMap<Rc<str>, Rc<Ident>>) 
         | ExprT::Ref(a)
         | ExprT::UnOp(_, a)
         | ExprT::Live(a)
+        | ExprT::Unchanged(a)
         | ExprT::Old(a)
         | ExprT::PreIncr(a)
         | ExprT::PostIncr(a)
@@ -567,6 +568,7 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     }
 
     // === Phase 2.5: Give implicitly-declared struct tags a placeholder ===
+    opaque_incomplete_unions(tu);
     declare_implicit_structs(tu);
 
     // === Phase 3: Order type definitions before their dependents ===
@@ -661,6 +663,7 @@ fn collect_refs_expr(e: &Expr, out: &mut Vec<TypeKey>) {
         | ExprT::Ref(a)
         | ExprT::UnOp(_, a)
         | ExprT::Live(a)
+        | ExprT::Unchanged(a)
         | ExprT::Old(a)
         | ExprT::PreIncr(a)
         | ExprT::PostIncr(a)
@@ -1039,6 +1042,37 @@ fn declare_implicit_structs(tu: &mut TranslationUnit) {
                 val: DeclT::StructDecl(ident),
             },
         );
+    }
+}
+
+/// Turn every union tag the unit names but never defines into a struct tag.
+///
+/// A header can name `union u` only through pointers in a unit that never
+/// sees its body -- a forward-declared request type, say. Such a tag has no
+/// size and no members, just like an incomplete struct, and C's single tag
+/// namespace means no struct shares its name. Respelling it as a struct gives
+/// it the opaque placeholder `declare_implicit_structs` already provides,
+/// instead of a reference to a union module that is never created.
+fn opaque_incomplete_unions(tu: &mut TranslationUnit) {
+    let defined: HashSet<Rc<str>> = tu
+        .decls
+        .iter()
+        .filter_map(|d| match &d.val {
+            DeclT::UnionDefn(u) => Some(u.name.val.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut refs: Vec<TypeKey> = Vec::new();
+    for decl in &tu.decls {
+        collect_decl_type_refs(decl, false, &mut refs);
+    }
+    let missing: HashSet<Rc<str>> = refs
+        .into_iter()
+        .filter(|(ns, name)| *ns == UNION_NS && !defined.contains(name))
+        .map(|(_, name)| name)
+        .collect();
+    if !missing.is_empty() {
+        crate::pass::elim_cis::rewrite_union_refs_to_struct(tu, &missing);
     }
 }
 

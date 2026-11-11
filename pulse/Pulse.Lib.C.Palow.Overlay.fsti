@@ -24,6 +24,7 @@ module Pulse.Lib.C.Palow.Overlay
 #lang-pulse
 open Pulse
 open Pulse.Lib.C.Palow.Bytes
+open Pulse.Lib.C.Palow.Encoding
 open Pulse.Lib.C.Palow.Ptr
 open Pulse.Lib.C.Palow
 open Pulse.Lib.C.Palow.Scalar
@@ -61,6 +62,30 @@ val overlay_slice (b: bytes) (o: nat) (n: nat { o + n <= len b })
   : Lemma (overlay b 0 (slice b o (o + n)) o == b)
           [SMTPat (overlay b 0 (slice b o (o + n)) o)]
 #pop-options
+
+(* `_unchanged`: bytes `i` to `j` of `b1` are those of `b2`. A predicate of
+   its own, rather than the slice equality it means, so that what it says
+   about every range inside `[i, j)` is found by the patterns below: the
+   ranges a caller goes on to read are smaller than the one a callee
+   promised, and often reached through a slice of a larger object. *)
+let range_unchanged (b1 b2: bytes) (i j: nat) : prop =
+  i <= j /\ j <= len b1 /\ j <= len b2 /\ slice b1 i j == slice b2 i j
+
+val range_unchanged_sub (b1 b2: bytes) (i j k l: nat)
+  : Lemma (requires range_unchanged b1 b2 i j /\ i <= k /\ k <= l /\ l <= j)
+          (ensures  slice b1 k l == slice b2 k l)
+          [SMTPat (range_unchanged b1 b2 i j); SMTPat (slice b1 k l)]
+
+val range_unchanged_in (c: bytes) (s e: nat) (b2: bytes) (i j k l: nat)
+  : Lemma (requires s <= e /\ e <= len c /\ range_unchanged (slice c s e) b2 i j /\
+                    s + i <= k /\ k <= l /\ l <= s + j)
+          (ensures  slice c k l == slice b2 (k - s) (l - s))
+          [SMTPat (range_unchanged (slice c s e) b2 i j); SMTPat (slice c k l)]
+
+(* A witness of a property known to have one, for ghost code: how the load
+   of an island picks the member value its bytes are the representation of. *)
+val ov_pick (#t: Type) (q: t -> prop)
+  : Ghost (erased t) (requires exists v. q v) (ensures fun v -> q (reveal v))
 
 (* What putting a member's bytes back in front of the rest of the union is. *)
 val append_overlay (u: bytes) (c: bytes { len c <= len u })
@@ -135,6 +160,40 @@ val array_repr_view (#t: Type) (t_repr: t -> bytes -> prop) (esize: pos) (n: nat
   : Lemma (requires array_repr_o t_repr esize xs b /\ Seq.length xs == n /\
                     (forall (x: t) (c: bytes). t_repr x c ==> plain c /\ f c == x))
           (ensures  plain b /\ array_view esize n f b == xs)
+
+(* Arrays of structs. A struct's view is ghost (a pointer leaf is decoded by
+   choice), and is defined only on runs of exactly its size, so the view of an
+   array of structs is a ghost sequence, readable when every element is. *)
+(* Both are opaque to SMT: a store elsewhere in an overlay keeps them by
+   congruence on the unchanged bytes, and the two lemmas below are the only
+   places that need to look inside. *)
+[@@"opaque_to_smt"]
+let array_view_ok (esize: pos) (n: nat) (ok: (c: bytes { len c == esize }) -> prop)
+                  (b: bytes { len b == esize * n }) : prop =
+  forall (i: nat). i < n ==> ok (slice b (esize * i) (esize * i + esize))
+
+[@@"opaque_to_smt"]
+let array_view_g (#t: Type) (esize: pos) (n: nat) (f: (c: bytes { len c == esize }) -> GTot t)
+                 (b: bytes { len b == esize * n })
+  : GTot (s: Seq.seq t { Seq.length s == n })
+  = Seq.init_ghost n (fun (i: nat { i < n }) -> f (slice b (esize * i) (esize * i + esize)))
+
+val array_view_g_repr (#t: Type) (t_repr: t -> bytes -> prop) (esize: pos) (n: nat)
+                      (ok: (c: bytes { len c == esize }) -> prop)
+                      (f: (c: bytes { len c == esize }) -> GTot t)
+                      (lem: (c: bytes { len c == esize }) -> Lemma (requires ok c) (ensures t_repr (f c) c))
+                      (b: bytes { len b == esize * n })
+  : Lemma (requires array_view_ok esize n ok b)
+          (ensures  array_repr_o t_repr esize (array_view_g esize n f b) b)
+
+val array_repr_view_g (#t: Type) (t_repr: t -> bytes -> prop) (esize: pos) (n: nat)
+                      (ok: (c: bytes { len c == esize }) -> prop)
+                      (f: (c: bytes { len c == esize }) -> GTot t)
+                      (lem: (x: t) -> (c: bytes { len c == esize }) ->
+                            Lemma (requires t_repr x c) (ensures ok c /\ f c == x))
+                      (xs: Seq.seq t) (b: bytes { len b == esize * n })
+  : Lemma (requires array_repr_o t_repr esize xs b /\ Seq.length xs == n)
+          (ensures  array_view_ok esize n ok b /\ array_view_g esize n f b == xs)
 
 (* ---------------------------------------------------------------------------
    Per integer type: the view of a range and the two lemmas, and the leaf load
@@ -359,3 +418,118 @@ fn ov_int64_t_write (a: ptr) (al: SZ.t) (o: SZ.t) (x: I64.t) (#u: erased bytes)
   requires pure (SZ.v o + 8 <= len u /\ SZ.fits (SZ.v o + 8) /\ aligned a al /\
                  SZ.v al % 8 == 0 /\ SZ.v o % 8 == 0)
   ensures  mem_pts_to a 1.0R (overlay u 0 (int64_t_bytes x) (SZ.v o))
+
+(* ---------------------------------------------------------------------------
+   `bool`, `size_t` and pointers
+
+   The same three things for the leaves that are not fixed-width integers.
+
+   - A `bool` is one plain byte holding 0 or 1. Any other value is not a
+     `bool` (C11 6.2.6.2p5 leaves it a trap representation in practice), so
+     its view requires it.
+   - A `size_t` is `Target.ptr_bytes` plain bytes, like the unsigned integer
+     of that width.
+   - A pointer is the bytes of its address, each carrying its provenance --
+     `Scalar.ptr_repr`. Those bytes are not plain, so a pointer field is
+     readable when its bytes are *some* pointer's representation, and the
+     view is that pointer. There is no total function from bytes back to a
+     pointer, since the provenance has no runtime existence; the view is
+     ghost, and the load returns the pointer that is there.
+   --------------------------------------------------------------------------- *)
+
+(* bool *)
+let bool_t_bytes (x: bool) : bytes = encode 1 None (if x then 1 else 0)
+
+let bool_t_view_ok (b: bytes) : prop = plain b /\ len b == 1 /\ bytes_nat b < 2
+
+let bool_t_of_bytes (b: bytes) : bool = bytes_nat b <> 0
+
+val bool_t_view_repr (b: bytes)
+  : Lemma (requires bool_t_view_ok b) (ensures bool_t_repr (bool_t_of_bytes b) b)
+
+val bool_t_repr_view (x: bool) (b: bytes)
+  : Lemma (requires bool_t_repr x b) (ensures bool_t_view_ok b /\ bool_t_of_bytes b == x)
+
+val bool_t_of_bytes_bytes (x: bool)
+  : Lemma (bool_t_view_ok (bool_t_bytes x) /\ bool_t_of_bytes (bool_t_bytes x) == x)
+          [SMTPat (bool_t_of_bytes (bool_t_bytes x))]
+
+fn ov_bool_t_read (a: ptr) (al: SZ.t) (o: SZ.t) (#p: perm) (#u: erased bytes)
+  preserves mem_pts_to a p u
+  requires pure (SZ.v o + 1 <= len u /\ SZ.fits (SZ.v o + 1) /\ aligned a al /\
+                 bool_t_view_ok (slice u (SZ.v o) (SZ.v o + 1)))
+  returns  x : bool
+  ensures  pure (SZ.v o + 1 <= len u /\ x == bool_t_of_bytes (slice u (SZ.v o) (SZ.v o + 1)))
+
+fn ov_bool_t_write (a: ptr) (al: SZ.t) (o: SZ.t) (x: bool) (#u: erased bytes)
+  requires mem_pts_to a 1.0R u
+  requires pure (SZ.v o + 1 <= len u /\ SZ.fits (SZ.v o + 1) /\ aligned a al)
+  ensures  mem_pts_to a 1.0R (overlay u 0 (bool_t_bytes x) (SZ.v o))
+
+(* size_t *)
+let size_t_bytes (x: SZ.t) : bytes = encode (SZ.v size_t_sizeof) None (SZ.v x)
+
+val size_t_of_bytes (b: bytes) : SZ.t
+
+val size_t_view_repr (b: bytes)
+  : Lemma (requires plain b /\ len b == SZ.v size_t_sizeof)
+          (ensures  size_t_repr (size_t_of_bytes b) b)
+
+val size_t_repr_view (x: SZ.t) (b: bytes)
+  : Lemma (requires size_t_repr x b)
+          (ensures  plain b /\ len b == SZ.v size_t_sizeof /\ size_t_of_bytes b == x)
+
+val size_t_of_bytes_bytes (x: SZ.t)
+  : Lemma (plain (size_t_bytes x) /\ size_t_of_bytes (size_t_bytes x) == x)
+          [SMTPat (size_t_of_bytes (size_t_bytes x))]
+
+fn ov_size_t_read (a: ptr) (al: SZ.t) (o: SZ.t) (#p: perm) (#u: erased bytes)
+  preserves mem_pts_to a p u
+  requires pure (SZ.v o + SZ.v size_t_sizeof <= len u /\ SZ.fits (SZ.v o + SZ.v size_t_sizeof) /\
+                 aligned a al /\ SZ.v al % SZ.v size_t_sizeof == 0 /\
+                 SZ.v o % SZ.v size_t_sizeof == 0 /\
+                 plain (slice u (SZ.v o) (SZ.v o + SZ.v size_t_sizeof)))
+  returns  x : SZ.t
+  ensures  pure (SZ.v o + SZ.v size_t_sizeof <= len u /\
+                 x == size_t_of_bytes (slice u (SZ.v o) (SZ.v o + SZ.v size_t_sizeof)))
+
+fn ov_size_t_write (a: ptr) (al: SZ.t) (o: SZ.t) (x: SZ.t) (#u: erased bytes)
+  requires mem_pts_to a 1.0R u
+  requires pure (SZ.v o + SZ.v size_t_sizeof <= len u /\ SZ.fits (SZ.v o + SZ.v size_t_sizeof) /\
+                 aligned a al /\ SZ.v al % SZ.v size_t_sizeof == 0 /\
+                 SZ.v o % SZ.v size_t_sizeof == 0)
+  ensures  mem_pts_to a 1.0R (overlay u 0 (size_t_bytes x) (SZ.v o))
+
+(* pointers *)
+let ptr_bytes (x: ptr) : GTot bytes = encode (SZ.v ptr_sizeof) (prov_of x) (addr_of x)
+
+let ptr_view_ok (b: bytes) : prop = exists (x: ptr). ptr_repr x b
+
+val ptr_of_bytes (b: bytes) : GTot ptr
+
+val ptr_view_repr (b: bytes)
+  : Lemma (requires ptr_view_ok b) (ensures ptr_repr (ptr_of_bytes b) b)
+
+val ptr_repr_view (x: ptr) (b: bytes)
+  : Lemma (requires ptr_repr x b) (ensures ptr_view_ok b /\ ptr_of_bytes b == x)
+
+val ptr_of_bytes_bytes (x: ptr)
+  : Lemma (ptr_view_ok (ptr_bytes x) /\ ptr_of_bytes (ptr_bytes x) == x)
+          [SMTPat (ptr_of_bytes (ptr_bytes x))]
+
+fn ov_ptr_read (a: ptr) (al: SZ.t) (o: SZ.t) (#p: perm) (#u: erased bytes)
+  preserves mem_pts_to a p u
+  requires pure (SZ.v o + SZ.v ptr_sizeof <= len u /\ SZ.fits (SZ.v o + SZ.v ptr_sizeof) /\
+                 aligned a al /\ SZ.v al % SZ.v ptr_sizeof == 0 /\
+                 SZ.v o % SZ.v ptr_sizeof == 0 /\
+                 ptr_view_ok (slice u (SZ.v o) (SZ.v o + SZ.v ptr_sizeof)))
+  returns  x : ptr
+  ensures  pure (SZ.v o + SZ.v ptr_sizeof <= len u /\
+                 x == ptr_of_bytes (slice u (SZ.v o) (SZ.v o + SZ.v ptr_sizeof)))
+
+fn ov_ptr_write (a: ptr) (al: SZ.t) (o: SZ.t) (x: ptr) (#u: erased bytes)
+  requires mem_pts_to a 1.0R u
+  requires pure (SZ.v o + SZ.v ptr_sizeof <= len u /\ SZ.fits (SZ.v o + SZ.v ptr_sizeof) /\
+                 aligned a al /\ SZ.v al % SZ.v ptr_sizeof == 0 /\
+                 SZ.v o % SZ.v ptr_sizeof == 0)
+  ensures  mem_pts_to a 1.0R (overlay u 0 (ptr_bytes x) (SZ.v o))

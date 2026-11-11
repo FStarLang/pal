@@ -827,6 +827,14 @@ fn expr_parser<
                             .with_loc(sift.resolve_source_info(&s))
                             .into())
                     }
+                    "_unchanged" => {
+                        let &[arg] = &args.as_slice() else {
+                            return Err(Rich::custom(s, "_unchanged takes exactly one argument"));
+                        };
+                        Ok(ExprT::Unchanged(arg.clone().to_rvalue())
+                            .with_loc(sift.resolve_source_info(&s))
+                            .into())
+                    }
                     "_live" => {
                         let &[arg] = &args.as_slice() else {
                             return Err(Rich::custom(s, "_live takes exactly one argument"));

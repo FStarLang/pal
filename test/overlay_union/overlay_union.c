@@ -118,3 +118,10 @@ void Grid_Set(GRID* g)
 {
     g->Rows.P[1][0] = 7;
 }
+
+/* `_unchanged` of a row is bytes [4, 8): a store to byte 1 keeps it. */
+void Grid_KeepRow(GRID* g)
+    _ensures(_unchanged(g->Rows.P[1]))
+{
+    g->Flat.Q[1] = 1;
+}

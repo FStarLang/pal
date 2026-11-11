@@ -270,6 +270,11 @@ impl PrettyIR for ExprT {
             .append(RcDoc::text(")"))
             .nest(2)
             .group(),
+            ExprT::Unchanged(v) => RcDoc::text("_unchanged(")
+                .append(v.to_doc())
+                .append(")")
+                .nest(2)
+                .group(),
             ExprT::Live(v) => RcDoc::text("_live(")
                 .append(v.to_doc())
                 .append(")")

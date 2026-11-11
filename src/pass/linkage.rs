@@ -689,6 +689,7 @@ impl Renamer<'_> {
             | ExprT::Ref(e)
             | ExprT::UnOp(_, e)
             | ExprT::Live(e)
+            | ExprT::Unchanged(e)
             | ExprT::Old(e)
             | ExprT::Free(e)
             | ExprT::PreIncr(e)
