@@ -147,6 +147,7 @@ fn normalize_expr(env: &Env, expr: &mut Expr) {
         | ExprT::Ref(value)
         | ExprT::UnOp(_, value)
         | ExprT::Live(value)
+        | ExprT::Unchanged(value)
         | ExprT::Old(value)
         | ExprT::Free(value)
         | ExprT::PreIncr(value)

@@ -833,6 +833,7 @@ impl<'a> Elaborator<'a> {
             }
             ExprT::BoolLit(_) => {}
             ExprT::Live(val) => self.elab_rvalue(env, Rc::make_mut(val), None),
+            ExprT::Unchanged(val) => self.elab_lvalue(env, Rc::make_mut(val)),
             ExprT::Old(val) => self.elab_rvalue(env, Rc::make_mut(val), None),
             ExprT::Forall(var, ty, body) | ExprT::Exists(var, ty, body) => {
                 let mut env = env.clone();

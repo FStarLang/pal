@@ -357,6 +357,10 @@ pub enum ExprT {
     ContainerOf(Rc<Expr>, Rc<Type>, Rc<Ident>),
     InlinePulse(Rc<InlinePulseCode>, Rc<Type>),
     Live(Rc<Expr>),
+    /// `_unchanged(lv)`, in a postcondition: the bytes of the object `lv`
+    /// names are the ones it had on entry, provenance and all. A bytewise
+    /// frame, for storage a function does not interpret.
+    Unchanged(Rc<Expr>),
     Old(Rc<Expr>),
     Forall(Rc<Ident>, Rc<Type>, Rc<Expr>),
     Exists(Rc<Ident>, Rc<Type>, Rc<Expr>),

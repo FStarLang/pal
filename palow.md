@@ -1428,8 +1428,8 @@ modelled instead as its bytes:
 - `union_U` is `b: bytes{length b == sizeof U}` and `union_U_pts_to a p u` is
   `mem_pts_to a p u` plus alignment. There is no tag.
 - Every struct reachable from an overlay union gets a *view* --
-  `struct_S_view_ok (b: bytes)` (every scalar leaf's bytes are plain and
-  decode) and `struct_S_view b : struct_S` -- with lemmas from
+  `struct_S_view_ok (b: bytes)` (every leaf's bytes are readable as it) and
+  the ghost `struct_S_view b : GTot struct_S` -- with lemmas from
   `Pulse.Lib.C.Palow.Overlay` (`array_view`, `append_overlay`, `plain_split`,
   `plain_sub`). `uint8_array_view_inj_at` says the view of a plain byte array
   determines its bytes, and so every range inside it; its hypothesis has
@@ -1442,6 +1442,23 @@ modelled instead as its bytes:
   `_unfocus_m` writes some encoding of the struct back *over* the union's
   first `sizeof m` bytes, so the bytes past the member are kept. A member
   that is itself an overlay union is always `is`.
+- The leaves a view reads are the fixed-width integers, which are readable
+  when their bytes are plain; `bool`, whose byte must also be 0 or 1;
+  `size_t`; and pointers, including function pointers, whose bytes must
+  encode *some* pointer, provenance included (`ptr_view_ok`). Decoding a
+  pointer is not computable, which is why views are ghost. An array field
+  must have integer elements.
+- Every union reachable from an overlay union is an overlay union too,
+  `_overlay` or not. Its bytes are part of the same object, and every layer
+  reads them through its own members, so a union nested in a layer's view
+  -- an anonymous union of alternative names for a parameter area, say -- is
+  punned just as the outer one is. A struct view sees such a field as its
+  bytes, not as a member's view, and so needs nothing of them: an opaque
+  `char` area another layer has stored pointers into still has a view.
+  Members of an overlay union may be structs, unions, scalars (with the same
+  `is`/`get`/`focus` functions as a struct member) or integer arrays (whose
+  elements are reached by the scalar accessors below, at constant
+  subscripts; they have no functions of their own).
 - Per scalar type `X` whose size divides the union's alignment:
   `union_U_X_read a o` needs the bytes at offset `o` to be plain and returns
   their decoding; `union_U_X_write a o x` makes the union
@@ -1460,10 +1477,23 @@ the whole arm, and a store through it uses `_switch_m`. In contracts,
 `union_U_active_A`, and there is no tag guard: the read is well defined
 exactly when its bytes are, which is what the body's read checks.
 
+`_unchanged(lv)` in a postcondition says the object `lv` names has the bytes
+it had on entry. Inside an overlay union it is
+`Overlay.range_unchanged u' u o (o + n)` for the outermost overlay union `u`
+on the path, with `lv` at offset `o` and `sizeof(lv) == n`. Elsewhere it is
+equality of values. It is how a layer that does not interpret a region --
+the parameter area of a request, which the layer above has stored pointers
+into -- promises to leave it alone: comparing the region element by element
+with `_old` would need its bytes to be plain, and they are not. The lemmas
+on `range_unchanged` give the same fact for every range inside the region,
+including ranges reached through a slice of an enclosing object, which is
+how the caller's fields in it are known to keep their values.
+
 What is rejected:
 
-- A whole-member store (`r->Params = p`) and a whole-value read of an overlay
-  union. C11 6.2.6.1p7 leaves the bytes of other members unspecified after a
+- A whole-member store (`r->Params = p`) and a whole-value read or write of
+  an overlay union or of a struct with one in it (its value is bytes with
+  provenance, which a program cannot hold). C11 6.2.6.1p7 leaves the bytes of other members unspecified after a
   member store, so the frame property cannot be claimed; write fields instead.
 - Reading a field whose bytes were never written (`overlay_union_unread_bad`).
 
@@ -1474,17 +1504,19 @@ one whose contract promises a byte array back element by element, after which
 the fields of other views stored in those bytes are still known);
 `overlay_union_unread_bad`, `overlay_union_clobber_bad` (a store into `Params`
 claimed not to change `Generic.Parameters[8]`, which it overlaps),
-`overlay_union_whole_bad`.
+`overlay_union_whole_bad`; `overlay_union_leaves` (pointer, function
+pointer, `bool` and `size_t` leaves; a lower layer whose parameter area is
+an anonymous union of byte arrays the upper layer stores pointers into, and
+which promises it `_unchanged`; a nested union with a scalar member);
+`overlay_union_unchanged_bad` (a store into a region promised `_unchanged`).
 
 Limitations:
 
-- Only fixed-width integer leaves take the offset path; pointers, `bool`,
-  floats and `size_t` go through member focus.
+- Floats are not leaves; a field of floating type has no view.
+- An array of pointers or `bool`s has no view.
 - A scalar store is assumed to change only its own bytes. C11 6.2.6.1p6 lets
   a store into a *struct member* make padding unspecified; that is ignored,
   as everywhere else in Palow.
-- An overlay union as a field of a struct, and an ordinary union inside an
-  overlay union, are untested.
 
 ### Known deviations
 

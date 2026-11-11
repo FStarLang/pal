@@ -268,7 +268,7 @@ fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
             scan_exprs(deps, args);
         }
         ExprT::BoolLit(_) => {}
-        ExprT::Live(v) => scan_expr(deps, v),
+        ExprT::Live(v) | ExprT::Unchanged(v) => scan_expr(deps, v),
         ExprT::Old(v) => scan_expr(deps, v),
         ExprT::Forall(_, ty, body) | ExprT::Exists(_, ty, body) => {
             scan_type(deps, ty);

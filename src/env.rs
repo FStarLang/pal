@@ -501,6 +501,7 @@ impl Env {
             }
             ExprT::BoolLit(_) => Ok(TypeT::Bool.with_loc_core(expr.loc.clone()).into()),
             ExprT::Live(_) => Ok(TypeT::SLProp.with_loc_core(expr.loc.clone()).into()),
+            ExprT::Unchanged(_) => Ok(TypeT::Bool.with_loc_core(expr.loc.clone()).into()),
             ExprT::Old(v) => self.infer_expr(v),
             ExprT::Forall(var, ty, body) | ExprT::Exists(var, ty, body) => {
                 let mut env = self.clone();
