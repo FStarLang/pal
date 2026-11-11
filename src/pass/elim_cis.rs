@@ -27,7 +27,10 @@
 //! (no branches), reusing all existing struct machinery. Unions that do not
 //! match the strict shape are left completely untouched.
 
-use std::{collections::HashMap, rc::Rc};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 use crate::{diag::Diagnostics, env::Env, ir::*, mayberc::MaybeRc};
 
@@ -200,9 +203,8 @@ pub fn elim_simple_cis(_diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     // Phase 2: rewrite every `Union(u)` type reference to `Struct(u)`, then
     // replace each eliminated `UnionDefn` with a `StructDefn` of the same name
     // holding only the named arm as its field.
-    for decl in tu.decls.iter_mut() {
-        rewrite_types_decl(&mut decl.val, &elim);
-    }
+    let names: HashSet<Rc<IdentT>> = elim.keys().cloned().collect();
+    rewrite_union_refs_to_struct(tu, &names);
     // The layout table is keyed by how a type is spelled, so a union that
     // becomes a struct needs its entry moved across or nothing downstream can
     // size it. The size and alignment carry over unchanged -- the collapse
@@ -471,10 +473,18 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
 // Phase 2: type-reference rewrites
 // ---------------------------------------------------------------------------
 
-fn rewrite_type(ty: &mut Rc<Type>, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
+/// Rewrite every `Union(u)` type reference with `u` in `names` to `Struct(u)`,
+/// throughout the unit's declarations, specifications and bodies.
+pub fn rewrite_union_refs_to_struct(tu: &mut TranslationUnit, names: &HashSet<Rc<IdentT>>) {
+    for decl in tu.decls.iter_mut() {
+        rewrite_types_decl(&mut decl.val, names);
+    }
+}
+
+fn rewrite_type(ty: &mut Rc<Type>, elim: &HashSet<Rc<IdentT>>) {
     let t = Rc::make_mut(ty);
     match &mut t.val {
-        TypeT::TypeRef(TypeRefKind::Union(n)) if elim.contains_key(&n.val) => {
+        TypeT::TypeRef(TypeRefKind::Union(n)) if elim.contains(&n.val) => {
             t.val = TypeT::TypeRef(TypeRefKind::Struct(n.clone()));
         }
         TypeT::Pointer(inner, _)
@@ -492,7 +502,7 @@ fn rewrite_type(ty: &mut Rc<Type>, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
     }
 }
 
-fn rewrite_types_decl(decl: &mut DeclT, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
+fn rewrite_types_decl(decl: &mut DeclT, elim: &HashSet<Rc<IdentT>>) {
     match decl {
         DeclT::FnDefn(FnDefn { decl, body }) => {
             rewrite_types_fn_decl(decl, elim);
@@ -526,13 +536,13 @@ fn rewrite_types_decl(decl: &mut DeclT, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
     }
 }
 
-fn rewrite_types_field(f: &mut Field, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
+fn rewrite_types_field(f: &mut Field, elim: &HashSet<Rc<IdentT>>) {
     match &mut f.val {
         FieldT::Plain { ty, .. } | FieldT::BitField { ty, .. } => rewrite_type(ty, elim),
     }
 }
 
-fn rewrite_types_fn_decl(decl: &mut FnDecl, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
+fn rewrite_types_fn_decl(decl: &mut FnDecl, elim: &HashSet<Rc<IdentT>>) {
     for ga in decl.ghost_args.iter_mut() {
         rewrite_type(&mut ga.ty, elim);
     }
@@ -545,13 +555,13 @@ fn rewrite_types_fn_decl(decl: &mut FnDecl, elim: &HashMap<Rc<IdentT>, ElimUnion
     }
 }
 
-fn rewrite_types_stmts(stmts: &mut Stmts, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
+fn rewrite_types_stmts(stmts: &mut Stmts, elim: &HashSet<Rc<IdentT>>) {
     for stmt in stmts.iter_mut() {
         rewrite_types_stmt(Rc::make_mut(stmt), elim);
     }
 }
 
-fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
+fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashSet<Rc<IdentT>>) {
     match &mut stmt.val {
         StmtT::Call(e) | StmtT::Assert(e) | StmtT::Return(Some(e)) => {
             rewrite_types_expr(Rc::make_mut(e), elim)
@@ -640,7 +650,7 @@ fn rewrite_types_stmt(stmt: &mut Stmt, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
     }
 }
 
-fn rewrite_types_expr(e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) {
+fn rewrite_types_expr(e: &mut Expr, elim: &HashSet<Rc<IdentT>>) {
     match &mut e.val {
         ExprT::IntLit(_, ty)
         | ExprT::FloatLit(_, ty)

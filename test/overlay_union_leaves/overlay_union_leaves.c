@@ -188,3 +188,26 @@ CODE_PLUS Upper_SwapSaved(UPPER_REQUEST* Request, CODE_PLUS Code)
     Request->Lower.Saved = Code;
     return prev;
 }
+
+/* A union only ever declared, reached through a pointer: it is opaque. */
+typedef union _LATER_REQUEST LATER_REQUEST;
+typedef union _overlay _OUTER_REQUEST
+{
+    UPPER_PARAMS Params;
+    LOWER_REQUEST Lower;
+    LATER_REQUEST* Later;
+} OUTER_REQUEST;
+
+/* A store of an island, after reading the old value twice under
+   short-circuit `||`: the island stays readable after the store. */
+bool Outer_SetSaved(OUTER_REQUEST* Request, CODE_PLUS Code, bool Force)
+    _requires(Request->Lower.Saved.Status._active)
+    _requires(Code.Status._active)
+    _ensures(Request->Lower.Saved.Status._active)
+    _ensures(_unchanged(Request->Lower.Common))
+{
+    CODE_PLUS prev = Request->Lower.Saved;
+    bool wasSet = Force || prev.Status.Code == 0 || prev.Status.Location == 0;
+    Request->Lower.Saved = Code;
+    return wasSet;
+}

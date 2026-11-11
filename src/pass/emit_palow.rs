@@ -2772,17 +2772,15 @@ impl<'a> Spec<'a> {
         }
     }
 
-    /// `_unchanged(lv)`: the object `lv` names has the bytes it had on
-    /// entry. Inside an `_overlay` union that is a statement about a byte
-    /// range of the outermost overlay union on the path -- the object's
-    /// offset and size in it -- so it holds of storage whose bytes are not
-    /// readable as any member, such as an opaque `char` array another layer
-    /// has stored pointers over. Anywhere else it is equality of values.
-    fn unchanged(&self, lv: &Expr, w: When) -> Result<String, String> {
-        if !matches!(w, When::Post) {
-            return Err("`_unchanged` outside a postcondition".to_string());
-        }
-        let ty = self.ty_of(lv)?;
+    /// The outermost `_overlay` union a place lies in, and the place's byte
+    /// offset in it, when every step from there to the place is a struct
+    /// field, an overlay member or a constant array index. `None` when the
+    /// place is not inside an overlay, or the path leaves the bytes the
+    /// overlay's layout fixes (a bitfield, a variable index).
+    fn overlay_root(&self, lv: &Expr) -> Option<(Expr, u64)> {
+        let Ok(ty) = self.ty_of(lv) else {
+            return None;
+        };
         let mut off: u64 = 0;
         let mut root: Option<(Expr, u64)> = None;
         let mut cur = lv.clone();
@@ -2835,6 +2833,21 @@ impl<'a> Spec<'a> {
         {
             root = Some((lv.clone(), 0));
         }
+        root
+    }
+
+    /// `_unchanged(lv)`: the object `lv` names has the bytes it had on
+    /// entry. Inside an `_overlay` union that is a statement about a byte
+    /// range of the outermost overlay union on the path -- the object's
+    /// offset and size in it -- so it holds of storage whose bytes are not
+    /// readable as any member, such as an opaque `char` array another layer
+    /// has stored pointers over. Anywhere else it is equality of values.
+    fn unchanged(&self, lv: &Expr, w: When) -> Result<String, String> {
+        if !matches!(w, When::Post) {
+            return Err("`_unchanged` outside a postcondition".to_string());
+        }
+        let ty = self.ty_of(lv)?;
+        let root = self.overlay_root(lv);
         match root {
             Some((r, o)) => {
                 let n = palow_sizeof(self.tds, &ty).ok_or_else(|| {
@@ -3858,7 +3871,27 @@ impl<'a> Spec<'a> {
                 if let Some(orig) = u.val.strip_suffix("__island") {
                     return match island_member(self.tds, orig) {
                         Some((m0, _)) if *m0 == *m.val => {
-                            Ok(format!("(union_{}_active {})", u.val, self.value(obj, w)?))
+                            // Inside an overlay the island is a byte range
+                            // of the root, and saying so directly is what
+                            // the root's whole-value load and store speak
+                            // of; the chain of views down to it is not
+                            // something the prover unfolds cheaply.
+                            let v = self.value(obj, w)?;
+                            if let Some((r, o)) = self.overlay_root(obj)
+                                && let Some(n) = palow_sizeof(self.tds, &uty)
+                            {
+                                let rv = self.value(&r, w)?;
+                                if rv != v {
+                                    return Ok(format!(
+                                        "(union_{}_active (slice {} {} {}))",
+                                        u.val,
+                                        rv,
+                                        o,
+                                        o + n
+                                    ));
+                                }
+                            }
+                            Ok(format!("(union_{}_active {})", u.val, v))
                         }
                         _ => Err(format!(
                             "`_active` on member `{}` of `{}` inside an overlay; only the \
@@ -18150,10 +18183,17 @@ impl<'a> Body<'a> {
         let nslots = self.slots.len();
         let blocks: Vec<(bool, bool)> = self.blocks.iter().map(|b| (b.freed, b.checked)).collect();
         let outer = std::mem::take(&mut self.lines);
+        let active = self.active.clone();
+        let union_values = self.union_values.clone();
         let v = self.rvalue(e);
         let close = std::mem::take(&mut self.pending_close);
         self.lines.extend(close);
         self.close_own();
+        // The arm may not run, so what it learns about live members does not
+        // hold after the join; only what held before it and still does.
+        self.active.retain(|a, m| active.get(a) == Some(m));
+        self.union_values
+            .retain(|a, v| union_values.get(a) == Some(v));
         let lines = std::mem::replace(&mut self.lines, outer);
         let v = v?;
         let now: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
