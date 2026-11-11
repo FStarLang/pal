@@ -698,6 +698,16 @@ public:
       recordFieldOffsets(kLayoutStruct, toStringRef(ident_name(ident)), decl);
       ctx.add_struct(std::move(builder));
     } else if (decl->getTagKind() == TagTypeKind::Union) {
+      if (decl->hasAttrs()) {
+        for (auto *attr : decl->getAttrs()) {
+          if (auto *ann = dyn_cast<AnnotateAttr>(attr)) {
+            if (ann->getAnnotation() == "pal-overlay" &&
+                ann->args_size() == 0) {
+              builder.set_overlay();
+            }
+          }
+        }
+      }
       // Process nested record declarations (inner structs/unions)
       for (auto *D : decl->decls()) {
         if (auto *inner = dyn_cast<RecordDecl>(D)) {

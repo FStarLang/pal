@@ -300,6 +300,7 @@ impl<'a> Ctx<'a> {
             val: DeclT::UnionDefn(UnionDefn {
                 name: builder.name,
                 fields: builder.fields,
+                overlay: builder.overlay,
             }),
         })
     }
@@ -574,6 +575,7 @@ struct DeclBuilder {
     is_total: bool,
     decreases: Option<Rc<Expr>>,
     eager_unfold_pred: bool,
+    overlay: bool,
 }
 
 impl DeclBuilder {
@@ -593,6 +595,7 @@ impl DeclBuilder {
             is_total: false,
             decreases: None,
             eager_unfold_pred: false,
+            overlay: false,
         }
     }
 
@@ -664,6 +667,9 @@ impl DeclBuilder {
     }
     fn set_eager_unfold_pred(&mut self) {
         self.eager_unfold_pred = true;
+    }
+    fn set_overlay(&mut self) {
+        self.overlay = true;
     }
     fn decreases(&mut self, p: Rc<Expr>) {
         self.decreases = Some(p);

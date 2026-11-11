@@ -1408,6 +1408,84 @@ machine primitives, but note that their *specifications* are written entirely
 in terms of the derived layer-1 predicates, so they add operations rather than
 new facts about memory.
 
+### Overlay unions
+
+An ordinary union is a tagged value: one member is live, and writing another
+member forgets everything about the first (`_switch_m` hands out uninit
+storage). That is the right model for a choice between alternatives, but not
+for a layered request layout, where one object is viewed through several
+struct members at once -- a scheduler owns `Generic.Status`, a library owns
+`BaseParams.ActivityId`, the request type owns its own parameters -- and each
+layer relies on the others' fields, which occupy bytes its own fields do not,
+surviving its stores. The tagged model cannot state that a store through
+`Params` leaves `BaseParams.ActivityId` unchanged, so such code could not be
+verified.
+
+A union declared `_overlay` (`typedef union _overlay _REQ { ... }`,
+`#define _overlay __attribute__((annotate("pal-overlay")))` in `pal.h`) is
+modelled instead as its bytes:
+
+- `union_U` is `b: bytes{length b == sizeof U}` and `union_U_pts_to a p u` is
+  `mem_pts_to a p u` plus alignment. There is no tag.
+- Every struct reachable from an overlay union gets a *view* --
+  `struct_S_view_ok (b: bytes)` (every scalar leaf's bytes are plain and
+  decode) and `struct_S_view b : struct_S` -- with lemmas from
+  `Pulse.Lib.C.Palow.Overlay` (`array_view`, `append_overlay`, `plain_split`,
+  `plain_sub`). `uint8_array_view_inj_at` says the view of a plain byte array
+  determines its bytes, and so every range inside it; its hypothesis has
+  the shape PAL gives `_forall(size_t k, k < n ==> a[k] == _old(a[k]))`, so
+  a callee that keeps a view's byte array keeps every other view's fields
+  inside it.
+- Per member `m`: `union_U_is_m u` (the view is defined), `union_U_get_m u`
+  (the view), `union_U_active_m u` (a ghost bool equal to `is_m`), and
+  `_focus_m` / `_unfocus_m` / `_switch_m` / `_rest_m` as for a tagged union.
+  `_unfocus_m` writes some encoding of the struct back *over* the union's
+  first `sizeof m` bytes, so the bytes past the member are kept. A member
+  that is itself an overlay union is always `is`.
+- Per scalar type `X` whose size divides the union's alignment:
+  `union_U_X_read a o` needs the bytes at offset `o` to be plain and returns
+  their decoding; `union_U_X_write a o x` makes the union
+  `overlay u (X_bytes x) o`. That is the frame property: a store changes
+  exactly `sizeof X` bytes. A field of another member keeps its value when
+  its bytes are disjoint from those, and is clobbered when they overlap
+  (`overlay_union_clobber_bad`).
+
+In a function body, a member path `r->A.B[k].C` that ends at a scalar of one
+of those types, through struct fields and constant indices, is translated as a
+read or write of the *outermost* overlay union at the constant offset of the
+path; the arms it passes through are never focused. Any other use of a member
+(passing `&r->Params` to a callee, a non-constant index, a bit-field) focuses
+the whole arm, and a store through it uses `_switch_m`. In contracts,
+`r->A.B.C` means `union_U_get_A(...).B.C`, `_active(r->A)` means
+`union_U_active_A`, and there is no tag guard: the read is well defined
+exactly when its bytes are, which is what the body's read checks.
+
+What is rejected:
+
+- A whole-member store (`r->Params = p`) and a whole-value read of an overlay
+  union. C11 6.2.6.1p7 leaves the bytes of other members unspecified after a
+  member store, so the frame property cannot be claimed; write fields instead.
+- Reading a field whose bytes were never written (`overlay_union_unread_bad`).
+
+Tests: `overlay_union` (scalar stores through three views of a layered
+request, each keeping the fields of the others that it does not overlap; a
+constant subscript into a byte array; lending an arm to a callee, including
+one whose contract promises a byte array back element by element, after which
+the fields of other views stored in those bytes are still known);
+`overlay_union_unread_bad`, `overlay_union_clobber_bad` (a store into `Params`
+claimed not to change `Generic.Parameters[8]`, which it overlaps),
+`overlay_union_whole_bad`.
+
+Limitations:
+
+- Only fixed-width integer leaves take the offset path; pointers, `bool`,
+  floats and `size_t` go through member focus.
+- A scalar store is assumed to change only its own bytes. C11 6.2.6.1p6 lets
+  a store into a *struct member* make padding unspecified; that is ignored,
+  as everywhere else in Palow.
+- An overlay union as a field of a struct, and an ordinary union inside an
+  overlay union, are untested.
+
 ### Known deviations
 
 - **Over-aligned types are not modelled.** Ordinary alignment is (see

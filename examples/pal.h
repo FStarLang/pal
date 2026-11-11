@@ -50,6 +50,11 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _rec __attribute((annotate("pal-rec")))
 #define _pulse_eager_unfold_predicate __attribute__((annotate("pal-eager-unfold-predicate")))
 #define _pointer_view __attribute__((annotate("pal-pointer-view")))
+/* Marks a union whose members are views of one object rather than
+   alternatives, such as a request several layers each own fields of. Its
+   value is its bytes, and a store through one member changes only the bytes
+   of the field it writes. See palow.md, "Overlay unions". */
+#define _overlay __attribute__((annotate("pal-overlay")))
 /* Marks a platform wrapper around `memset(p, 0, n)` -- zero_memory,
    RtlZeroMemory, bzero -- so that calls of the form `f(ptr, sizeof(*ptr))`
    translate to the same whole-object zeroing that a direct memset does. An
@@ -111,6 +116,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _rec
 #define _pulse_eager_unfold_predicate
 #define _pointer_view
+#define _overlay
 #define _memset_zero
 #define _decreases(p)
 
