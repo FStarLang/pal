@@ -8220,6 +8220,9 @@ fn collect_overlay_union(
 ///   bytes past it exactly (`_rest_m`), and take it back. Coming back, only
 ///   the member's own range has changed: `overlay u 0 c 0`.
 /// - `_switch_m`: the member's storage, for a callee to fill.
+/// - `_as_m` / `_of_m` (`pulse_intro`), when `m` is an overlay union of the
+///   same size and alignment: the conversions a pointer cast between the two
+///   needs, which the prover applies where it has to.
 ///
 /// And per integer type `t` among the leaves, `_t_read` / `_t_write` at a
 /// byte offset, which is how the body reads and writes a scalar field
@@ -8381,6 +8384,47 @@ fn emit_overlay_union(tds: &Typedefs, name: &str) -> String {
              mem_split a {sz}sz;\n  \
              {tp}_claim_uninit a #(slice u 0 {sz});\n  \
              fold {un}_rest_{f} a 1.0R u;\n}}\n\n"
+        );
+    }
+    // A member that is itself an overlay union of the same size and alignment
+    // is the whole object under another name: the two points-to are the same
+    // bytes, so a pointer cast between them -- `(BASE*)derived`, or a
+    // containing-record cast back -- changes no value. The prover applies
+    // these conversions itself wherever one view is held and the other is
+    // asked for, however the pointer got there.
+    for m in &ui.members {
+        let TypeT::TypeRef(TypeRefKind::Union(inner)) = &peel(tds, &m.ty).val else {
+            continue;
+        };
+        let Some(ii) = tds.unions.get(&*inner.val) else {
+            continue;
+        };
+        if !matches!(m.shape, FieldShape::One { .. })
+            || !ii.overlay
+            || m.size != n_all
+            || ii.size != n_all
+            || ii.align != ui.align
+        {
+            continue;
+        }
+        let (f, tp) = (&m.name, m.shape.pn());
+        c += &format!(
+            "(* Member `{f}` is the whole object as another overlay union: the same\n   \
+             bytes, so either view is the other. *)\n\
+             [@@pulse_intro]\n\
+             ghost fn {un}_as_{f} (a: ptr) (#p: perm) (#u: {un})\n\
+             \x20 requires {un}_pts_to a p u\n\
+             \x20 ensures  {tp}_pts_to a p u\n\
+             {{\n  \
+             unfold {un}_pts_to a p u;\n  \
+             fold {tp}_pts_to a p u;\n}}\n\n\
+             [@@pulse_intro]\n\
+             ghost fn {un}_of_{f} (a: ptr) (#p: perm) (#u: {tp})\n\
+             \x20 requires {tp}_pts_to a p u\n\
+             \x20 ensures  {un}_pts_to a p u\n\
+             {{\n  \
+             unfold {tp}_pts_to a p u;\n  \
+             fold {un}_pts_to a p u;\n}}\n\n"
         );
     }
     for t in &ui.ints {
