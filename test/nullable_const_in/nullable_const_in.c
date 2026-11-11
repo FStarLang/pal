@@ -78,3 +78,39 @@ uint32_t call_borrowed_member(PCPair q)
     result = read_optional(&q->a);
     return result;
 }
+
+/*
+ * A pointee whose field has a struct-level `_refine` is not handed a guard by
+ * PAL: the refinement is a second guarded conjunct in the callee's contract,
+ * and a guard PAL introduced at the zero value would compete with the
+ * author's, which may name any value. The author introduces both.
+ */
+typedef struct _refine(this.lo <= this.hi) Range
+{
+    uint32_t lo;
+    uint32_t hi;
+} Range;
+
+typedef struct Span
+{
+    uint32_t base;
+    Range range;
+} Span;
+
+uint32_t read_optional_span(_nullable const Span* s)
+{
+    return 0;
+}
+
+uint32_t call_declined_span(void)
+{
+    uint32_t result;
+
+    _ghost_stmt(
+        intro_unless_null_null null (struct_Span_pts_to null 1.0R
+            ({ fld_base = 7ul; fld_range = ({ fld_lo = 1ul; fld_hi = 2ul }) }));
+        intro_unless_null_null null (pure (UInt32.v 1ul <= UInt32.v 2ul)));
+    result = read_optional_span(NULL);
+    _ghost_stmt(elim_unless_null_null null _; elim_unless_null_null null _);
+    return result;
+}
