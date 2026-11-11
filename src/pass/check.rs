@@ -840,7 +840,7 @@ impl<'a> Checker<'a> {
                 }
             }
             DeclT::StructDecl(_) => {}
-            DeclT::UnionDefn(UnionDefn { name: _, fields }) => {
+            DeclT::UnionDefn(UnionDefn { fields, .. }) => {
                 for f in fields {
                     self.check_field(env, f, fields);
                 }

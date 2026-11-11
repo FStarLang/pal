@@ -505,6 +505,9 @@ impl StructDefn {
 pub struct UnionDefn {
     pub name: Rc<Ident>,
     pub fields: Vec<Field>,
+    /// `_overlay`: the members are views of one object rather than
+    /// alternatives, and the value is the object's bytes. See palow.md.
+    pub overlay: bool,
 }
 
 impl UnionDefn {

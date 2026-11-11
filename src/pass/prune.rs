@@ -476,7 +476,7 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
             DeclT::StructDecl(_) => {
                 deps.deps_for(n);
             }
-            DeclT::UnionDefn(UnionDefn { name: _, fields }) => {
+            DeclT::UnionDefn(UnionDefn { fields, .. }) => {
                 let ds = deps.deps_for(n);
                 for f in fields {
                     scan_field(ds, f);
