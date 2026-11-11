@@ -1518,15 +1518,19 @@ What is rejected:
   provenance, which a program cannot hold). C11 6.2.6.1p7 leaves the bytes of other members unspecified after a
   member store, so the frame property cannot be claimed; write fields instead.
 - Reading a field whose bytes were never written (`overlay_union_unread_bad`).
+- A constant subscript past the end of its array, even when its bytes are
+  inside the union (`overlay_union_oob_bad`).
 
 Tests: `overlay_union` (scalar stores through three views of a layered
 request, each keeping the fields of the others that it does not overlap; a
 constant subscript into a byte array; lending an arm to a callee, including
 one whose contract promises a byte array back element by element, after which
-the fields of other views stored in those bytes are still known);
+the fields of other views stored in those bytes are still known; a
+two-dimensional subscript, whose outer index steps over whole rows);
 `overlay_union_unread_bad`, `overlay_union_clobber_bad` (a store into `Params`
 claimed not to change `Generic.Parameters[8]`, which it overlaps),
-`overlay_union_whole_bad`; `overlay_union_leaves` (pointer, function
+`overlay_union_whole_bad`, `overlay_union_2d_bad`, `overlay_union_oob_bad`;
+`overlay_union_leaves` (pointer, function
 pointer, `bool` and `size_t` leaves; a lower layer whose parameter area is
 an anonymous union of byte arrays the upper layer stores pointers into, and
 which promises it `_unchanged`; a nested union with a scalar member; an
