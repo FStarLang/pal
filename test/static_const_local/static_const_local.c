@@ -27,3 +27,14 @@ uint32_t scaled(uint32_t x) _requires(x < 1000) _ensures(return == 4 * x) {
     static const uint32_t factor = 4;
     return factor * x;
 }
+
+/* `sizeof(*(a))` decays the array, but only in an unevaluated operand. */
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof(*(x)))
+
+size_t entry_count(void) _ensures(return == 2) {
+    static const entry entries[] = {
+        {.offset = 0, .kind = 5},
+        {.offset = 8, .kind = 7},
+    };
+    return ARRAY_SIZE(entries);
+}

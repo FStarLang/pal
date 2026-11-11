@@ -109,8 +109,11 @@ static const VarDecl *lvalueRoot(const Expr *e) {
 
 // Whether `s` takes the address of (part of) `vd`, either with `&` or by
 // letting an array decay to a pointer anywhere but as the base of a subscript.
+// The operand of `sizeof` or `_Alignof` is not evaluated (a `static const`
+// cannot be a VLA), so nothing in it takes an address: `sizeof(*(a))` in the
+// common `ARRAY_SIZE(a)` macro is fine.
 static bool takesAddressOf(const VarDecl *vd, const Stmt *s) {
-  if (!s)
+  if (!s || isa<UnaryExprOrTypeTraitExpr>(s))
     return false;
   if (auto *uo = dyn_cast<UnaryOperator>(s)) {
     if (uo->getOpcode() == UO_AddrOf && lvalueRoot(uo->getSubExpr()) == vd)
