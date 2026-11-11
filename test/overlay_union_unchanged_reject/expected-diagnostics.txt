@@ -1,0 +1,3 @@
+# Expected translation diagnostic substrings
+subscript 6 is out of bounds of an array of 4 elements
+at an offset that is not constant

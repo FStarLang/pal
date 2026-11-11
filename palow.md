@@ -1459,8 +1459,8 @@ modelled instead as its bytes:
   bytes, not as a member's view, and so needs nothing of them: an opaque
   `char` area another layer has stored pointers into still has a view.
   The exception is a named union the translation unit also uses as a whole
-  value -- a parameter, a return value, a global or a local, like a status
-  word that is passed around by value. An overlay union has no whole values,
+  value -- a parameter, a return value, a global or a local (including an
+  array of them), like a status word that is passed around by value. An overlay union has no whole values,
   so such a union keeps its tagged model everywhere, and a field of it inside
   an overlay is an *island*: its type there is `union_U__island`, a member-less
   overlay union of the same size and alignment, i.e. the field's bytes, which
@@ -1509,7 +1509,20 @@ into -- promises to leave it alone: comparing the region element by element
 with `_old` would need its bytes to be plain, and they are not. The lemmas
 on `range_unchanged` give the same fact for every range inside the region,
 including ranges reached through a slice of an enclosing object, which is
-how the caller's fields in it are known to keep their values.
+how the caller's fields in it are known to keep their values. The offset is
+computed as in a body (an outer subscript of a multi-dimensional array steps
+over whole rows); a path under an overlay union whose offset is not constant
+-- through a bit-field or a variable subscript -- is rejected rather than
+weakened to equality of values.
+
+Being an overlay is contagious: every union nested in a layer's view of an
+overlay union is punned (except a whole-value union, which becomes an island),
+and which unions are punned is decided per translation unit: a union not
+declared `_overlay` is punned in a unit that nests it in an overlay union, and
+keeps its tagged model in a unit that does not, so the two units' Pulse
+types for it differ. Every struct or
+union that contains an overlay union, at any depth, is a sequence of bytes
+too, and has no whole values.
 
 What is rejected:
 
@@ -1519,14 +1532,17 @@ What is rejected:
   member store, so the frame property cannot be claimed; write fields instead.
 - Reading a field whose bytes were never written (`overlay_union_unread_bad`).
 - A constant subscript past the end of its array, even when its bytes are
-  inside the union (`overlay_union_oob_bad`).
+  inside the union (`overlay_union_oob_bad`), in a body or in `_unchanged`.
+- `_unchanged` of a place under an overlay union at an offset that is not
+  constant (`overlay_union_unchanged_reject`).
 
 Tests: `overlay_union` (scalar stores through three views of a layered
 request, each keeping the fields of the others that it does not overlap; a
 constant subscript into a byte array; lending an arm to a callee, including
 one whose contract promises a byte array back element by element, after which
 the fields of other views stored in those bytes are still known; a
-two-dimensional subscript, whose outer index steps over whole rows);
+two-dimensional subscript, whose outer index steps over whole rows, also in
+`_unchanged`);
 `overlay_union_unread_bad`, `overlay_union_clobber_bad` (a store into `Params`
 claimed not to change `Generic.Parameters[8]`, which it overlaps),
 `overlay_union_whole_bad`, `overlay_union_2d_bad`, `overlay_union_oob_bad`;
@@ -1537,7 +1553,9 @@ which promises it `_unchanged`; a nested union with a scalar member; an
 island, a named union also returned by value, loaded and stored whole both
 through a pointer to its struct and through the outer overlay; an array of
 one-byte bit-field structs);
-`overlay_union_unchanged_bad` (a store into a region promised `_unchanged`).
+`overlay_union_unchanged_bad` (a store into a region promised `_unchanged`),
+`overlay_union_unchanged_2d_bad` (the same, for a row of a two-dimensional
+array), `overlay_union_unchanged_reject`.
 
 Limitations:
 

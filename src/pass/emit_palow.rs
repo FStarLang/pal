@@ -1133,6 +1133,112 @@ fn is_overlay(tds: &Typedefs, u: &str) -> bool {
     tds.unions.get(u).is_some_and(|x| x.overlay)
 }
 
+/// Where a place lies in the `_overlay` unions on its path, as found by
+/// walking up from the place to its base.
+struct OverlayPath {
+    /// The outermost overlay union reached by struct fields, overlay members
+    /// and constant subscripts only: the union expression, its C name, and the
+    /// place's byte offset in it.
+    root: Option<(Expr, String, u64)>,
+    /// No root was found, but the place is inside an overlay union further up:
+    /// the steps between them (a bit-field, a variable subscript) do not fix
+    /// its offset.
+    opaque: bool,
+}
+
+/// The byte offset of a place in the outermost overlay union on its path; see
+/// `OverlayPath`. Shared by the body, which reads and writes a leaf at that
+/// offset, and the specification, which states `_unchanged` of that range, so
+/// that both agree on where the place is. A constant subscript is scaled by
+/// the size of the indexed array's direct element type -- the outer index of
+/// `a[i][j]` steps over whole rows -- and has to be in bounds.
+fn overlay_path(
+    tds: &Typedefs,
+    ty_of: &dyn Fn(&Expr) -> Option<Rc<Type>>,
+    e: &Expr,
+) -> Result<OverlayPath, String> {
+    let mut off: u64 = 0;
+    let mut root: Option<(Expr, String, u64)> = None;
+    let mut cur = e.clone();
+    let mut stopped = false;
+    loop {
+        match &strip_vattr(&cur).val.clone() {
+            ExprT::Member(b, f) => {
+                let Some(bty) = ty_of(b) else { break };
+                match &peel(tds, &bty).val {
+                    TypeT::TypeRef(TypeRefKind::Struct(sn)) => {
+                        if bitfield_at(tds, &bty, &f.val).is_some() {
+                            stopped = true;
+                            break;
+                        }
+                        let Some(fld) = tds
+                            .structs
+                            .get(&*sn.val)
+                            .and_then(|si| si.fields.iter().find(|x| *x.name == *f.val))
+                        else {
+                            stopped = true;
+                            break;
+                        };
+                        off += fld.offset;
+                    }
+                    TypeT::TypeRef(TypeRefKind::Union(un)) if is_overlay(tds, &un.val) => {
+                        root = Some(((**b).clone(), un.val.to_string(), off));
+                    }
+                    _ => {
+                        stopped = true;
+                        break;
+                    }
+                }
+                cur = (**b).clone();
+            }
+            ExprT::Index(b, i) => {
+                let Some(bty) = ty_of(b) else { break };
+                let TypeT::FixedArray(et, len) = &peel(tds, &bty).val else {
+                    stopped = true;
+                    break;
+                };
+                let Some(k) = const_index(&i.val) else {
+                    stopped = true;
+                    break;
+                };
+                if k >= *len {
+                    return Err(format!(
+                        "subscript {} is out of bounds of an array of {} elements",
+                        k, len
+                    ));
+                }
+                let Some(es) = palow_sizeof(tds, et) else {
+                    stopped = true;
+                    break;
+                };
+                off += k * es;
+                cur = (**b).clone();
+            }
+            _ => break,
+        }
+    }
+    // Where the walk stopped short, is there an overlay union further up?
+    let mut opaque = false;
+    if stopped && root.is_none() {
+        let mut up = cur;
+        loop {
+            let b = match &strip_vattr(&up).val {
+                ExprT::Member(b, _) | ExprT::Index(b, _) => (**b).clone(),
+                _ => break,
+            };
+            if let Some(bty) = ty_of(&b)
+                && let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(tds, &bty).val
+                && is_overlay(tds, &un.val)
+            {
+                opaque = true;
+                break;
+            }
+            up = b;
+        }
+    }
+    Ok(OverlayPath { root, opaque })
+}
+
 /// Whether a value of `ty` has part of an overlay union in it. Such a value
 /// is bytes, pointer provenance and all, so it is not something a program can
 /// hold, and there is no whole-value reader or writer for it: the fields are
@@ -2775,65 +2881,29 @@ impl<'a> Spec<'a> {
     /// The outermost `_overlay` union a place lies in, and the place's byte
     /// offset in it, when every step from there to the place is a struct
     /// field, an overlay member or a constant array index. `None` when the
-    /// place is not inside an overlay, or the path leaves the bytes the
-    /// overlay's layout fixes (a bitfield, a variable index).
-    fn overlay_root(&self, lv: &Expr) -> Option<(Expr, u64)> {
-        let Ok(ty) = self.ty_of(lv) else {
-            return None;
-        };
-        let mut off: u64 = 0;
-        let mut root: Option<(Expr, u64)> = None;
-        let mut cur = lv.clone();
-        loop {
-            match &strip_vattr(&cur).val.clone() {
-                ExprT::Member(b, f) => {
-                    let Ok(bty) = self.ty_of(b) else { break };
-                    match &peel(self.tds, &bty).val {
-                        TypeT::TypeRef(TypeRefKind::Struct(sn)) => {
-                            if bitfield_at(self.tds, &bty, &f.val).is_some() {
-                                break;
-                            }
-                            let Some(fld) = self
-                                .tds
-                                .structs
-                                .get(&*sn.val)
-                                .and_then(|si| si.fields.iter().find(|x| *x.name == *f.val))
-                            else {
-                                break;
-                            };
-                            off += fld.offset;
-                        }
-                        TypeT::TypeRef(TypeRefKind::Union(un)) if is_overlay(self.tds, &un.val) => {
-                            root = Some(((**b).clone(), off));
-                        }
-                        _ => break,
-                    }
-                    cur = (**b).clone();
-                }
-                ExprT::Index(b, i) => {
-                    let Ok(bty) = self.ty_of(b) else { break };
-                    let (Some(k), Some((et, _))) =
-                        (const_index(&i.val), flat_array(self.tds, &bty))
-                    else {
-                        break;
-                    };
-                    let Some(es) = palow_sizeof(self.tds, et) else {
-                        break;
-                    };
-                    off += k * es;
-                    cur = (**b).clone();
-                }
-                _ => break,
-            }
+    /// place is not inside an overlay; an error when it is but the path
+    /// leaves the bytes the overlay's layout fixes (a bit-field, a variable
+    /// index), or a constant subscript is out of bounds.
+    fn overlay_root(&self, lv: &Expr) -> Result<Option<(Expr, u64)>, String> {
+        let ty = self.ty_of(lv)?;
+        let path = overlay_path(self.tds, &|x| self.ty_of(x).ok(), lv)?;
+        if let Some((r, _, o)) = path.root {
+            return Ok(Some((r, o)));
+        }
+        if path.opaque {
+            return Err(
+                "a place inside an overlay union at an offset that is not constant (a \
+                 bit-field or a variable subscript is on the path)"
+                    .to_string(),
+            );
         }
         // The whole of an overlay union is its bytes, so it is its own root.
-        if root.is_none()
-            && let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(self.tds, &ty).val
+        if let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(self.tds, &ty).val
             && is_overlay(self.tds, &un.val)
         {
-            root = Some((lv.clone(), 0));
+            return Ok(Some((lv.clone(), 0)));
         }
-        root
+        Ok(None)
     }
 
     /// `_unchanged(lv)`: the object `lv` names has the bytes it had on
@@ -2847,7 +2917,7 @@ impl<'a> Spec<'a> {
             return Err("`_unchanged` outside a postcondition".to_string());
         }
         let ty = self.ty_of(lv)?;
-        let root = self.overlay_root(lv);
+        let root = self.overlay_root(lv)?;
         match root {
             Some((r, o)) => {
                 let n = palow_sizeof(self.tds, &ty).ok_or_else(|| {
@@ -3877,7 +3947,7 @@ impl<'a> Spec<'a> {
                             // of; the chain of views down to it is not
                             // something the prover unfolds cheaply.
                             let v = self.value(obj, w)?;
-                            if let Some((r, o)) = self.overlay_root(obj)
+                            if let Some((r, o)) = self.overlay_root(obj)?
                                 && let Some(n) = palow_sizeof(self.tds, &uty)
                             {
                                 let rv = self.value(&r, w)?;
@@ -7619,6 +7689,8 @@ fn ov_array_leaf(pn: &str) -> bool {
 /// parameter, a return value, a global or a local.
 fn value_unions(tu: &TranslationUnit, tds: &Typedefs) -> HashSet<String> {
     fn note(tds: &Typedefs, t: &Type, out: &mut HashSet<String>) {
+        // An array of unions holds whole values too.
+        let t = flat_array(tds, t).map_or(t, |(e, _)| e);
         if let TypeT::TypeRef(TypeRefKind::Union(n)) = &peel(tds, t).val {
             out.insert(n.val.to_string());
         }
@@ -7626,7 +7698,9 @@ fn value_unions(tu: &TranslationUnit, tds: &Typedefs) -> HashSet<String> {
     fn stmts(tds: &Typedefs, ss: &Stmts, out: &mut HashSet<String>) {
         for st in ss {
             match &st.val {
-                StmtT::Decl(_, t) | StmtT::Let(_, t, _) => note(tds, t, out),
+                StmtT::Decl(_, t)
+                | StmtT::Let(_, t, _)
+                | StmtT::DeclStackArray { elem_type: t, .. } => note(tds, t, out),
                 StmtT::If {
                     then_branch,
                     else_branch,
@@ -15528,62 +15602,7 @@ impl<'a> Body<'a> {
             (None, Some(OvLeaf { size, .. })) => (size, size),
             (None, None) => return Ok(None),
         };
-        // Walk up the path, adding up offsets, and remember the outermost
-        // overlay union seen with the offset into it.
-        let mut off: u64 = 0;
-        let mut root: Option<(Expr, String, u64)> = None;
-        let mut cur = e.clone();
-        loop {
-            match &strip_vattr(&cur).val.clone() {
-                ExprT::Member(b, f) => {
-                    let Ok(bty) = self.ty_of(b) else { break };
-                    match &peel(self.tds, &bty).val {
-                        TypeT::TypeRef(TypeRefKind::Struct(sn)) => {
-                            if bitfield_at(self.tds, &bty, &f.val).is_some() {
-                                break;
-                            }
-                            let Some(fld) = self
-                                .tds
-                                .structs
-                                .get(&*sn.val)
-                                .and_then(|si| si.fields.iter().find(|x| *x.name == *f.val))
-                            else {
-                                break;
-                            };
-                            off += fld.offset;
-                        }
-                        TypeT::TypeRef(TypeRefKind::Union(un)) if is_overlay(self.tds, &un.val) => {
-                            root = Some(((**b).clone(), un.val.to_string(), off));
-                        }
-                        _ => break,
-                    }
-                    cur = (**b).clone();
-                }
-                ExprT::Index(b, i) => {
-                    let Ok(bty) = self.ty_of(b) else { break };
-                    // The direct element type, not the flattened one: the
-                    // outer subscript of `a[i][j]` steps over whole rows.
-                    let TypeT::FixedArray(et, len) = &peel(self.tds, &bty).val else {
-                        break;
-                    };
-                    let Some(k) = const_index(&i.val) else {
-                        break;
-                    };
-                    if k >= *len {
-                        return Err(format!(
-                            "subscript {} is out of bounds of an array of {} elements",
-                            k, len
-                        ));
-                    }
-                    let Some(es) = palow_sizeof(self.tds, et) else {
-                        break;
-                    };
-                    off += k * es;
-                    cur = (**b).clone();
-                }
-                _ => break,
-            }
-        }
+        let root = overlay_path(self.tds, &|x| self.ty_of(x).ok(), &e)?.root;
         let Some((root, uname, o)) = root else {
             return Ok(None);
         };
