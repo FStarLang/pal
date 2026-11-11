@@ -8293,6 +8293,8 @@ fn collect_overlay_union(
 /// - `_focus_m` / `_unfocus_m`: lend the member as its own type, keeping the
 ///   bytes past it exactly (`_rest_m`), and take it back. Coming back, only
 ///   the member's own range has changed: `overlay u 0 c 0`.
+/// - `_focus_read_m` / `_unfocus_read_m`, for a struct member: the same lend
+///   for a read, which gives the union back with exactly the bytes it had.
 /// - `_switch_m`: the member's storage, for a callee to fill.
 /// - `_as_m` / `_of_m` (`pulse_intro`), when `m` is an overlay union of the
 ///   same size and alignment: the conversions a pointer cast between the two
@@ -8414,6 +8416,47 @@ fn emit_overlay_union(tds: &Typedefs, name: &str) -> String {
             "  {tp}_conceal a #p #(slice u 0 {sz}) #({un}_get_{f} u);\n  \
              fold {un}_rest_{f} a p u;\n}}\n\n"
         );
+        if is_struct && leaf.is_none() {
+            c += &format!(
+                "(* A read-only lend of member `{f}`: the view gets half the permission and\n   \
+                 the other half keeps the member's bytes, so when the view comes back\n   \
+                 they are known to be exactly the ones lent, padding included. *)\n\
+                 let {un}_rest_read_{f} (a: ptr) (p: perm) (u: {un}) : slprop =\n  \
+                 mem_pts_to a (p /. 2.0R) (slice u 0 {sz}) ** {un}_rest_{f} a p u\n\n\
+                 ghost fn {un}_focus_read_{f} (a: ptr) (#p: perm) (#u: {un})\n\
+                 \x20 requires {un}_pts_to a p u\n\
+                 \x20 requires pure ({un}_is_{f} u)\n\
+                 \x20 ensures  {tp}_pts_to a (p /. 2.0R) ({un}_get_{f} u)\n\
+                 \x20 ensures  {un}_rest_read_{f} a p u\n\
+                 {{\n  \
+                 unfold {un}_pts_to a p u;\n  \
+                 {un}_member_aligned a;\n  \
+                 mem_split a {sz}sz;\n  \
+                 mem_share a #p #(slice u 0 {sz});\n  \
+                 {tp}_view_repr (slice u 0 {sz});\n  \
+                 {tp}_conceal a #(p /. 2.0R) #(slice u 0 {sz}) #({un}_get_{f} u);\n  \
+                 fold {un}_rest_{f} a p u;\n  \
+                 fold {un}_rest_read_{f} a p u;\n}}\n\n\
+                 ghost fn {un}_unfocus_read_{f} (a: ptr) (#p: perm) (#u: {un})\n\
+                 \x20 requires {tp}_pts_to a (p /. 2.0R) ({un}_get_{f} u)\n\
+                 \x20 requires {un}_rest_read_{f} a p u\n\
+                 \x20 ensures  {un}_pts_to a p u\n\
+                 {{\n  \
+                 {tp}_reveal a #(p /. 2.0R) #({un}_get_{f} u);\n  \
+                 with c. assert (mem_pts_to a (p /. 2.0R) c ** pure ({tp}_repr ({un}_get_{f} u) c));\n  \
+                 unfold {un}_rest_read_{f} a p u;\n  \
+                 {tp}_repr_len ({un}_get_{f} u) c;\n  \
+                 mem_gather a #(p /. 2.0R) #(p /. 2.0R) #(slice u 0 {sz}) #c;\n  \
+                 rewrite (mem_pts_to a (p /. 2.0R +. p /. 2.0R) (slice u 0 {sz}))\n    \
+                 as (mem_pts_to a p (slice u 0 {sz}));\n  \
+                 unfold {un}_rest_{f} a p u;\n  \
+                 mem_join a #p #(slice u 0 {sz}) #(slice u {sz} {n_all}) {sz}sz;\n  \
+                 slice_append u {sz};\n  \
+                 rewrite (mem_pts_to a p (append (slice u 0 {sz}) (slice u {sz} (len u))))\n    \
+                 as (mem_pts_to a p u);\n  \
+                 fold {un}_pts_to a p u;\n}}\n\n"
+            );
+        }
         if is_struct {
             c += &format!(
                 "ghost fn {un}_unfocus_{f} (a: ptr) (#p: perm) (#u: {un}) (#v: {gty})\n\
@@ -16572,6 +16615,29 @@ impl<'a> Body<'a> {
                 ),
                 false => e,
             })?;
+            // Reading through a struct arm of an overlay union lends it for
+            // reading only, so the union comes back with the very bytes it
+            // had: a `preserves` of it is kept, padding and all.
+            if !writing
+                && self.overlay_of(b2).is_some()
+                && matches!(
+                    &peel(self.tds, &*self.field_ty(b2, f2)?).val,
+                    TypeT::TypeRef(TypeRefKind::Struct(_))
+                )
+            {
+                let un = self.union_of(b2).unwrap_or_default();
+                let read = |s: &String, op: &str| {
+                    let plain = format!("{}_{}_{} {};", un, op, f2.val, f.at);
+                    match *s == plain {
+                        true => format!("{}_{}_read_{} {};", un, op, f2.val, f.at),
+                        false => s.clone(),
+                    }
+                };
+                self.lines
+                    .extend(f.open_read.iter().map(|s| read(s, "focus")));
+                let close: Vec<String> = f.close_read.iter().map(|s| read(s, "unfocus")).collect();
+                return Ok((f.at, close.clone(), close));
+            }
             self.lines.extend(f.open_read.iter().cloned());
             return Ok((f.at, f.close_read, f.close_write));
         }
@@ -25411,6 +25477,50 @@ fn derived_ptr(e: &Expr) -> bool {
     }
 }
 
+/// `T *q = NULL; ... q = &place;` is C's way of declaring an alias at the top
+/// of a block and binding it later, and the `NULL` is never read: the next
+/// top-level statement to mention `q` overwrites it. That dead store is a
+/// second rebinding of `q`, which would make it an object in `alias_map`'s
+/// eyes, so it is dropped here. `None` when there was nothing to do.
+fn drop_dead_alias_inits(body: &Stmts) -> Option<Stmts> {
+    let assigned_ref = |st: &Stmt| match &st.val {
+        StmtT::Assign(lhs, rhs) if matches!(&strip_vattr(rhs).val, ExprT::Ref(_)) => {
+            lvalue_name(lhs)
+        }
+        _ => None,
+    };
+    let mut dead = HashSet::new();
+    for (i, st) in body.iter().enumerate() {
+        let StmtT::Assign(lhs, rhs) = &st.val else {
+            continue;
+        };
+        let Some(q) = lvalue_name(lhs) else {
+            continue;
+        };
+        if !matches!(&strip_casts(rhs).val, ExprT::IntLit(n, _) if **n == BigInt::ZERO) {
+            continue;
+        }
+        let next = body[i + 1..].iter().find(|s| {
+            let mut t = Touched::default();
+            touch_stmts(&vec![(*s).clone()], &mut t);
+            t.vars.contains(&q) || t.rebound.contains_key(&q)
+        });
+        if next.and_then(|s| assigned_ref(s)).as_ref() == Some(&q) {
+            dead.insert(i);
+        }
+    }
+    if dead.is_empty() {
+        return None;
+    }
+    Some(
+        body.iter()
+            .enumerate()
+            .filter(|(i, _)| !dead.contains(i))
+            .map(|(_, s)| s.clone())
+            .collect(),
+    )
+}
+
 /// `q = &a[i++]` and `q = a + i++` evaluate the index once, but an alias
 /// stands for its place at every use and would evaluate it each time. Binding
 /// the index first -- `__pal_idx_n = i++; q = &a[__pal_idx_n]` -- keeps the
@@ -25562,6 +25672,17 @@ fn emit_body(
                 ..defn.clone()
             };
             &hoisted
+        }
+        None => defn,
+    };
+    let undead;
+    let defn = match drop_dead_alias_inits(&defn.body) {
+        Some(body) => {
+            undead = FnDefn {
+                body,
+                ..defn.clone()
+            };
+            &undead
         }
         None => defn,
     };
