@@ -2690,10 +2690,18 @@ impl<'a> Spec<'a> {
     }
 
     fn ty_of(&self, e: &Expr) -> Result<Rc<Type>, String> {
-        self.env
+        let t = self
+            .env
             .infer_expr(e)
             .map(|t| t.to_rc())
-            .map_err(|_| "a subexpression whose type could not be inferred".to_string())
+            .map_err(|_| "a subexpression whose type could not be inferred".to_string())?;
+        if let ExprT::Member(b, f) = &e.val
+            && let Ok(bt) = self.env.infer_expr(b)
+            && let Some(it) = island_field(self.tds, &bt.to_rc(), &f.val)
+        {
+            return Ok(it);
+        }
+        Ok(t)
     }
 
     /// The name whose storage a `_live` clause is talking about: `_live(s.x)`
@@ -7160,7 +7168,7 @@ fn struct_elem_refine(tds: &Typedefs, env: &Env, name: &str) -> Option<String> {
 
 fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<Chunk> {
     let layouts = crate::layout::LayoutCtx::of_tu(tu);
-    let reach = overlay_reach(tu, tds);
+    let (reach, islands) = overlay_reach(tu, tds);
     let mut code: Vec<Chunk> = Vec::new();
     for decl in &tu.decls {
         if let DeclT::UnionDefn(ud) = &decl.val {
@@ -7168,6 +7176,11 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
             let mut c = collect_union(tds, &layouts, ud, overlay);
             c.origin = origin_of(decl);
             code.push(c);
+            if islands.contains(&*ud.name.val)
+                && let Some(c) = collect_island(tds, &layouts, ud)
+            {
+                code.push(c);
+            }
             continue;
         }
         let DeclT::StructDefn(sd) = &decl.val else {
@@ -7265,7 +7278,22 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
             }
             i = j;
         }
+        let in_overlay = reach.contains(&format!("struct {}", name));
         for (fname, fty, off) in plan {
+            let fty = match &peel(tds, &fty).val {
+                TypeT::TypeRef(TypeRefKind::Union(n))
+                    if in_overlay && tds.unions.contains_key(&island_name(&n.val)) =>
+                {
+                    Rc::new(Type {
+                        val: TypeT::TypeRef(TypeRefKind::Union(Rc::new(Ident {
+                            val: island_name(&n.val).into(),
+                            loc: n.loc.clone(),
+                        }))),
+                        loc: fty.loc.clone(),
+                    })
+                }
+                _ => fty,
+            };
             let (Some(shape), true) = (field_shape(tds, &fty), field_type(tds, &fty).is_some())
             else {
                 ok = false;
@@ -7538,17 +7566,80 @@ fn ov_array_leaf(pn: &str) -> bool {
     )
 }
 
+/// The named unions the translation unit uses as whole values: as a
+/// parameter, a return value, a global or a local.
+fn value_unions(tu: &TranslationUnit, tds: &Typedefs) -> HashSet<String> {
+    fn note(tds: &Typedefs, t: &Type, out: &mut HashSet<String>) {
+        if let TypeT::TypeRef(TypeRefKind::Union(n)) = &peel(tds, t).val {
+            out.insert(n.val.to_string());
+        }
+    }
+    fn stmts(tds: &Typedefs, ss: &Stmts, out: &mut HashSet<String>) {
+        for st in ss {
+            match &st.val {
+                StmtT::Decl(_, t) | StmtT::Let(_, t, _) => note(tds, t, out),
+                StmtT::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    stmts(tds, then_branch, out);
+                    stmts(tds, else_branch, out);
+                }
+                StmtT::Match {
+                    branches,
+                    default_branch,
+                    ..
+                } => {
+                    for b in branches.iter() {
+                        stmts(tds, &b.body, out);
+                    }
+                    stmts(tds, default_branch, out);
+                }
+                StmtT::While { body, .. } | StmtT::GotoBlock { body, .. } => stmts(tds, body, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    for d in &tu.decls {
+        let decl = match &d.val {
+            DeclT::FnDefn(f) => {
+                stmts(tds, &f.body, &mut out);
+                &f.decl
+            }
+            DeclT::FnDecl(f) => f,
+            DeclT::GlobalVar(g) => {
+                note(tds, &g.ty, &mut out);
+                continue;
+            }
+            _ => continue,
+        };
+        note(tds, &decl.ret_type, &mut out);
+        for a in &decl.args {
+            note(tds, &a.ty, &mut out);
+        }
+    }
+    out
+}
+
 /// The aggregates an `_overlay` union reaches through its members and their
-/// fields, at any depth, as `struct X` and `union X`. Only these structs get
-/// an overlay view: it is a proof obligation for every struct that has one,
-/// and nothing else needs it. And every union among them is an overlay union
-/// too, `_overlay` or not: it is part of the same bytes, which every layer
-/// sees through its own members, so a union inside a layer's view -- an
-/// anonymous union of alternative names, say -- is punned exactly as the
-/// outer one is, and has to be modelled the same way.
-fn overlay_reach(tu: &TranslationUnit, tds: &Typedefs) -> HashSet<String> {
+/// fields, at any depth, as `struct X` and `union X`; and the islands among
+/// the unions it reaches, by name.
+///
+/// Only the structs reached get an overlay view: it is a proof obligation for
+/// every struct that has one, and nothing else needs it. A union reached is an
+/// overlay union too, `_overlay` or not: it is part of the same bytes, which
+/// every layer sees through its own members, so a union of alternative names
+/// inside a layer is punned exactly as the outer one is -- unless the program
+/// uses it as a whole value somewhere (`value_unions`). An overlay union has
+/// no whole values, so such a union keeps its tagged model, and inside an
+/// overlay it is an island: a run of bytes the view does not look into, typed
+/// `union_X__island`, whose members are not reached through it.
+fn overlay_reach(tu: &TranslationUnit, tds: &Typedefs) -> (HashSet<String>, HashSet<String>) {
     let mut defs: HashMap<String, Vec<Rc<Type>>> = HashMap::new();
     let mut stack: Vec<String> = Vec::new();
+    let mut marked: HashSet<String> = HashSet::new();
     for d in &tu.decls {
         match &d.val {
             DeclT::StructDefn(sd) => {
@@ -7562,6 +7653,7 @@ fn overlay_reach(tu: &TranslationUnit, tds: &Typedefs) -> HashSet<String> {
             }
             DeclT::UnionDefn(ud) => {
                 if ud.overlay {
+                    marked.insert(ud.name.val.to_string());
                     stack.push(format!("union {}", ud.name.val));
                 }
                 defs.insert(
@@ -7575,7 +7667,9 @@ fn overlay_reach(tu: &TranslationUnit, tds: &Typedefs) -> HashSet<String> {
             _ => {}
         }
     }
+    let values = value_unions(tu, tds);
     let mut seen: HashSet<String> = HashSet::new();
+    let mut islands: HashSet<String> = HashSet::new();
     while let Some(k) = stack.pop() {
         if !seen.insert(k.clone()) {
             continue;
@@ -7584,12 +7678,45 @@ fn overlay_reach(tu: &TranslationUnit, tds: &Typedefs) -> HashSet<String> {
             let t = flat_array(tds, t).map_or(&**t, |(e, _)| e);
             match &peel(tds, t).val {
                 TypeT::TypeRef(TypeRefKind::Struct(n)) => stack.push(format!("struct {}", n.val)),
-                TypeT::TypeRef(TypeRefKind::Union(n)) => stack.push(format!("union {}", n.val)),
+                TypeT::TypeRef(TypeRefKind::Union(n))
+                    if marked.contains(&*n.val) || !values.contains(&*n.val) =>
+                {
+                    stack.push(format!("union {}", n.val))
+                }
+                TypeT::TypeRef(TypeRefKind::Union(n)) => {
+                    islands.insert(n.val.to_string());
+                }
                 _ => {}
             }
         }
     }
-    seen
+    (seen, islands)
+}
+
+/// The type a field of a struct value of type `bty` has when it is an island
+/// (see `overlay_reach`): the field's C type is the named union, but inside an
+/// overlay what it holds is the union's bytes.
+fn island_field(tds: &Typedefs, bty: &Type, f: &str) -> Option<Rc<Type>> {
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, bty).val else {
+        return None;
+    };
+    let fld = tds
+        .structs
+        .get(&*n.val)?
+        .fields
+        .iter()
+        .find(|x| x.name == f)?;
+    match &peel(tds, &fld.ty).val {
+        TypeT::TypeRef(TypeRefKind::Union(u)) if u.val.ends_with("__island") => {
+            Some(fld.ty.clone())
+        }
+        _ => None,
+    }
+}
+
+/// The name of the byte-valued twin of the island union `u`.
+fn island_name(u: &str) -> String {
+    format!("{}__island", u)
 }
 
 /// The scalar types found among the leaves of a struct that has an overlay
@@ -7675,6 +7802,24 @@ fn emit_struct_view(tds: &Typedefs, name: &str) -> Option<String> {
                     "{pn}_repr_view_all (); array_repr_view {pn}_repr {esize} {len} {pn}_of_bytes x.fld_{fname} {sl}"
                 ));
             }
+            FieldShape::Array { pn, esize, len }
+                if *len > 0
+                    && matches!(
+                        &peel(tds, flat_array(tds, &f.ty)?.0).val,
+                        TypeT::TypeRef(TypeRefKind::Struct(t))
+                            if tds.structs.get(&*t.val).is_some_and(|x| x.view && x.size == *esize)
+                    ) =>
+            {
+                let args = format!("{pn}_repr {esize} {len} {pn}_view_ok {pn}_view");
+                ok.push(format!("array_view_ok {esize} {len} {pn}_view_ok {sl}"));
+                vw.push(format!(
+                    "fld_{fname} = array_view_g {esize} {len} {pn}_view {sl}"
+                ));
+                l1.push(format!("array_view_g_repr {args} {pn}_view_repr {sl}"));
+                l2.push(format!(
+                    "array_repr_view_g {args} {pn}_repr_view x.fld_{fname} {sl}"
+                ));
+            }
             FieldShape::One { pn } => match &peel(tds, &f.ty).val {
                 TypeT::TypeRef(TypeRefKind::Struct(t))
                     if tds.structs.get(&*t.val).is_some_and(|x| x.view) =>
@@ -7720,6 +7865,39 @@ fn emit_struct_view(tds: &Typedefs, name: &str) -> Option<String> {
         l1 = or_unit(&l1),
         l2 = or_unit(&l2),
     ))
+}
+
+/// The byte-valued twin of a named union that an overlay reaches: an overlay
+/// union of the same size and alignment with no members, so that a struct
+/// inside the overlay can hold the union's bytes without the view having to
+/// choose which of its members they are. The union's own, tagged type is
+/// unchanged; the twin is only what the field holds inside the overlay.
+fn collect_island(
+    tds: &mut Typedefs,
+    layouts: &crate::layout::LayoutCtx,
+    ud: &crate::ir::UnionDefn,
+) -> Option<Chunk> {
+    let l = layouts
+        .table
+        .get(&LayoutKey::of_type_ref(&TypeRefKind::Union(
+            ud.name.clone(),
+        )))?;
+    let name = island_name(&ud.name.val);
+    tds.unions.insert(
+        name.clone(),
+        UnionInfo {
+            members: Vec::new(),
+            size: l.size,
+            align: l.align,
+            overlay: true,
+            ints: Vec::new(),
+        },
+    );
+    Some(Chunk {
+        module: format!("Union_{}", name),
+        code: emit_overlay_union(tds, &name),
+        origin: None,
+    })
 }
 
 /// An `_overlay` union: every member has to be a struct with an overlay view
@@ -13553,10 +13731,18 @@ impl<'a> Body<'a> {
     }
 
     fn ty_of(&self, e: &Expr) -> Result<Rc<Type>, String> {
-        self.env
+        let t = self
+            .env
             .infer_expr(e)
             .map(|t| t.to_rc())
-            .map_err(|_| "the type of a subexpression could not be inferred".to_string())
+            .map_err(|_| "the type of a subexpression could not be inferred".to_string())?;
+        if let ExprT::Member(b, f) = &e.val
+            && let Ok(bt) = self.env.infer_expr(b)
+            && let Some(it) = island_field(self.tds, &bt.to_rc(), &f.val)
+        {
+            return Ok(it);
+        }
+        Ok(t)
     }
 
     /// Make a union arm the live one, leaving its storage uninitialised.

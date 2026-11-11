@@ -156,6 +156,40 @@ val array_repr_view (#t: Type) (t_repr: t -> bytes -> prop) (esize: pos) (n: nat
                     (forall (x: t) (c: bytes). t_repr x c ==> plain c /\ f c == x))
           (ensures  plain b /\ array_view esize n f b == xs)
 
+(* Arrays of structs. A struct's view is ghost (a pointer leaf is decoded by
+   choice), and is defined only on runs of exactly its size, so the view of an
+   array of structs is a ghost sequence, readable when every element is. *)
+(* Both are opaque to SMT: a store elsewhere in an overlay keeps them by
+   congruence on the unchanged bytes, and the two lemmas below are the only
+   places that need to look inside. *)
+[@@"opaque_to_smt"]
+let array_view_ok (esize: pos) (n: nat) (ok: (c: bytes { len c == esize }) -> prop)
+                  (b: bytes { len b == esize * n }) : prop =
+  forall (i: nat). i < n ==> ok (slice b (esize * i) (esize * i + esize))
+
+[@@"opaque_to_smt"]
+let array_view_g (#t: Type) (esize: pos) (n: nat) (f: (c: bytes { len c == esize }) -> GTot t)
+                 (b: bytes { len b == esize * n })
+  : GTot (s: Seq.seq t { Seq.length s == n })
+  = Seq.init_ghost n (fun (i: nat { i < n }) -> f (slice b (esize * i) (esize * i + esize)))
+
+val array_view_g_repr (#t: Type) (t_repr: t -> bytes -> prop) (esize: pos) (n: nat)
+                      (ok: (c: bytes { len c == esize }) -> prop)
+                      (f: (c: bytes { len c == esize }) -> GTot t)
+                      (lem: (c: bytes { len c == esize }) -> Lemma (requires ok c) (ensures t_repr (f c) c))
+                      (b: bytes { len b == esize * n })
+  : Lemma (requires array_view_ok esize n ok b)
+          (ensures  array_repr_o t_repr esize (array_view_g esize n f b) b)
+
+val array_repr_view_g (#t: Type) (t_repr: t -> bytes -> prop) (esize: pos) (n: nat)
+                      (ok: (c: bytes { len c == esize }) -> prop)
+                      (f: (c: bytes { len c == esize }) -> GTot t)
+                      (lem: (x: t) -> (c: bytes { len c == esize }) ->
+                            Lemma (requires t_repr x c) (ensures ok c /\ f c == x))
+                      (xs: Seq.seq t) (b: bytes { len b == esize * n })
+  : Lemma (requires array_repr_o t_repr esize xs b /\ Seq.length xs == n)
+          (ensures  array_view_ok esize n ok b /\ array_view_g esize n f b == xs)
+
 (* ---------------------------------------------------------------------------
    Per integer type: the view of a range and the two lemmas, and the leaf load
    and store at offset `o` into a range `u` whose base is `al`-aligned. The

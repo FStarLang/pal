@@ -1447,7 +1447,10 @@ modelled instead as its bytes:
   `size_t`; and pointers, including function pointers, whose bytes must
   encode *some* pointer, provenance included (`ptr_view_ok`). Decoding a
   pointer is not computable, which is why views are ghost. An array field
-  must have integer elements.
+  must have integer elements, or be of structs that have views themselves
+  and no padding between elements (`array_view_ok` / `array_view_g`, a
+  ghost sequence; both are opaque to SMT, so a store elsewhere keeps them by
+  congruence on the unchanged bytes).
 - Every union reachable from an overlay union is an overlay union too,
   `_overlay` or not. Its bytes are part of the same object, and every layer
   reads them through its own members, so a union nested in a layer's view
@@ -1455,6 +1458,15 @@ modelled instead as its bytes:
   punned just as the outer one is. A struct view sees such a field as its
   bytes, not as a member's view, and so needs nothing of them: an opaque
   `char` area another layer has stored pointers into still has a view.
+  The exception is a named union the translation unit also uses as a whole
+  value -- a parameter, a return value, a global or a local, like a status
+  word that is passed around by value. An overlay union has no whole values,
+  so such a union keeps its tagged model everywhere, and a field of it inside
+  an overlay is an *island*: its type there is `union_U__island`, a member-less
+  overlay union of the same size and alignment, i.e. the field's bytes, which
+  the view does not look into. Code that reads or writes an island field
+  inside an overlay is rejected (a whole-value use of an overlay union, or a
+  member it does not have); `_unchanged` of it works as for any region.
   Members of an overlay union may be structs, unions, scalars (with the same
   `is`/`get`/`focus` functions as a struct member) or integer arrays (whose
   elements are reached by the scalar accessors below, at constant
@@ -1507,7 +1519,9 @@ claimed not to change `Generic.Parameters[8]`, which it overlaps),
 `overlay_union_whole_bad`; `overlay_union_leaves` (pointer, function
 pointer, `bool` and `size_t` leaves; a lower layer whose parameter area is
 an anonymous union of byte arrays the upper layer stores pointers into, and
-which promises it `_unchanged`; a nested union with a scalar member);
+which promises it `_unchanged`; a nested union with a scalar member; an
+island, a named union also returned by value; an array of one-byte
+bit-field structs);
 `overlay_union_unchanged_bad` (a store into a region promised `_unchanged`).
 
 Limitations:

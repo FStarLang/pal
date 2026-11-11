@@ -17,6 +17,21 @@ typedef struct _LOWER_COMMON
 typedef struct _LOWER_STATUS { int32_t Code; uint32_t Location; } LOWER_STATUS;
 typedef union _LOWER_STATUS_PLUS { LOWER_STATUS Status; uint64_t Opaque; } LOWER_STATUS_PLUS;
 
+/* A union the program also uses as a value, so it keeps its tagged model;
+   inside the overlay it is an island, bytes the view does not look into. */
+typedef union _CODE_PLUS { LOWER_STATUS Status; uint64_t Opaque; } CODE_PLUS;
+
+CODE_PLUS Code_Zero(void)
+    _ensures(return.Opaque._active && return.Opaque == 0)
+{
+    CODE_PLUS c;
+    c.Opaque = 0;
+    return c;
+}
+
+/* A one-byte struct of bit-fields, kept in an array. */
+typedef struct _SLOT { uint8_t Level : 3; uint8_t Mark : 5; } SLOT;
+
 /* The lower layer's request. Its parameter area is an anonymous union of
    byte arrays: everything an `_overlay` union reaches is part of the same
    bytes, so this union is an overlay union too, and the lower view of the
@@ -31,6 +46,8 @@ typedef struct _LOWER_REQUEST
     };
     LOWER_COMMON Common;
     LOWER_STATUS_PLUS Result;
+    CODE_PLUS Saved;
+    SLOT Stack[4];
 } LOWER_REQUEST;
 
 typedef struct _UPPER_PARAMS
@@ -132,4 +149,14 @@ uint64_t Lower_GetOpaque(LOWER_REQUEST* Request)
     _ensures(return == Request->Result.Opaque)
 {
     return Request->Result.Opaque;
+}
+
+/* A store to the lower view keeps the island and the array of slots. */
+void Lower_Reset(LOWER_REQUEST* Request)
+    _ensures(Request->Common.Length == 0)
+    _ensures(_unchanged(Request->Saved))
+    _ensures(_unchanged(Request->Stack))
+    _ensures(_unchanged(Request->Parameters))
+{
+    Request->Common.Length = 0;
 }

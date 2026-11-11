@@ -162,6 +162,29 @@ let array_repr_view (#t: Type) (t_repr: t -> bytes -> prop) (esize: pos) (n: nat
     FStar.Classical.forall_intro aux2;
     Seq.lemma_eq_intro (array_view esize n f b) xs
 
+let array_view_g_repr #t t_repr esize n ok f lem b
+  = reveal_opaque (`%array_view_ok) (array_view_ok esize n ok b);
+    reveal_opaque (`%array_view_g) (array_view_g esize n f b);
+    let xs = array_view_g esize n f b in
+    let aux (i: nat { i < Seq.length xs }) : Lemma (t_repr (Seq.index xs i) (elem_bytes esize b i)) =
+      elem_in esize n i;
+      lem (slice b (esize * i) (esize * i + esize))
+    in
+    FStar.Classical.forall_intro aux;
+    array_repr_o_eq t_repr esize xs b
+
+let array_repr_view_g #t t_repr esize n ok f lem xs b
+  = reveal_opaque (`%array_view_ok) (array_view_ok esize n ok b);
+    reveal_opaque (`%array_view_g) (array_view_g esize n f b);
+    array_repr_o_eq t_repr esize xs b;
+    let aux (i: nat { i < n }) : Lemma (ok (slice b (esize * i) (esize * i + esize)) /\
+                                       Seq.index (array_view_g esize n f b) i == Seq.index xs i) =
+      elem_in esize n i;
+      lem (Seq.index xs i) (slice b (esize * i) (esize * i + esize))
+    in
+    FStar.Classical.forall_intro aux;
+    Seq.lemma_eq_intro (array_view_g esize n f b) xs
+
 let uint8_t_view_repr (b: bytes)
   : Lemma (requires plain b /\ len b == 1) (ensures uint8_t_repr (uint8_t_of_bytes b) b)
   = uint8_t_bytes_of_bytes b
