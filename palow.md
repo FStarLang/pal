@@ -6771,6 +6771,15 @@ new facts about memory.
     through a non-const pointer, each once over a body that meets it and once
     over one that must be rejected for its `rewrites_to`.
 
+    When `E` names one of the postcondition's own witnesses -- `return ==
+    (c->pos < c->len)` on a cursor the call updates -- the result is a term
+    over values the caller only knows existentially. Storing it as it is
+    makes the local's points-to mention them, and in one arm of an `if` the
+    join then abstracts the witnesses apart from the ownership they also
+    index. Such a result is stored as a copy, `value_copy`, equal to it by an
+    ordinary `pure`. `test/bool_condition_call` stores one in a branch and in
+    a loop condition.
+
 51. **A determined call in an assertion.** `_ensures(return ==
     (_Bool)_inline_pulse(f $(A) $(B)))` is a `rewrites_to` too: the
     antiquotations are checked for `return`, and the verbatim text for the

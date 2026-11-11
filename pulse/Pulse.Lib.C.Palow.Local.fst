@@ -80,3 +80,18 @@ fn array_memset_zero (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
   Classical.forall_intro (Classical.move_requires (elem_bytes_zeroed (SZ.v esize) (SZ.v n)));
   fold array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a 1.0R (Seq.create (SZ.v n) z);
 }
+
+(* A value under a fresh name, related to the original by an ordinary equality
+   rather than by substitution. A call whose postcondition `rewrites_to` its
+   result as a term over the callee's post-state witnesses hands the caller a
+   value that *is* that term. Stored in a local inside one arm of an `if`, it
+   ties the local's points-to to those witnesses, and Pulse's join then
+   abstracts the witnesses apart from the ownership they also index. PAL stores
+   the copy instead. *)
+inline_for_extraction
+fn value_copy (#t: Type0) (x: t)
+  returns y : t
+  ensures pure (y == x)
+{
+  x
+}
