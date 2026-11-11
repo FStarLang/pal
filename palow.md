@@ -6896,7 +6896,12 @@ Limitations:
     state nothing beyond a `pts_to` qualify -- scalars and structs of them;
     a refinement or an owned pointer field would be a second guarded
     conjunct, and an array has no canonical length -- so those are still
-    written by hand (`test/nullable`, `test/struct_pointee_refine`). The
+    written by hand (`test/nullable`, `test/struct_pointee_refine`). A
+    refinement anywhere in the pointee counts: a struct-level `_refine`, a
+    refined field, or either in a nested struct. Such a pointee is also left
+    out of entry 48's take-back, since its supplied guard has two
+    conjuncts. The last case of `test/nullable_const_in` declines a struct
+    whose nested member carries a struct-level `_refine`. The
     take-back of entry 48 also covers `&s->f` (and `&u->m`), a field
     opened for the call -- by `field_args` for an input or a union member,
     and by `out_arg` for a single struct field handed to an `_out` -- or
