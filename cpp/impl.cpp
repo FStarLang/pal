@@ -4096,7 +4096,7 @@ public:
           trQualType(FD->getReturnType(), FD->getReturnTypeSourceRange()),
           FD->getReturnType(), FD->getReturnTypeSourceRange()));
       for (auto attr : FD->getAttrs()) {
-        if (FD->hasBody() && !admit && attr->isInherited())
+        if (!admit && attr->isInherited())
           continue;
         if (auto req = isUnaryAttrOf(attr, "pal-requires")) {
           builder.requires(std::move(req.value()));
