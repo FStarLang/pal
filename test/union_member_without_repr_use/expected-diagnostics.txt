@@ -1,0 +1,3 @@
+# Expected translation diagnostic substrings
+union_member_without_repr_use.c:19: union member `bits` of `ctx_anon_1`, which has no byte-level `_repr`
+union_member_without_repr_use.c:21: union member `bits` of `ctx_anon_1`, which has no byte-level `_repr`

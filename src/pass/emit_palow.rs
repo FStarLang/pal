@@ -1133,6 +1133,19 @@ fn is_overlay(tds: &Typedefs, u: &str) -> bool {
     tds.unions.get(u).is_some_and(|x| x.overlay)
 }
 
+/// An error if `m` is a member of the tagged union `u` that `collect_union`
+/// left out of its model, having no byte-level representation: it is not a
+/// constructor of the union's type, so nothing can name it.
+fn unmodeled_member(tds: &Typedefs, u: &str, m: &str) -> Result<(), String> {
+    match tds.unions.get(u) {
+        Some(ui) if !ui.overlay && !ui.members.iter().any(|x| *x.name == *m) => Err(format!(
+            "union member `{}` of `{}`, which has no byte-level `_repr`",
+            m, u
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Where a place lies in the `_overlay` unions on its path, as found by
 /// walking up from the place to its base.
 struct OverlayPath {
@@ -4004,6 +4017,7 @@ impl<'a> Spec<'a> {
                         self.value(obj, w)?
                     ));
                 }
+                unmodeled_member(self.tds, &u.val, &m.val)?;
                 Ok(format!(
                     "(Union_{}_{}? {})",
                     u.val,
@@ -4031,6 +4045,7 @@ impl<'a> Spec<'a> {
                 if let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(self.tds, &bty).val
                     && !is_overlay(self.tds, &u.val)
                 {
+                    unmodeled_member(self.tds, &u.val, &f.val)?;
                     self.guards
                         .borrow_mut()
                         .push(format!("Union_{}_{}? ({})", u.val, f.val, x));
@@ -7598,6 +7613,7 @@ fn collect_union(
         return collect_overlay_union(tds, ud, size, align);
     }
     let mut members = Vec::new();
+    let mut dropped = Vec::new();
     for f in &ud.fields {
         let mname = f.val.name().val.to_string();
         let mty = f.val.logical_type(&f.loc);
@@ -7610,12 +7626,21 @@ fn collect_union(
             Some(FieldShape::One { .. }) if !has_repr(tds, &mty) => None,
             other => other,
         };
+        // Such a member -- a struct with a flexible array member, say, laid
+        // over storage for its elements -- is left out of the model: the
+        // union is the case split on the members that remain, and an access
+        // through the one left out is rejected where it is made, since it
+        // names no member of the generated type. Leaving out a view of the
+        // bytes only takes ways of reading them away, so this models no
+        // program the C does not allow; skipping the union instead would
+        // also skip everything that holds one by value.
         let (Some(shape), Some(_)) = (shape, field_type(tds, &mty)) else {
-            return skip(format!(
+            dropped.push(format!(
                 "member `{}` is {}, which has no byte-level `_repr`",
                 mname,
                 describe(tds.resolve(&mty))
             ));
+            continue;
         };
         let Some(msize) = shape.size(tds, &mty) else {
             return skip(format!("member `{}` has no size", mname));
@@ -7631,7 +7656,11 @@ fn collect_union(
         });
     }
     if members.is_empty() {
-        return skip("it has no members".to_string());
+        return skip(
+            dropped
+                .pop()
+                .unwrap_or_else(|| "it has no members".to_string()),
+        );
     }
     tds.unions.insert(
         name.clone(),
@@ -7644,9 +7673,13 @@ fn collect_union(
             islands: Vec::new(),
         },
     );
+    let notes: String = dropped
+        .iter()
+        .map(|d| format!("(* not a view of union {}: {} *)\n", name, d))
+        .collect();
     Chunk {
         module: format!("Union_{}", name),
-        code: emit_union(tds, &name),
+        code: notes + &emit_union(tds, &name),
         origin: None,
     }
 }
@@ -15782,6 +15815,9 @@ impl<'a> Body<'a> {
             .union_of(base)
             .ok_or_else(|| "a member of a union with no Palow type".to_string())?;
         let fty = self.field_ty(base, f)?;
+        // A member `collect_union` left out of the model (it has no
+        // byte-level representation) is not a constructor of the union type.
+        unmodeled_member(self.tds, un.strip_prefix("union_").unwrap_or(&un), &f.val)?;
         // An overlay union has no live member to track: focusing one asks F*
         // that its bytes are readable as it, and lending one for a callee to
         // fill hands over its storage, keeping every byte past it.
@@ -17663,6 +17699,7 @@ impl<'a> Body<'a> {
                 if is_overlay(self.tds, &uname) {
                     return Ok(format!("(union_{}_active_{} {})", uname, m.val, vu));
                 }
+                unmodeled_member(self.tds, &uname, &m.val)?;
                 Ok(format!("(Union_{}_{}? {})", uname, m.val, vu))
             }
             ExprT::VAttr(_, inner) => self.prop(inner),
@@ -18672,6 +18709,7 @@ impl<'a> Body<'a> {
                 if !self.tds.unions.contains_key(&*n.val) {
                     return Err(format!("an initialiser for union {}", n.val));
                 }
+                unmodeled_member(self.tds, &n.val, &m.val)?;
                 let v = self.rvalue(e)?;
                 Ok(format!("(Union_{}_{} {})", n.val, m.val, v))
             }
@@ -26256,7 +26294,10 @@ fn field_antiquot(tds: &Typedefs, ty: &Type, field_name: &Ident) -> Result<Strin
             "`$field` of the overlay union `{}`, whose value is bytes rather than a constructor",
             u.val
         )),
-        TypeT::TypeRef(TypeRefKind::Union(u)) => Ok(format!("Union_{}_{}", u.val, field_name)),
+        TypeT::TypeRef(TypeRefKind::Union(u)) => {
+            unmodeled_member(tds, &u.val, &field_name.val)?;
+            Ok(format!("Union_{}_{}", u.val, field_name))
+        }
         _ => Err(format!("`$field` of {}", describe(ty))),
     }
 }
@@ -26278,12 +26319,15 @@ fn declared_expr(
                     f.val,
                     declared_expr(tds, declared, b)?
                 ),
-                TypeT::TypeRef(TypeRefKind::Union(u)) => format!(
-                    "Union_{}_{}?.v {}",
-                    u.val,
-                    f.val,
-                    declared_expr(tds, declared, b)?
-                ),
+                TypeT::TypeRef(TypeRefKind::Union(u)) => {
+                    unmodeled_member(tds, &u.val, &f.val)?;
+                    format!(
+                        "Union_{}_{}?.v {}",
+                        u.val,
+                        f.val,
+                        declared_expr(tds, declared, b)?
+                    )
+                }
                 _ => field_value(
                     tds,
                     &bt,
@@ -26336,6 +26380,7 @@ fn declared_expr(
                     declared_expr(tds, declared, b)?
                 ));
             }
+            unmodeled_member(tds, &u.val, &m.val)?;
             Ok(format!(
                 "Union_{}_{}? ({})",
                 u.val,
