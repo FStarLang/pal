@@ -798,6 +798,27 @@ impl<'a> Elaborator<'a> {
                                         return;
                                     }
                                 }
+                                // `l - _l` where `l = (const unsigned char *)_l`
+                                // walks a `char` array: elements of one width
+                                // and either signedness are positions in the
+                                // same array, so the other side is read at
+                                // this one's pointee.
+                                let (lw, rw) = (
+                                    env.vtype_whnf(lt.clone().into()),
+                                    env.vtype_whnf(rt.clone().into()),
+                                );
+                                if let (TypeT::Int { width: a, .. }, TypeT::Int { width: b, .. }) =
+                                    (&lw.val, &rw.val)
+                                    && a == b
+                                    && !env.vtype_eq(lw.clone(), rw.clone())
+                                {
+                                    if matches!(lk, PointerKind::Array) {
+                                        cast_to(lhs, rhs_w.to_rc());
+                                    } else {
+                                        cast_to(rhs, lhs_w.to_rc());
+                                    }
+                                    return;
+                                }
                             }
                         }
                         if let Some(mut meet_type) = env.meet_type(lhs_ty.clone(), rhs_ty.clone()) {

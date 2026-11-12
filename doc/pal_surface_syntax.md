@@ -217,7 +217,11 @@ In a contract (an `_invariant` especially), for pointers walked through the same
 - `p[k]`, `*p` and `p._length` are relative to where `p` points: `p._length` is the number of elements left. `_old(p)[k]` is the array at entry.
 - A walked pointer the loop does not move (`a` above) keeps its value; a `const` array's contents are its entry contents.
 
-`*(unsigned char *)p` on an array of `char` is the element converted to `unsigned char`. A subscript is a `size_t`, so read behind a walked pointer with `*(p - 1)`, not `p[-1]`. `test/array_pointer_walk` has `wcslen`, `strcmp`, `memchr`, `memcpy` and a backward walk.
+`*(unsigned char *)p` on an array of `char` is the element converted to `unsigned char`, and so is `*l` where `const unsigned char *l = (void *)_l` walks a `char` array (musl's `strncmp`); writes through such a pointer are refused. In a contract `l - _l` between the two signednesses is a position difference too. A subscript is a `size_t`, so read behind a walked pointer with `*(p - 1)`, not `p[-1]`. `test/array_pointer_walk` has `wcslen`, `strcmp`, `memchr`, `memcpy` and a backward walk.
+
+In an `_invariant`, `_old(d._length)` and `_old(d)._length` are the length on entry. An array a loop writes keeps its length (a write replaces an element), and PAL says so in the invariant unless the loop calls a function, whose contract would have to.
+
+A function can return a pointer into an array it is passed: `_ensures(return == s + i)` (or `(wchar_t *)(s + i)`) with a `size_t i` is `elem_ptr esize s i`, the pointer `i` elements past `s`. A caller then treats the result as a pointer walked through the array it lent: when exactly one pointer parameter appears as `return == p` or `return == p + e` in the callee's `_ensures`, `z = f(s, ...)` makes `z` a walked pointer of `s`, so `z - s` is a position and `*z` reads `s` there (behind an `if (z)` when the result may be null). `test/array_walk_followups` has musl's `wmemchr`, `wcsnlen`, `wcschr`-like `s + wcslen(s)`, `wmemset`, `wmemcpy` and `strncmp`.
 
 #### Word-at-a-time access through a byte array
 
