@@ -669,6 +669,70 @@ ghost fn array_unfocus_read_at (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr)
        as (array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs);
 }
 
+(* The `_at` lemmas at the walked pointer itself, `i == 0`, with the position
+   written `walk_idx a q` rather than `walk_idx a q + 0`: the element terms
+   then match a contract's (`Seq.index xs (walk_idx a q)`) syntactically,
+   which a quantifier's trigger needs. *)
+ghost fn array_focus_here (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                          (q: ptr) (#p: perm) (#xs: Seq.seq t)
+                          (i: SZ.t { SZ.v i == 0 /\ walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q < Seq.length xs })
+                          (off: SZ.t { SZ.v off == SZ.v esize * SZ.v i })
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
+  ensures  array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p
+                        (Seq.slice xs 0 (walk_idx (SZ.v esize) a q))
+  ensures  elem_pts_to t_repr (q +! off) p (Seq.index xs (walk_idx (SZ.v esize) a q))
+  ensures  array_pts_to t_repr (SZ.v esize) (SZ.v ealign) ((q +! off) +! esize) p
+                        (Seq.slice xs (walk_idx (SZ.v esize) a q + 1) (Seq.length xs))
+  ensures  pure (array_aligned (SZ.v esize) (SZ.v ealign) (q +! off))
+  ensures  pure (SZ.fits (addr_of a + SZ.v esize * Seq.length xs) /\
+                 addr_of a + SZ.v esize * Seq.length xs < T.addr_limit)
+  ensures  pure (walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q < Seq.length xs)
+{
+  array_focus_at t_repr a esize ealign q #p #xs i off;
+  rewrite each (walk_idx (SZ.v esize) a q + SZ.v i) as (walk_idx (SZ.v esize) a q);
+}
+
+ghost fn array_unfocus_here (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                            (q: ptr) (#p: perm) (#xs: Seq.seq t) (#y: t)
+                            (i: SZ.t { SZ.v i == 0 /\ walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q < Seq.length xs })
+                            (off: SZ.t { SZ.v off == SZ.v esize * SZ.v i })
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p
+                        (Seq.slice xs 0 (walk_idx (SZ.v esize) a q))
+  requires elem_pts_to t_repr (q +! off) p y
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) ((q +! off) +! esize) p
+                        (Seq.slice xs (walk_idx (SZ.v esize) a q + 1) (Seq.length xs))
+  requires pure (forall (b: bytes). t_repr y b ==> len b == SZ.v esize)
+  requires pure (array_aligned (SZ.v esize) (SZ.v ealign) (q +! off))
+  requires pure (SZ.fits (addr_of a + SZ.v esize * Seq.length xs) /\
+                 addr_of a + SZ.v esize * Seq.length xs < T.addr_limit)
+  ensures  array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p
+                        (Seq.upd xs (walk_idx (SZ.v esize) a q) y)
+{
+  rewrite each (walk_idx (SZ.v esize) a q) as (walk_idx (SZ.v esize) a q + SZ.v i);
+  array_unfocus_at t_repr a esize ealign q #p #xs #y i off;
+  rewrite each (walk_idx (SZ.v esize) a q + SZ.v i) as (walk_idx (SZ.v esize) a q);
+}
+
+ghost fn array_unfocus_read_here (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                                 (q: ptr) (#p: perm) (#xs: Seq.seq t)
+                                 (i: SZ.t { SZ.v i == 0 /\ walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q < Seq.length xs })
+                                 (off: SZ.t { SZ.v off == SZ.v esize * SZ.v i })
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p
+                        (Seq.slice xs 0 (walk_idx (SZ.v esize) a q))
+  requires elem_pts_to t_repr (q +! off) p (Seq.index xs (walk_idx (SZ.v esize) a q))
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) ((q +! off) +! esize) p
+                        (Seq.slice xs (walk_idx (SZ.v esize) a q + 1) (Seq.length xs))
+  requires pure (forall (b: bytes).
+                   t_repr (Seq.index xs (walk_idx (SZ.v esize) a q)) b ==> len b == SZ.v esize)
+  requires pure (array_aligned (SZ.v esize) (SZ.v ealign) (q +! off))
+  requires pure (SZ.fits (addr_of a + SZ.v esize * Seq.length xs) /\
+                 addr_of a + SZ.v esize * Seq.length xs < T.addr_limit)
+  ensures  array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
+{
+  rewrite each (walk_idx (SZ.v esize) a q) as (walk_idx (SZ.v esize) a q + SZ.v i);
+  array_unfocus_read_at t_repr a esize ealign q #p #xs i off;
+}
+
 (* A step back keeps the provenance and moves the address. `addr_of_sub` says
    so, but is triggered on an `addr_of` that a `walk_ok` on `q -! n` only
    mentions after unfolding; this is the same fact triggered on the step. *)

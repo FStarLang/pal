@@ -7263,3 +7263,37 @@ Limitations:
       refused outright; now only an `_old` naming a parameter a local
       shadows is, so `_old(d[k])` (the entry element) works as in an
       `_invariant` (`test/array_walk_base`).
+61. **Integer constant expressions are literals.** musl's
+    `#define ONES ((size_t)-1/UCHAR_MAX)` and `HIGHS (ONES * (UCHAR_MAX/2+1))`
+    were emitted operator by operator, and each `Int32` operation's overflow
+    and division typing obligations timed out in strchrnul's heavy word
+    loop. `trRValue` now first asks clang (`isIntegerConstantExpr`,
+    `EvaluateAsInt` with no side effects, no UB and no notes) for the value
+    of an integer, non-`bool`, non-enum expression with at least one operator
+    and emits it as one literal of the expression's type
+    (`0x0101010101010101sz`, `128l`). Leaves that are names (enumerators),
+    `sizeof`/`_Alignof`/`offsetof` are not folded: PAL keeps `sizeof`
+    symbolic at `size_t`, which allocation patterns rely on. An expression
+    with undefined behaviour stays unfolded, so its obligation still fails
+    (`test/int_const_fold`).
+62. **Contracts promote.** Contract expressions are parsed by PAL, not
+    clang, and were typed at the meet of their operands' types: musl
+    memcmp's `return == ((const unsigned char *)vl)[i] -
+    ((const unsigned char *)vr)[i]` became a byte `sub_wrap` converted to
+    `int`, while the code computes the `int` difference. `elab` now applies
+    the integer promotions to `-`/`~` operands and to arithmetic and
+    comparison operands narrower than `int` (an equality or order between
+    two operands of one narrow type is unaffected and left alone). The
+    item-59 cast semantics (`spec_to_unsigned`) are unchanged
+    (`test/spec_int_promotion`).
+63. **A local copying an `_array void *` is the array.** In
+    `const unsigned char *s = m;` with `m` an `_array const void *`, the
+    initialiser is a cast of an array pointer of `uint8_t` to `uint8_t *`;
+    `refine_decl_pointer_kind` now gives the local (and the cast) the array
+    kind, as for a typed copy, so `s[n]` and `s + n` work (musl's
+    `memrchr`).
+64. **Focus at the walked pointer itself.** `*p` on a walked pointer was
+    focused by `array_focus_at ... q 0sz`, whose element is
+    `Seq.index xs (walk_idx e a q + 0)`; `array_focus_here`,
+    `array_unfocus_here` and `array_unfocus_read_here` state the `i == 0`
+    case with `walk_idx e a q`, the term a contract writes.

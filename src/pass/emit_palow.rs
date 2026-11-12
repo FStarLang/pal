@@ -17860,6 +17860,13 @@ impl<'a> Body<'a> {
         // A walked pointer is focused where it points, but the ownership is
         // the array's, so the element is found relative to the base.
         let (at, cur, at_sfx) = match &walk {
+            // At the walked pointer itself the position is stated without
+            // the `+ 0`, so it matches a contract's index term.
+            Some(cur) if i == "0sz" => (
+                format!("({} +! {})", cur, off),
+                format!(" {}", cur),
+                "_here",
+            ),
             Some(cur) => (format!("({} +! {})", cur, off), format!(" {}", cur), "_at"),
             None => (format!("({} +! {})", arr, off), String::new(), ""),
         };
@@ -17873,7 +17880,13 @@ impl<'a> Body<'a> {
         }
         self.lines.push(format!(
             "array_offset_fits{} {} {} {} {}_alignof{} {};",
-            at_sfx, repr, arr, esize, pn, cur, i
+            if at_sfx.is_empty() { "" } else { "_at" },
+            repr,
+            arr,
+            esize,
+            pn,
+            cur,
+            i
         ));
         self.lines.push(format!(
             "array_focus{} {} {} {} {}_alignof{} {} {};",
