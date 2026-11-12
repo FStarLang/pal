@@ -7180,3 +7180,25 @@ Limitations:
     specifications push some queries past the default `--z3rlimit 40`:
     `wcscpy` with its "rest of `d` unchanged" clause needs about 80 and
     `wcsncpy` with it about 120. The tests leave that clause out.
+
+58. **A walked pointer's step, stated once.** Every loop that moves a
+    walked pointer has to re-establish `walk_ok` for it, and for `p++` that
+    was left to `walk_step`, whose premise -- the new address does not wrap
+    -- the solver had to derive from `walk_ok`'s definition, the array's
+    `addr_of a + esize * len < addr_limit` and the bound on the position:
+    a division by the element size and a product of it with the position.
+    That is cheap alone and timed out in a heavy loop body (musl's
+    `wcsncat`) even with the bound asserted next to it. The emitter now
+    states the step where it happens: before `p++`/`++p` and before
+    `p + e` on a walked pointer, `array_walk_next` (`Pulse.Lib.C.Palow.Array`)
+    takes the array's ownership and gives `walk_ok` and the new `walk_idx`
+    for the stepped pointer, proved once in the library (`walk_next`). Its
+    conclusion is conditional on the step staying within the array -- where
+    C defines it -- so the call adds no obligation; what is left for the
+    solver is that linear bound, which the source's `_invariant` states. A
+    step in the array's elements is the pointer's step scaled to them (a
+    `uint64_t *` walking a byte array steps 8); a computed step `p + k` is
+    stated when the pointer's elements are the array's. The call is skipped
+    while the array is split for an access or a call (`pending_close`), and
+    `p--` is left as it was (`-!` has its own precondition)
+    (`test/array_walk_step`).
