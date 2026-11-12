@@ -7044,3 +7044,46 @@ Limitations:
     to every `walk_idx` the proof mentions. `test/array_pointer_walk` adds
     musl's `wmemcmp`, `wcsncmp` and `wcscmp` and a `size_t`-bounded
     `wcslen` invariant.
+55. **Words through byte arrays.** musl's fast string functions cast a
+    walked `const unsigned char *` to a pointer to `size_t` and read (or
+    write) eight elements at once. A walked pointer now stays walked through
+    a cast to a pointer to `uint16_t`/`uint32_t`/`uint64_t`/`size_t` and
+    back (`walk_root`), with its position still in bytes, and `*w` on such a
+    pointer into an array of one-byte elements is a *word access*
+    (`word_walk`, `focus_word`): `array_word_focus_T` in
+    `Pulse.Lib.C.Palow.Word` splits the array around the `W` elements at the
+    position, turns their bytes into the word's `mem_pts_to`, and states the
+    value as `word_bytes ev xs pos W v` -- byte `j` of `v`, `word_byte W v j
+    == v / pow2 (8*j) % 256` on the little-endian target, is element
+    `pos + j`; `array_word_unfocus_T` puts back either the same bytes or the
+    bytes of a written word (`word_upd`). All of this is proved from the byte
+    representation (`bytelike`: a one-byte element is its own byte), and it
+    needs `pos + W <= length` and the word type's alignment. `(uintptr_t)p`
+    in a contract is `uintptr_u64 p`, so alignment can be stated and carried
+    by invariants. The predicates with quantifiers or `pow2` in them
+    (`word_bytes_upto`, `bytelike`, `word_byte`) are opaque to SMT and
+    exposed through pattern lemmas: unfolded at a literal byte index, as an
+    `if` chain over the literal powers at a symbolic one. Left transparent,
+    Z3 spent its time instantiating them and branch-and-bounding over `pow2`.
+
+    The aligned over-read of `strlen` -- a word whose first byte is in the
+    array and whose rest may not be -- is undefined in ISO C and cannot be
+    proved: there is no `mem_pts_to` for bytes past the array. It is
+    *assumed*, in `Pulse.Lib.C.Palow.Overread.fsti` (an interface with no
+    implementation), and only in a function marked `_pal_overread`
+    (`FnDecl.is_overread`; `Body.overread`), where a word read is a call to
+    `array_overread_T`: it needs `pos < length` and alignment and gives
+    `word_bytes_upto` -- the bytes inside the array, nothing about the rest.
+    Elsewhere the read still needs `pos + W <= length`
+    (`test/array_word_overread_bad`).
+
+    Pulse's join of an unannotated `if` loses every fact about a value an
+    arm computed, so a word loop inside `if (n && *s != c)` left nothing
+    for the byte loop after it -- not even `walk_ok`. A pure `_ensures` on an
+    `if`, previously only a check, is now its join (`join_written`): the
+    slots the arms write are bound existentially with `walk_ok` for walked
+    ones, every other slot is pinned with `with v. assert (...)` to the
+    value it has at the `if`, and the clause is stated over them.
+    `test/array_word_access` has a `memchr`-like search (alignment prologue,
+    word loop in an `if`, byte loop), a word copy, `uint32_t` stores and a
+    `_pal_overread` `strlen`.

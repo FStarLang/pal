@@ -631,6 +631,10 @@ pub struct FnDecl {
     pub is_pure: bool,
     pub is_rec: bool,
     pub is_total: bool,
+    /// `_pal_overread`: the body may read an aligned word that reaches past
+    /// the end of an array, on the trusted assumption in
+    /// `Pulse.Lib.C.Palow.Overread`.
+    pub is_overread: bool,
     pub decreases: Option<Rc<Expr>>,
 }
 

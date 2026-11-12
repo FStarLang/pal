@@ -219,6 +219,30 @@ In a contract (an `_invariant` especially), for pointers walked through the same
 
 `*(unsigned char *)p` on an array of `char` is the element converted to `unsigned char`. A subscript is a `size_t`, so read behind a walked pointer with `*(p - 1)`, not `p[-1]`. `test/array_pointer_walk` has `wcslen`, `strcmp`, `memchr`, `memcpy` and a backward walk.
 
+#### Word-at-a-time access through a byte array
+
+A pointer walked through an `_array` of `char`, `signed char` or `unsigned char` may be cast to a pointer to `uint16_t`, `uint32_t`, `uint64_t` or `size_t` (directly or through `void *`: `w = (const void *)s`, `s = (const void *)w`, `*(uint32_t *)(s + 4)`). The result is still walked through the same array, and its position is still counted in *bytes*: `w++` moves 8 elements for a `uint64_t *`, and `(const unsigned char *)w - s` is its position. `*w = v` and reads of `*w` access the `W` elements at that position as one integer, in the target's byte order (little-endian): byte `j` of the value is element `pos + j`, stated as `word_byte W x j == x / pow2 (8*j) % 256` (`Pulse.Lib.C.Palow.Word`). This is proved from the byte model, not assumed. The access needs `pos + W <= length` and the word's alignment, which the contract or `_invariant` must give: `(uintptr_t)p` in a contract is the pointer's address as an integer, so `(uintptr_t)w % 8 == 0` states it, and a loop test `(uintptr_t)s % 8` establishes it. A word is accessed only as `*w`, not `w[i]`; the pointer must be a walked one (an array parameter the body never reassigns, used directly under a cast, is not).
+
+```c
+typedef uint64_t __attribute__((__may_alias__)) word;
+void copy_words(_array unsigned char *d, _array const unsigned char *s, size_t n)
+  _requires(n <= d._length && n <= s._length && n % 8 == 0)
+  _requires((uintptr_t)d % 8 == 0 && (uintptr_t)s % 8 == 0)
+  _ensures(_forall(size_t k, k < n ==> d[k] == s[k]))
+{
+  word *wd = (void *)d;
+  const word *ws = (const void *)s;
+  for (; n; n -= 8, wd++, ws++)
+    _invariant((unsigned char *)wd - d + n == _old(n) && n % 8 == 0 && _old(n) <= d._length)
+    _invariant((const unsigned char *)ws - s == (unsigned char *)wd - d)
+    _invariant((uintptr_t)wd % 8 == 0 && (uintptr_t)ws % 8 == 0)
+    _invariant(_forall(size_t k, k < (unsigned char *)wd - d ==> d[k] == s[k]))
+    *wd = *ws;
+}
+```
+
+**Trusted over-read.** musl's `strlen` reads aligned words until one holds the terminator, and that word may extend past the end of the string. ISO C leaves this undefined; it is safe on real hardware only because an aligned word never crosses a page. A function marked `_pal_overread` (after the parameter list) accepts that argument as an axiom: in it, a word *read* needs only its first byte inside the array (`pos < length`) and alignment, and what is known of the value is the bytes that are inside the array (`word_bytes_upto`); nothing is said about the others. Writes are unaffected. The axiom is `Pulse.Lib.C.Palow.Overread.fsti`, an interface with no implementation; without the marker the same read must lie inside the array and fails to verify (`test/array_word_overread_bad`). `test/array_word_access` has a `memchr`-like search with an alignment prologue and a word loop, a word copy, `uint32_t` stores, and a `strlen` with `_pal_overread`.
+
 `_ensures(p)` may also be attached to a loop. It states what holds when the loop exits. Without a `break` the loop exits only when the condition is false, and the clause is asserted after the loop. With a `break`, Pulse no longer knows the condition is false on exit, so:
 
 - if the loop body contains no nested loop, PAL mirrors the locals the `_ensures` names in ghost references and states it as the loop's Pulse `ensures`: it is proved at every `break` and at the normal exit;
@@ -240,7 +264,21 @@ For `do { ... } while (cond)`, PAL desugars to `while (first || cond)` with a fr
 
 ### `if` statements
 
-Pulse computes the state after an `if` itself, so an `if` needs no annotation. An `_ensures` on an `if` is emitted only when it states ownership (an `_slprop` clause): it is then the join, and PAL frames in the points-to of every live slot the clause does not name with `$&(x)`. A pure `_ensures` on an `if` is not emitted; use `_assert` after it instead.
+Pulse computes the state after an `if` itself, so an `if` usually needs no annotation. An `_ensures` on an `if` that states ownership (an `_slprop` clause) is the join, and PAL frames in the points-to of every live slot the clause does not name with `$&(x)`.
+
+A pure `_ensures` (anything but `_live`) on an `if` is also emitted as its join. Pulse's own join forgets every fact about a value an arm computed -- a loop inside an arm leaves nothing behind about the locals it moved -- so the clause is what is known after the `if` about the locals the arms write; a local neither arm writes keeps its value and what is known about it, and a walked pointer keeps its `walk_ok`. In it a local is its value after the `if`, and `_old(x)` is a parameter's entry value:
+
+```c
+if (n && *p != c)
+  _ensures(p - s + n == _old(n) && _forall(size_t k, k < p - s ==> s[k] != c))
+{
+  const word *w;
+  for (w = (const void *)p; n >= 8 && !has_byte(*w, c); w++, n -= 8) ...;
+  p = (const void *)w;
+}
+```
+
+The contents of a mutable array the arms may write are bound afresh, so restate what is needed about them.
 
 ### Refinements for data types
 
@@ -351,6 +389,7 @@ Notes:
 - `_rec` — recursive (must be paired with `_decreases`).
 - `_pal_ignore` — omit a declaration from translation.
 - `_pal_admit` — trust a function's contract.
+- `_pal_overread` — in this function, an aligned word read through a byte array may extend past the array's end (trusted; see *Word-at-a-time access through a byte array*).
 - `_memset_zero` — the function is a `memset(p, 0, n)` wrapper, and calls to it are translated as such (`test/memset`).
 - `_pulse_opaque_to_smt` — on a pure global, emit its value `opaque_to_smt`, so that a large initializer is not unfolded by the SMT solver (`test/global_array_tactic`).
 

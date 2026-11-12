@@ -4126,6 +4126,8 @@ public:
                               snippets);
         }
       }
+      if (hasAnnotation(FD, "pal-overread"))
+        builder.set_overread();
       if (FD->hasBody() && !admit &&
           ctx.selects_function_body(toStr(FD->getName()))) {
         auto &sm = astCtx->getSourceManager();

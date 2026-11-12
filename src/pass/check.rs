@@ -793,6 +793,7 @@ impl<'a> Checker<'a> {
             is_pure: _,
             is_rec: _,
             is_total: _,
+            is_overread: _,
             decreases,
         }: &FnDecl,
     ) {

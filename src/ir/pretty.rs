@@ -710,7 +710,13 @@ impl PrettyIR for FnDecl {
         } else {
             RcDoc::nil()
         };
-        total_prefix
+        let overread_prefix = if self.is_overread {
+            RcDoc::text("_pal_overread").append(RcDoc::line())
+        } else {
+            RcDoc::nil()
+        };
+        overread_prefix
+            .append(total_prefix)
             .append(pure_prefix)
             .append(self.ret_type.to_doc())
             .append(RcDoc::line())

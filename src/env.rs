@@ -191,6 +191,7 @@ impl Env {
                     is_pure: !let_decl.is_impure,
                     is_rec: let_decl.is_rec,
                     is_total: false,
+                    is_overread: false,
                     decreases: None,
                 });
             }
@@ -261,6 +262,11 @@ impl Env {
 
     pub fn lookup_var(&self, ident: &Ident) -> Option<&LocalDecl> {
         self.locals.get(&ident.val)
+    }
+
+    /// A local's declared type, by name.
+    pub fn local_type(&self, name: &str) -> Option<Rc<Type>> {
+        self.locals.get(name).map(|d| d.ty.clone())
     }
 
     pub fn lookup_global_var(&self, ident: &Ident) -> Option<&GlobalVar> {

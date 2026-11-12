@@ -380,6 +380,12 @@ Key facts:
   element count, and `p[k]` / `p._length` are relative to where `p` points
   (`test/array_pointer_walk`, and *Loop invariants* in
   `doc/pal_surface_syntax.md`).
+- **Word-at-a-time access** (`w = (const void *)s; *w`, `*(uint32_t *)(s + 4) = v`)
+  through a walked pointer into a byte array reads/writes `W` elements as one
+  little-endian integer (`word_byte W x j == x / pow2 (8*j) % 256`). State
+  `pos + W <= length` and alignment (`(uintptr_t)w % 8 == 0`). A `strlen`-style
+  aligned read past the end needs the trusted `_pal_overread` function marker
+  (`test/array_word_access`).
 - **`_ensures` on a loop is a pure prop** about the exit. A loop without a
   `break` exits only when `cond` is false; Pulse knows `¬cond` there, and PAL
   asserts the `_ensures` right after the loop.
@@ -422,8 +428,12 @@ keyed on the address, so the two arms' slprops are matched by location and a
 value that differs is joined into a `match` on the condition. You normally
 annotate nothing. Consequently:
 
-- **A pure `_ensures` on an `if` is not emitted** — it would only be a check.
-  Put the fact in an `_assert` after the `if`, or in a helper's precondition.
+- **A pure `_ensures` on an `if` is its join.** Pulse's own join forgets the
+  facts about values an arm computed (a loop inside an arm loses what its
+  invariant said about the locals it moved), so state them on the `if`:
+  `if (c) _ensures(p - s + n == _old(n)) { ... }`. Locals neither arm writes
+  keep their values and facts; contents of arrays the arms may write are
+  bound afresh.
 - **An ownership `_ensures` on an `if` is emitted, and it is the join.** Use
   one when the arms establish ownership in different words that only you can
   reconcile — the typical case is a function-pointer local assigned a different
