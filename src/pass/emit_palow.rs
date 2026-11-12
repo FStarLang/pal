@@ -3445,14 +3445,15 @@ impl<'a> Spec<'a> {
     /// C's own rules, so stating them costs the contract nothing it did not
     /// already owe.
     fn definedness(&self, op: BinOp, ty: &Type, l: &Expr, r: &Expr, w: When) -> Option<String> {
-        // `size_t` is unsigned and its F* operations are the checked ones, so
-        // what it owes is the same non-overflow C already demands of it.
+        // `size_t` is unsigned, so its arithmetic wraps and owes nothing; a
+        // shift owes a count below its width, and a division a divisor.
         if matches!(peel(self.tds, ty).val, TypeT::SizeT) {
-            let (a, b) = (self.value(l, w).ok()?, self.value(r, w).ok()?);
             return match op {
-                BinOp::Add => Some(format!("SizeT.fits (SizeT.v {} + SizeT.v {})", a, b)),
-                BinOp::Sub => Some(format!("SizeT.v {} >= SizeT.v {}", a, b)),
-                BinOp::Mul => Some(format!("SizeT.fits (SizeT.v {} * SizeT.v {})", a, b)),
+                BinOp::Shl | BinOp::Shr => Some(format!(
+                    "UInt32.v {} < 8 * Pulse.Lib.C.Palow.Target.ptr_bytes",
+                    self.value(r, w).ok()?
+                )),
+                BinOp::Div | BinOp::Mod => Some(format!("SizeT.v {} <> 0", self.value(r, w).ok()?)),
                 _ => None,
             };
         }
@@ -24334,8 +24335,10 @@ fn float_literal(tds: &Typedefs, text: &str, ty: &Type) -> Result<String, String
 /// and unlike F*'s `lognot` the solver can reason about either -- including
 /// through the narrowing cast that `(uint8_t)~x` puts around a promoted `~`.
 fn bitnot(tds: &Typedefs, ty: &Type, a: &str) -> Option<String> {
-    let TypeT::Int { signed, width } = peel(tds, ty).val else {
-        return None;
+    let (signed, width) = match peel(tds, ty).val {
+        TypeT::Int { signed, width } => (signed, width),
+        TypeT::SizeT => return Some(format!("(Pulse.Lib.C.SizeT.lognot {})", a)),
+        _ => return None,
     };
     let all = if signed {
         BigInt::from(-1)
@@ -24654,13 +24657,13 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
         BinOp::LEq => return Ok(format!("`{}.lte`", m)),
         // The bitwise operators are defined on the whole range at both
         // signednesses, so they need no obligation and no wrapping variant.
-        // `FStar.SizeT` does not have them, hence the guard.
+        // `FStar.SizeT` does not have them, so `size_t` gets its own.
         // C requires the shift count to be below the width, which PAL turns
         // into a proof obligation and the source discharges with a
         // `_requires`; a signed left shift additionally needs a non-negative
         // operand. Both come out of the contract, so an untranslated one has
         // to refuse rather than emit a failure about something else.
-        BinOp::Shl | BinOp::Shr if matches!(t.val, TypeT::Int { .. }) => {
+        BinOp::Shl | BinOp::Shr if matches!(t.val, TypeT::Int { .. } | TypeT::SizeT) => {
             if !signed_ok {
                 return Err(
                     "a shift, whose width obligation needs the untranslated `_requires`"
@@ -24669,7 +24672,11 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
             }
             return Ok(format!(
                 "`{}.shift_{}`",
-                m,
+                if matches!(t.val, TypeT::SizeT) {
+                    "Pulse.Lib.C.SizeT"
+                } else {
+                    m.as_str()
+                },
                 if matches!(op, BinOp::Shl) {
                     "left"
                 } else {
@@ -24677,10 +24684,16 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
                 }
             ));
         }
-        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor if matches!(t.val, TypeT::Int { .. }) => {
+        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            if matches!(t.val, TypeT::Int { .. } | TypeT::SizeT) =>
+        {
             return Ok(format!(
-                "`FStar.{}.log{}`",
-                m,
+                "`{}.log{}`",
+                if matches!(t.val, TypeT::SizeT) {
+                    "Pulse.Lib.C.SizeT".to_string()
+                } else {
+                    format!("FStar.{}", m)
+                },
                 match op {
                     BinOp::BitAnd => "and",
                     BinOp::BitOr => "or",
@@ -24697,12 +24710,15 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
     // `_requires` clause. When the contract did not translate, emitting it
     // would produce a failure that says nothing about the memory model, so it
     // is refused instead.
-    if let TypeT::Int {
-        signed: false,
-        width,
-    } = &t.val
-    {
-        let wrap = format!("Pulse.Lib.C.UInt{}", width);
+    let wrap = match &t.val {
+        TypeT::Int {
+            signed: false,
+            width,
+        } => Some(format!("Pulse.Lib.C.UInt{}", width)),
+        TypeT::SizeT => Some("Pulse.Lib.C.SizeT".to_string()),
+        _ => None,
+    };
+    if let Some(wrap) = wrap {
         // Division is partial at either signedness: by zero it is undefined.
         if matches!(op, BinOp::Div | BinOp::Mod) && !signed_ok {
             return Err(
