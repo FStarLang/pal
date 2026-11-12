@@ -286,6 +286,13 @@ impl<'a> Checker<'a> {
                             TypeT::FixedArray(_, _) => {}
                             TypeT::FlexArray(_) => {}
                             TypeT::Error => {}
+                            TypeT::Pointer(..) => self.report(
+                                format!(
+                                    "cannot subscript {}, a pointer not declared to point into an array (declare the pointer it comes from `_array` or `_arrayptr`)",
+                                    arr_ty
+                                ),
+                                &rval.loc,
+                            ),
                             _ => self.report(format!("not an array type: {}", arr_ty), &rval.loc),
                         }
                     }

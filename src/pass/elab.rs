@@ -436,6 +436,19 @@ impl<'a> Elaborator<'a> {
             }
             ExprT::Index(arr, idx) => {
                 self.elab_rvalue(env, Rc::make_mut(arr), None);
+                // `((unsigned char *)dest)[k]` of an array `dest` of
+                // `unsigned char` -- how a contract reads a `void *` byte
+                // array, which C will not subscript -- is `dest[k]`: the cast
+                // changes nothing but the pointer's kind.
+                if let ExprT::Cast(inner, to) = &arr.val
+                    && let TypeT::Pointer(elem, _) = &env.vtype_whnf(to.clone().into()).val
+                    && let Ok(it) = env.infer_expr(inner)
+                    && let TypeT::Pointer(ielem, PointerKind::Array | PointerKind::ArrayPtr) =
+                        &env.vtype_whnf(it).val
+                    && env.vtype_eq(elem.clone().into(), ielem.clone().into())
+                {
+                    *arr = inner.clone();
+                }
                 self.elab_rvalue(env, Rc::make_mut(idx), None);
                 // Cast index to SizeT for Pulse array operations
                 if let Ok(idx_ty) = env.infer_expr(idx) {
@@ -788,7 +801,16 @@ impl<'a> Elaborator<'a> {
                             if let (TypeT::Pointer(lt, lk), TypeT::Pointer(rt, rk)) =
                                 (&lhs_w.val, &rhs_w.val)
                             {
-                                if lk != rk && env.vtype_eq(lt.clone().into(), rt.clone().into()) {
+                                // A `void *` result compared with the byte array it
+                                // returns (`memset`'s `return == dest`) is the same case.
+                                let void = |t: &Rc<Type>| {
+                                    matches!(env.vtype_whnf(t.clone().into()).val, TypeT::Void)
+                                };
+                                if lk != rk
+                                    && (env.vtype_eq(lt.clone().into(), rt.clone().into())
+                                        || void(lt)
+                                        || void(rt))
+                                {
                                     if matches!(lk, PointerKind::Array) {
                                         cast_to(lhs, rhs_w.to_rc());
                                         return;
