@@ -457,6 +457,7 @@ impl<'a> Checker<'a> {
                 self.check_rvalue(&env, body);
             }
             ExprT::StructInit(name, fields) => {
+                let name = &env.struct_init_name(name);
                 let Some(s) = env.lookup_struct(name) else {
                     self.report(format!("unknown struct {}", name), &rval.loc);
                     return;

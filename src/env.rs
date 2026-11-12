@@ -243,6 +243,22 @@ impl Env {
         self.globals.structs.get(&ident.val)
     }
 
+    /// The struct a compound literal's type name denotes. The contract parser
+    /// cannot tell a typedef name from a struct tag, so `(T){...}` in a
+    /// contract arrives as `StructInit(T, ..)` even when `T` is a typedef for
+    /// `struct _T`; resolve it through the typedef here.
+    pub fn struct_init_name(&self, name: &Rc<Ident>) -> Rc<Ident> {
+        if self.lookup_type(name).is_some() {
+            let ty = TypeT::TypeRef(TypeRefKind::Typedef(name.clone())).with_loc(name.loc.clone());
+            if let TypeT::TypeRef(TypeRefKind::Struct(struct_name)) =
+                &self.vtype_whnf(ty.into()).val
+            {
+                return struct_name.clone();
+            }
+        }
+        name.clone()
+    }
+
     /// Whether `ty` resolves to a struct that contains a flexible array member.
     /// A whole-object value of such a struct cannot be copied by assignment,
     /// since C does not copy the flexible array contents.

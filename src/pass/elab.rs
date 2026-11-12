@@ -841,15 +841,7 @@ impl<'a> Elaborator<'a> {
                 self.elab_rvalue(&env, Rc::make_mut(body), None);
             }
             ExprT::StructInit(name, fields) => {
-                if env.lookup_type(name).is_some() {
-                    let ty = TypeT::TypeRef(TypeRefKind::Typedef(name.clone()))
-                        .with_loc(name.loc.clone());
-                    if let TypeT::TypeRef(TypeRefKind::Struct(struct_name)) =
-                        &env.vtype_whnf(ty.into()).val
-                    {
-                        *name = struct_name.clone();
-                    }
-                }
+                *name = env.struct_init_name(name);
                 let field_types: Vec<Option<Rc<Type>>> = fields
                     .iter()
                     .map(|(fld_name, _)| {
