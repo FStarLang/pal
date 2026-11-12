@@ -3469,7 +3469,8 @@ impl<'a> Spec<'a> {
             };
             // At the base the index is the subscript itself, and the guard
             // is the one a contract's `d[k]` gets.
-            self.guards.borrow_mut().push(if at_base {
+            let signed_idx = idx.is_some_and(|i| self.index_may_be_negative(i));
+            self.guards.borrow_mut().push(if at_base && !signed_idx {
                 format!("{} < Seq.length {}", i, term)
             } else {
                 format!("0 <= {} /\\ {} < Seq.length {}", i, i, term)
@@ -3502,7 +3503,11 @@ impl<'a> Spec<'a> {
             };
             self.guards
                 .borrow_mut()
-                .push(format!("{} < Seq.length {}", i, term));
+                .push(if idx.is_some_and(|i| self.index_may_be_negative(i)) {
+                    format!("0 <= {} /\\ {} < Seq.length {}", i, i, term)
+                } else {
+                    format!("{} < Seq.length {}", i, term)
+                });
             let cell = format!("(Seq.index {} {})", term, i);
             if self.maybes.contains(&*v.val) {
                 self.defined.borrow_mut().push(format!("Some? {}", cell));
@@ -3743,6 +3748,23 @@ impl<'a> Spec<'a> {
     /// to `size_t` to meet C's subscript; it is a position all the same, and
     /// one outside the sequence fails `Seq.index`'s typing rather than
     /// wrapping into it, so the conversion is not reduced (`spec_wrap`).
+    /// Whether a contract subscript is read as a number that may be negative
+    /// -- a `_specint` (or signed) position rather than a `size_t` -- so its
+    /// definedness guard must say `0 <=` as well as the upper bound.
+    fn index_may_be_negative(&self, e: &Expr) -> bool {
+        let e = match &strip_vattr(e).val {
+            ExprT::Cast(inner, to) if matches!(peel(self.tds, to).val, TypeT::SizeT) => inner,
+            _ => e,
+        };
+        match self.ty_of(e) {
+            Ok(ty) => matches!(
+                self.tds.resolve(&ty).val,
+                TypeT::SpecInt | TypeT::PtrdiffT | TypeT::Int { signed: true, .. }
+            ),
+            Err(_) => false,
+        }
+    }
+
     fn index_num(&self, e: &Expr, w: When) -> Result<String, String> {
         if let ExprT::Cast(inner, to) = &strip_vattr(e).val
             && matches!(peel(self.tds, to).val, TypeT::SizeT)
@@ -3795,6 +3817,26 @@ impl<'a> Spec<'a> {
                     op.to_str(),
                     self.num(r, w)?
                 ));
+            }
+            // Unsigned arithmetic is the mathematical result reduced modulo
+            // the type's range, said as such. As `SizeT.v (m `add` k)` it
+            // would build a new machine integer out of a bound variable, and a
+            // quantifier triggered on `SizeT.v k` (`_forall(size_t k, ...
+            // d[m + k] ...)`) then instantiates itself on its own result
+            // without end; an integer term gives it nothing to match.
+            if matches!(
+                self.tds.resolve(&ty).val,
+                TypeT::Int { signed: false, .. } | TypeT::SizeT
+            ) {
+                let n = format!("({} {} {})", self.num(l, w)?, op.to_str(), self.num(r, w)?);
+                // Where the operator is partial its definedness guard says
+                // the result is in range, so it is the number itself.
+                if let Err(e) = binop(self.tds, *op, &ty, self.signed_ok) {
+                    let g = self.definedness(*op, &ty, l, r, w).ok_or(e)?;
+                    self.guards.borrow_mut().push(g);
+                    return Ok(n);
+                }
+                return Ok(self.spec_wrap(&ty, n));
             }
         }
         // A cast from a specification type is the author writing a
@@ -13125,6 +13167,11 @@ pub fn emit_palow(
                     .iter()
                     .map(|a| extent(&tds, &a.ty) == Some(Extent::Array))
                     .collect(),
+                arr_elems: fndecl
+                    .args
+                    .iter()
+                    .map(|a| pointee(&tds, peel(&tds, &a.ty)).and_then(|e| palow_name(&tds, e)))
+                    .collect(),
                 consumes: fndecl
                     .args
                     .iter()
@@ -14006,6 +14053,9 @@ struct Callee {
     /// Which parameters are `_array`s, and so want a whole sequence's
     /// ownership rather than a single pointee's.
     arr_args: Vec<bool>,
+    /// The element type of each pointer parameter, by position: an `_array`
+    /// argument of another one-byte type is lent at this one.
+    arr_elems: Vec<Option<String>>,
     /// Which parameters are `_arrayptr`s. In Palow such a parameter owns
     /// nothing, so the argument is wanted for its address alone: a name that
     /// stands for an array element must not hand over the element's
@@ -17285,13 +17335,17 @@ impl<'a> Body<'a> {
             },
         };
         let ap = &self.arrays[&owner];
-        let elem_ok = |e: &Expr| -> Result<bool, String> {
+        let elem_ok = |e: &Expr, bytes: bool| -> Result<bool, String> {
             let ty = self.ty_of(e)?;
             let elem = pointee(self.tds, peel(self.tds, &ty))
                 .ok_or_else(|| "an array argument that is not a pointer".to_string())?;
-            Ok(palow_name(self.tds, elem).as_deref() == Some(&*ap.pn))
+            let name = palow_name(self.tds, elem);
+            // A `char` array may be lent as the `unsigned char` array a
+            // `void *` parameter is; the call converts it (`array_int8_as_uint8`).
+            Ok(name.as_deref() == Some(&*ap.pn)
+                || (bytes && ap.pn == "int8_t" && name.as_deref() == Some("uint8_t")))
         };
-        if !elem_ok(a)? || !elem_ok(orig)? {
+        if !elem_ok(a, false)? || !elem_ok(orig, true)? {
             return Err(format!(
                 "an array argument walked through `{}` at a type other than its element type",
                 owner
@@ -20209,6 +20263,7 @@ impl<'a> Body<'a> {
         let plain_ptrs = c.plain_ptrs.clone();
         let const_args = c.const_args.clone();
         let arr_args = c.arr_args.clone();
+        let arr_elems = c.arr_elems.clone();
         let arrayptr_args = c.arrayptr_args.clone();
         let consumes = c.consumes.clone();
         let nullables = c.nullables.clone();
@@ -20451,6 +20506,7 @@ impl<'a> Body<'a> {
             // A pointer into one of this function's arrays, not at its base,
             // lends the callee the rest of the array for the call: the
             // prefix stays here, and the two are joined again afterwards.
+            let mut retype_from: Option<String> = None;
             let v = if arr_args.get(i) == Some(&true)
                 && arrayptr_args.get(i) != Some(&true)
                 && outs.get(i) != Some(&true)
@@ -20466,10 +20522,43 @@ impl<'a> Body<'a> {
                 self.lines.push(format!("array_lend_at {};", common));
                 self.pending_close
                     .push(format!("array_return_at {};", common));
+                retype_from = Some(ap.pn.clone());
                 q
             } else {
+                if arr_args.get(i) == Some(&true)
+                    && let ExprT::Var(x) = &strip_casts(a).val
+                    && let Some(ap) = self.arrays.get(&*x.val)
+                {
+                    retype_from = Some(ap.pn.clone());
+                }
                 v
             };
+            // A `char` array passed for an array of `unsigned char` (a
+            // `void *` one) is the same bytes at the other type, converted
+            // for the call and back after it -- before the lent suffix, if
+            // any, rejoins its prefix.
+            let mut retyped = false;
+            if let Some(from) = retype_from
+                && let Some(Some(to)) = arr_elems.get(i)
+                && from != *to
+            {
+                if from == "int8_t" && to == "uint8_t" {
+                    self.lines.push(format!("array_int8_as_uint8 {};", v));
+                    let back = format!("array_uint8_as_int8 {};", v);
+                    match self.pending_close.iter().rposition(|l| {
+                        l.starts_with("array_return_at ") && l.ends_with(&format!(" {};", v))
+                    }) {
+                        Some(at) => self.pending_close.insert(at, back),
+                        None => self.pending_close.push(back),
+                    }
+                    retyped = true;
+                } else {
+                    return Err(format!(
+                        "an array of {} passed for an array of {}",
+                        from, to
+                    ));
+                }
+            }
             if arr_args.get(i) == Some(&true)
                 && let Some(slot) = self.slots.iter().find(|s| s.addr == v)
                 && let Some(value) = &slot.array_value
@@ -20477,7 +20566,14 @@ impl<'a> Body<'a> {
                 if const_args.get(i) == Some(&true) {
                     implicit_args.push("#1.0R".to_string());
                 }
-                implicit_args.push(format!("#(hide {})", value));
+                if retyped {
+                    implicit_args.push(format!(
+                        "#(hide (seq_map FStar.Int.Cast.int8_to_uint8 {}))",
+                        value
+                    ));
+                } else {
+                    implicit_args.push(format!("#(hide {})", value));
+                }
             }
             out += &format!(" {}", v);
         }
