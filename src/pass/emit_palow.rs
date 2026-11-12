@@ -3440,6 +3440,21 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// The count of a shift, narrowed to `UInt32.t` without truncating (see
+    /// `wide_shift_count`), and the obligation that keeps it in range.
+    fn shift_count(&self, r: &Expr, w: When) -> Result<(String, Option<String>), String> {
+        match wide_shift_count(self.tds, |x| self.ty_of(x).ok(), r) {
+            Some((inner, m)) => {
+                let v = self.value(inner, w)?;
+                Ok((
+                    format!("(FStar.UInt32.uint_to_t ({}.v {}))", m, v),
+                    Some(format!("0 <= {m}.v {v} /\\ {m}.v {v}", m = m, v = v)),
+                ))
+            }
+            None => Ok((self.value(r, w)?, None)),
+        }
+    }
+
     /// What has to hold for a partial machine operator to be defined: a shift
     /// count below the width, and no overflow for signed arithmetic. These are
     /// C's own rules, so stating them costs the contract nothing it did not
@@ -3449,10 +3464,16 @@ impl<'a> Spec<'a> {
         // shift owes a count below its width, and a division a divisor.
         if matches!(peel(self.tds, ty).val, TypeT::SizeT) {
             return match op {
-                BinOp::Shl | BinOp::Shr => Some(format!(
-                    "UInt32.v {} < 8 * Pulse.Lib.C.Palow.Target.ptr_bytes",
-                    self.value(r, w).ok()?
-                )),
+                BinOp::Shl | BinOp::Shr => {
+                    let bound = match self.shift_count(r, w).ok()? {
+                        (_, Some(g)) => g,
+                        (c, None) => format!("UInt32.v {}", c),
+                    };
+                    Some(format!(
+                        "{} < 8 * Pulse.Lib.C.Palow.Target.ptr_bytes",
+                        bound
+                    ))
+                }
                 BinOp::Div | BinOp::Mod => Some(format!("SizeT.v {} <> 0", self.value(r, w).ok()?)),
                 _ => None,
             };
@@ -3473,13 +3494,17 @@ impl<'a> Spec<'a> {
                 else {
                     return None;
                 };
-                let mut g = format!(
-                    "{}Int{}.v {} < {}",
-                    if rs { "" } else { "U" },
-                    rw,
-                    self.value(r, w).ok()?,
-                    width
-                );
+                let (count, wide) = self.shift_count(r, w).ok()?;
+                let mut g = match wide {
+                    Some(b) => format!("{} < {}", b, width),
+                    None => format!(
+                        "{}Int{}.v {} < {}",
+                        if rs { "" } else { "U" },
+                        rw,
+                        count,
+                        width
+                    ),
+                };
                 // A shift of a negative signed value is undefined in C, and
                 // F* refuses it too; so is a left shift whose result does not
                 // fit.
@@ -3494,7 +3519,7 @@ impl<'a> Spec<'a> {
                             a,
                             if rs { "" } else { "U" },
                             rw,
-                            self.value(r, w).ok()?,
+                            count,
                             width
                         );
                     }
@@ -4134,12 +4159,12 @@ impl<'a> Spec<'a> {
                             binop(self.tds, *op, &ty, true)?
                         }
                     };
-                    return Ok(format!(
-                        "({} {} {})",
-                        self.value(l, w)?,
-                        o,
+                    let rv = if matches!(op, BinOp::Shl | BinOp::Shr) {
+                        self.shift_count(r, w)?.0
+                    } else {
                         self.value(r, w)?
-                    ));
+                    };
+                    return Ok(format!("({} {} {})", self.value(l, w)?, o, rv));
                 }
                 let o = match op {
                     BinOp::Add => "+",
@@ -18860,7 +18885,15 @@ impl<'a> Body<'a> {
                     self.lines.push("};".to_string());
                     return Ok(t);
                 }
-                let b = self.rvalue(r)?;
+                let b = match matches!(op, BinOp::Shl | BinOp::Shr)
+                    .then(|| wide_shift_count(self.tds, |x| self.ty_of(x).ok(), r))
+                    .flatten()
+                {
+                    Some((inner, m)) => {
+                        format!("(FStar.UInt32.uint_to_t ({}.v {}))", m, self.rvalue(inner)?)
+                    }
+                    None => self.rvalue(r)?,
+                };
                 Ok(format!("({} {} {})", a, opstr, b))
             }
             // `x++` is a read, an add and a write. The old value has to be
@@ -24334,6 +24367,30 @@ fn float_literal(tds: &Typedefs, text: &str, ty: &Type) -> Result<String, String
 /// for a signed type, `MAX - a` for an unsigned one. Neither can overflow,
 /// and unlike F*'s `lognot` the solver can reason about either -- including
 /// through the narrowing cast that `(uint8_t)~x` puts around a promoted `~`.
+/// A shift count wider than the `UInt32.t` F*'s shifts take: elab casts it
+/// to `uint32_t`, and that cast would truncate -- a count of 2^32 would
+/// become 0 and its shift look defined. Returns the uncast count and the F*
+/// module whose `v` reads it, so the count can be narrowed by the checked
+/// `UInt32.uint_to_t` instead, which owes `0 <= v < 2^32`.
+fn wide_shift_count<'e>(
+    tds: &Typedefs,
+    ty_of: impl Fn(&Expr) -> Option<Rc<Type>>,
+    r: &'e Expr,
+) -> Option<(&'e Expr, String)> {
+    let ExprT::Cast(inner, _) = &r.val else {
+        return None;
+    };
+    let ty = ty_of(inner)?;
+    let m = match &peel(tds, &ty).val {
+        TypeT::SizeT => "SizeT".to_string(),
+        TypeT::Int { signed, width } if *width > 32 => {
+            format!("{}Int{}", if *signed { "" } else { "U" }, width)
+        }
+        _ => return None,
+    };
+    Some((inner, m))
+}
+
 fn bitnot(tds: &Typedefs, ty: &Type, a: &str) -> Option<String> {
     let (signed, width) = match peel(tds, ty).val {
         TypeT::Int { signed, width } => (signed, width),

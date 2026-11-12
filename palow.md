@@ -7001,3 +7001,21 @@ Limitations:
     computed; what follows from the bounds is. `test/sizet_wrap_bitwise`
     covers `HASZERO`, wrapping and exact arithmetic, the bitwise bounds and
     the shifts.
+
+    The wrapping applies in contracts too: `_requires(i + n <= len)` over
+    `size_t` operands is `add_wrap i n <= len`, which a wrapped sum satisfies,
+    so it no longer rules out overflow the way the checked `SizeT.add` did.
+    A contract that means the mathematical bound must say so, e.g.
+    `_requires(n <= len && i <= len - n)`. (An operand that is an integer
+    literal still makes the contract arithmetic mathematical.)
+
+    A shift count wider than 32 bits -- a `size_t` or a 64-bit integer --
+    is narrowed to the `UInt32.t` that F*'s shifts take by the checked
+    `UInt32.uint_to_t (M.v s)`, and the definedness obligation is stated of
+    `M.v s` itself. Elaboration casts every count to `uint32_t`, and that
+    cast truncates: a count of 2^32 used to become 0, so the shift looked
+    defined and `a >> s` verified as `a` (this held for `uint64_t` before
+    `size_t` had shifts). `test/sizet_shift_count_bad` and
+    `test/u64_shift_count_bad` are the regressions. `mul_wrap` and
+    `shift_left` now both state their result as `% Target.addr_limit` of the
+    product, so `y <<= 1` is provably `y * two` when `two == 2`.

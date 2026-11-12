@@ -34,3 +34,14 @@ size_t shifts(void) _ensures(return == 2) {
 size_t shift_by(size_t a, unsigned s) _requires(s < 32) { return a >> s; }
 
 size_t div3(size_t x) _ensures(return == x / 3) { return x / 3; }
+
+/* A `size_t` count is narrowed to the `uint32_t` F* shifts by without
+   truncating, so a bound on it is enough. */
+size_t shift_by_size(size_t a, size_t s) _requires(s < 32) { return a << s; }
+
+/* `<<` and `*` wrap the same way. */
+size_t twice(size_t x, size_t two) _requires(two == 2) _ensures(return == x * two) {
+  size_t y = x;
+  y <<= 1;
+  return y;
+}

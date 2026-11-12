@@ -51,9 +51,8 @@ let mul_wrap (x y: SZ.t)
   : Pure SZ.t
     (requires True)
     (ensures fun z ->
-      if SZ.v x * SZ.v y < T.addr_limit
-      then SZ.v z == SZ.v x * SZ.v y
-      else SZ.v z == (SZ.v x * SZ.v y) % T.addr_limit)
+      SZ.v z == (SZ.v x * SZ.v y) % T.addr_limit /\
+      (SZ.v x * SZ.v y < T.addr_limit ==> SZ.v z == SZ.v x * SZ.v y))
   = T.addr_limit_pow2 ();
     of_bits (UI.mul_mod (bits x) (bits y))
 
@@ -88,7 +87,9 @@ let lognot_spec (x: SZ.t) : Lemma (SZ.v (lognot x) == UI.lognot (bits x)) =
 let shift_left (x: SZ.t) (s: U32.t)
   : Pure SZ.t
     (requires U32.v s < width)
-    (ensures fun z -> SZ.v z == (SZ.v x * pow2 (U32.v s)) % T.addr_limit)
+    (ensures fun z ->
+      SZ.v z == (SZ.v x * pow2 (U32.v s)) % T.addr_limit /\
+      (SZ.v x * pow2 (U32.v s) < T.addr_limit ==> SZ.v z == SZ.v x * pow2 (U32.v s)))
   = T.addr_limit_pow2 ();
     of_bits (UI.shift_left (bits x) (U32.v s))
 
