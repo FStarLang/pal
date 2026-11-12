@@ -19938,21 +19938,12 @@ impl<'a> Body<'a> {
             {
                 self.open_own_path(&path)?;
             }
-            // Naming the object must not emit anything yet: the opening
-            // below reads what it has to. An object reached through a local
-            // pointer costs a read to address, so it is grouped by the path
-            // that names it instead.
             let mark = self.lines.len();
             let key = self.addr_only(base);
-            let key = if self.lines.len() != mark {
+            if self.lines.len() != mark {
                 self.lines.truncate(mark);
-                match self.place_path(base) {
-                    Some((slot, path)) => Ok(format!("place {} {}", slot, path)),
-                    None => continue,
-                }
-            } else {
-                key
-            };
+                continue;
+            }
             let Ok(key) = key else {
                 continue;
             };
