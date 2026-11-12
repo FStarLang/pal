@@ -210,10 +210,10 @@ size_t wcslen(_array const wchar_t *s)
 
 A reassigned array parameter, or a local pointer, is *walked* when every value it is given comes from one `_array` parameter: a copy of it or of another walked pointer, `p ± n`, `p++`/`p--`/`++p`/`--p`, `p += n`, `c ? p : q`. `*p`, `p[i]`, `*p++` and `*(p + i)` on it read and write the owning array at wherever `p` points now. PAL adds to every loop invariant that each walked pointer is inside that array's allocation at an element boundary (`walk_ok`); that it is *in bounds* is for the `_invariant` to say. A pointer given values from two arrays, or from an array and anything else, is refused at the access.
 
-In a contract (an `_invariant` especially), for pointers walked through the same array:
+In a loop `_invariant` or an `_assert` -- not a function's `_requires`/`_ensures`, where there are no walked pointers and `p - q` is refused -- for pointers walked through the same array:
 
 - `p - q` is the number of elements between them, a mathematical integer; `p < q` and `p <= q` compare positions. Either may be the array parameter itself (`p - s`, `s <= p`). `_old(s)` is the parameter's entry value, the array's base. The same holds in `_assert`.
-- Anything combined with a position is mathematical too: `(l - _old(l)) + n == _old(n)`, `l - _old(l) == _old(n) - n` and `_forall(size_t k, k < s - a ==> ...)` compare numbers, not `ptrdiff_t` values, and a `_exists(size_t i, ...)` whose witness is where a pointer stopped needs no hint.
+- Anything combined with a position is mathematical too: `(l - _old(l)) + n == _old(n)`, `l - _old(l) == _old(n) - n` and `_forall(size_t k, k < s - a ==> ...)` compare numbers, not `ptrdiff_t` values, and a `_exists(size_t i, ...)` whose witness is where a pointer stopped needs no hint. A conversion that keeps every distance (to `ptrdiff_t`, `int64_t` or `_specint`) is read through; one that can change it, `(uint8_t)(p - a)`, is refused in an `_invariant` rather than read as the count. The `size_t` arithmetic itself still wraps: `_old(n) - n` is the wrapped difference, so an invariant using it also states `n <= _old(n)`.
 - `p[k]`, `*p` and `p._length` are relative to where `p` points: `p._length` is the number of elements left. `_old(p)[k]` is the array at entry.
 - A walked pointer the loop does not move (`a` above) keeps its value; a `const` array's contents are its entry contents.
 
@@ -408,7 +408,11 @@ int platform_identity(int x) _ensures(return == x) {
 }
 ```
 
-Contracts on an earlier prototype are retained. `_pal_admit` applies only to
+Contracts on an earlier prototype are retained, including across later
+unannotated redeclarations (such as a system header included after a header
+of contracts). A redeclaration that states a contract must state all of it:
+one that restates only some clauses (`_requires` but not `_ensures`, say) is
+reported as having differing specifications. `_pal_admit` applies only to
 functions; `_pal_ignore` takes precedence if both markers are present.
 
 `_pal_ignore` omits declarations entirely: functions, typedefs, structs/unions,

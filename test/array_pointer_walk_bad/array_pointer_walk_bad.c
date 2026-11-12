@@ -1,4 +1,5 @@
 #include "pal.h"
+#include <stddef.h>
 #include <stdint.h>
 
 /* An access through a walked pointer is focused out of the one array the
@@ -20,4 +21,16 @@ int not_from_an_array(_array const int *a, const int *q, int c)
 	if (c) p = q;
 	p++;
 	return *p;
+}
+
+/* A narrowing conversion of a distance is not the distance: at 256,
+   `(uint8_t)(p - a)` is 0. It is refused rather than read as the count. */
+void narrowed_distance(_array const uint8_t *a, size_t n)
+	_requires(a._length == n && n == 300)
+{
+	const uint8_t *p = a;
+	size_t i = 0;
+	while (i < 256)
+		_invariant(i <= 256 && p - a == (_specint)i && (uint8_t)(p - a) == (_specint)i)
+	{ p++; i++; }
 }

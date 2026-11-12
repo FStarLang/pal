@@ -2489,7 +2489,7 @@ fn null_input(tds: &Typedefs, ty: &Type) -> Option<String> {
             _ => false,
         }
     }
-    if refined(tds, ty) || extent(tds, ty) != Some(Extent::One) {
+    if refined(tds, ty) || refined_pointee(tds, ty) || extent(tds, ty) != Some(Extent::One) {
         return None;
     }
     let TypeT::Pointer(pt, _) = &peel(tds, ty).val else {
@@ -2501,6 +2501,91 @@ fn null_input(tds: &Typedefs, ty: &Type) -> Option<String> {
     let pn = palow_name(tds, pt)?;
     let zero = zero_value(tds, pt).ok()?;
     Some(format!("{}_pts_to null 1.0R ({})", pn, zero))
+}
+
+/// Whether a pointer's pointee is, or holds, a struct with a `_refine` --
+/// written on the struct or on one of its fields. The callee states that
+/// refinement as a conjunct of its own beside the pointee's `_pts_to`, so an
+/// optional parameter's guard is two guards, and a call site that introduces
+/// or eliminates only the `_pts_to` one would leave the other unmatched (or
+/// matched against the wrong value). Asked of the same walk `emit_fn_sig`
+/// states the contract from, so the two agree on which pointees those are.
+fn refined_pointee(tds: &Typedefs, ty: &Type) -> bool {
+    match &peel(tds, ty).val {
+        TypeT::Pointer(pt, _) => {
+            !struct_refines(tds, pt).is_empty() || !field_refines(tds, pt).is_empty()
+        }
+        _ => false,
+    }
+}
+
+/// The clauses of the `_refine` on a struct declaration, for a value of
+/// that type (empty for any other type).
+fn struct_refines(tds: &Typedefs, ty: &Type) -> Vec<Rc<Expr>> {
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
+        return Vec::new();
+    };
+    tds.refined_structs
+        .get(&*n.val.to_string())
+        .and_then(|r| refinements(tds, r).ok())
+        .map(|(ps, _, _)| ps)
+        .unwrap_or_default()
+}
+
+// A `_refine` written on one *field* of a struct is an invariant of the
+// struct type just as a struct-level one is, and it means the same thing
+// wherever a value of that type is: `this` is the field. The generated
+// ownership cannot carry it -- it is built from representations and has no
+// hook for a clause -- so it is stated in the contract of every function
+// that holds such a struct, at whichever ends the struct itself is stated.
+fn field_refines(tds: &Typedefs, ty: &Type) -> Vec<FieldRefinement> {
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
+        return Vec::new();
+    };
+    let sname = n.val.to_string();
+    let Some(si) = tds.structs.get(&sname) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for f in &si.fields {
+        let Ok((mut ps, _, _)) = field_refinements(tds, &f.ty) else {
+            continue;
+        };
+        // An embedded struct carries its declaration's invariant just
+        // as a parameter of that type does. Do not follow pointers:
+        // storing an address is not ownership of the pointed-to object.
+        let nested = !is_plain(tds, &f.ty)
+            && !is_plain_chain(&f.ty)
+            && matches!(peel(tds, &f.ty).val, TypeT::TypeRef(TypeRefKind::Struct(_)));
+        if nested {
+            if let TypeT::TypeRef(TypeRefKind::Struct(child)) = &peel(tds, &f.ty).val
+                && let Some(r) = tds.refined_structs.get(&*child.val)
+                && let Ok((clauses, _, _)) = refinements(tds, r)
+            {
+                for cl in clauses {
+                    if !ps.iter().any(|p| Rc::ptr_eq(p, &cl)) {
+                        ps.push(cl);
+                    }
+                }
+            }
+        }
+        for cl in ps {
+            out.push(FieldRefinement {
+                parents: Vec::new(),
+                container: sname.clone(),
+                field: f.name.clone(),
+                ty: f.ty.clone(),
+                clause: cl,
+            });
+        }
+        if nested {
+            for mut child in field_refines(tds, &f.ty) {
+                child.parents.insert(0, f.name.clone());
+                out.push(child);
+            }
+        }
+    }
+    out
 }
 
 fn is_nullable(tds: &Typedefs, ty: &Type) -> bool {
@@ -3375,7 +3460,7 @@ impl<'a> Spec<'a> {
     /// `p - q` between two pointers into the same array parameter: the
     /// number of elements between them, which is what C means by it.
     fn ptr_diff(&self, e: &Expr, w: When) -> Option<Result<String, String>> {
-        let ExprT::BinOp(BinOp::Sub, l, r) = &strip_vattr(e).val else {
+        let ExprT::BinOp(BinOp::Sub, l, r) = &keeps_diff(self.tds, e).val else {
             return None;
         };
         let lt = self.ty_of(l).ok()?;
@@ -3404,7 +3489,7 @@ impl<'a> Spec<'a> {
     }
 
     fn has_ptr_diff(&self, e: &Expr) -> bool {
-        has_ptr_diff(e, &|x| {
+        has_ptr_diff(self.tds, e, &|x| {
             self.ty_of(x)
                 .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
         })
@@ -3620,19 +3705,41 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// The count of a shift, narrowed to `UInt32.t` without truncating (see
+    /// `wide_shift_count`), and the obligation that keeps it in range.
+    fn shift_count(&self, r: &Expr, w: When) -> Result<(String, Option<String>), String> {
+        match wide_shift_count(self.tds, |x| self.ty_of(x).ok(), r) {
+            Some((inner, m)) => {
+                let v = self.value(inner, w)?;
+                Ok((
+                    format!("(FStar.UInt32.uint_to_t ({}.v {}))", m, v),
+                    Some(format!("0 <= {m}.v {v} /\\ {m}.v {v}", m = m, v = v)),
+                ))
+            }
+            None => Ok((self.value(r, w)?, None)),
+        }
+    }
+
     /// What has to hold for a partial machine operator to be defined: a shift
     /// count below the width, and no overflow for signed arithmetic. These are
     /// C's own rules, so stating them costs the contract nothing it did not
     /// already owe.
     fn definedness(&self, op: BinOp, ty: &Type, l: &Expr, r: &Expr, w: When) -> Option<String> {
-        // `size_t` is unsigned and its F* operations are the checked ones, so
-        // what it owes is the same non-overflow C already demands of it.
+        // `size_t` is unsigned, so its arithmetic wraps and owes nothing; a
+        // shift owes a count below its width, and a division a divisor.
         if matches!(peel(self.tds, ty).val, TypeT::SizeT) {
-            let (a, b) = (self.value(l, w).ok()?, self.value(r, w).ok()?);
             return match op {
-                BinOp::Add => Some(format!("SizeT.fits (SizeT.v {} + SizeT.v {})", a, b)),
-                BinOp::Sub => Some(format!("SizeT.v {} >= SizeT.v {}", a, b)),
-                BinOp::Mul => Some(format!("SizeT.fits (SizeT.v {} * SizeT.v {})", a, b)),
+                BinOp::Shl | BinOp::Shr => {
+                    let bound = match self.shift_count(r, w).ok()? {
+                        (_, Some(g)) => g,
+                        (c, None) => format!("UInt32.v {}", c),
+                    };
+                    Some(format!(
+                        "{} < 8 * Pulse.Lib.C.Palow.Target.ptr_bytes",
+                        bound
+                    ))
+                }
+                BinOp::Div | BinOp::Mod => Some(format!("SizeT.v {} <> 0", self.value(r, w).ok()?)),
                 _ => None,
             };
         }
@@ -3652,13 +3759,17 @@ impl<'a> Spec<'a> {
                 else {
                     return None;
                 };
-                let mut g = format!(
-                    "{}Int{}.v {} < {}",
-                    if rs { "" } else { "U" },
-                    rw,
-                    self.value(r, w).ok()?,
-                    width
-                );
+                let (count, wide) = self.shift_count(r, w).ok()?;
+                let mut g = match wide {
+                    Some(b) => format!("{} < {}", b, width),
+                    None => format!(
+                        "{}Int{}.v {} < {}",
+                        if rs { "" } else { "U" },
+                        rw,
+                        count,
+                        width
+                    ),
+                };
                 // A shift of a negative signed value is undefined in C, and
                 // F* refuses it too; so is a left shift whose result does not
                 // fit.
@@ -3673,7 +3784,7 @@ impl<'a> Spec<'a> {
                             a,
                             if rs { "" } else { "U" },
                             rw,
-                            self.value(r, w).ok()?,
+                            count,
                             width
                         );
                     }
@@ -3943,6 +4054,16 @@ impl<'a> Spec<'a> {
         match &e.val {
             ExprT::Old(inner) => self.value(inner, When::Old),
             ExprT::Cast(..) if let Some(c) = self.cast_bits(e) => self.value(&c, w),
+            // A conversion that can change a distance's value -- narrower, or
+            // unsigned -- would need the distance as a machine value, which a
+            // contract does not have.
+            ExprT::Cast(inner, to)
+                if !keeps_diff_ty(self.tds, to)
+                    && !matches!(self.tds.resolve(to).val, TypeT::SpecNat)
+                    && self.ptr_diff(inner, w).is_some() =>
+            {
+                Err("a conversion of a pointer distance that can change its value".to_string())
+            }
             ExprT::Cast(inner, to) => {
                 let to = self.tds.resolve(to);
                 match &to.val {
@@ -4361,12 +4482,12 @@ impl<'a> Spec<'a> {
                             binop(self.tds, *op, &ty, true)?
                         }
                     };
-                    return Ok(format!(
-                        "({} {} {})",
-                        self.value(l, w)?,
-                        o,
+                    let rv = if matches!(op, BinOp::Shl | BinOp::Shr) {
+                        self.shift_count(r, w)?.0
+                    } else {
                         self.value(r, w)?
-                    ));
+                    };
+                    return Ok(format!("({} {} {})", self.value(l, w)?, o, rv));
                 }
                 let o = match op {
                     BinOp::Add => "+",
@@ -4883,71 +5004,7 @@ fn emit_fn(
     // parameter's own refinements is what makes it reach the contract, and
     // binding `this` to the struct value is what makes it mean the same thing
     // it means in the declaration.
-    let struct_refines = |ty: &Type| -> Vec<Rc<Expr>> {
-        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
-            return Vec::new();
-        };
-        tds.refined_structs
-            .get(&*n.val.to_string())
-            .and_then(|r| refinements(tds, r).ok())
-            .map(|(ps, _, _)| ps)
-            .unwrap_or_default()
-    };
-    // A `_refine` written on one *field* of a struct is an invariant of the
-    // struct type just as a struct-level one is, and it means the same thing
-    // wherever a value of that type is: `this` is the field. The generated
-    // ownership cannot carry it -- it is built from representations and has no
-    // hook for a clause -- so it is stated in the contract of every function
-    // that holds such a struct, at whichever ends the struct itself is stated.
-    fn field_refines(tds: &Typedefs, ty: &Type) -> Vec<FieldRefinement> {
-        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
-            return Vec::new();
-        };
-        let sname = n.val.to_string();
-        let Some(si) = tds.structs.get(&sname) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for f in &si.fields {
-            let Ok((mut ps, _, _)) = field_refinements(tds, &f.ty) else {
-                continue;
-            };
-            // An embedded struct carries its declaration's invariant just
-            // as a parameter of that type does. Do not follow pointers:
-            // storing an address is not ownership of the pointed-to object.
-            let nested = !is_plain(tds, &f.ty)
-                && !is_plain_chain(&f.ty)
-                && matches!(peel(tds, &f.ty).val, TypeT::TypeRef(TypeRefKind::Struct(_)));
-            if nested {
-                if let TypeT::TypeRef(TypeRefKind::Struct(child)) = &peel(tds, &f.ty).val
-                    && let Some(r) = tds.refined_structs.get(&*child.val)
-                    && let Ok((clauses, _, _)) = refinements(tds, r)
-                {
-                    for cl in clauses {
-                        if !ps.iter().any(|p| Rc::ptr_eq(p, &cl)) {
-                            ps.push(cl);
-                        }
-                    }
-                }
-            }
-            for cl in ps {
-                out.push(FieldRefinement {
-                    parents: Vec::new(),
-                    container: sname.clone(),
-                    field: f.name.clone(),
-                    ty: f.ty.clone(),
-                    clause: cl,
-                });
-            }
-            if nested {
-                for mut child in field_refines(tds, &f.ty) {
-                    child.parents.insert(0, f.name.clone());
-                    out.push(child);
-                }
-            }
-        }
-        out
-    }
+    let struct_refines = |ty: &Type| struct_refines(tds, ty);
     // The `_own` predicate a value of this type carries, when its type is a
     // struct that has one.
     // `peel` and not `resolve`: the annotation that makes a struct interesting
@@ -13081,6 +13138,11 @@ pub fn emit_palow(
                     .map(|a| is_nullable(&tds, &a.ty))
                     .collect(),
                 spliced_own: sig.spliced_own,
+                refined_pointees: fndecl
+                    .args
+                    .iter()
+                    .map(|a| refined_pointee(&tds, &a.ty))
+                    .collect(),
                 null_inputs: fndecl
                     .args
                     .iter()
@@ -13970,6 +14032,8 @@ struct Callee {
     /// For each optional input whose guarded resource a declining call site
     /// can write down outright, that resource at a null pointer.
     null_inputs: Vec<Option<String>>,
+    /// Which parameters point at a refined struct; see `refined_pointee`.
+    refined_pointees: Vec<bool>,
     /// What the call hands the caller, when the return type grants a block.
     /// The caller has to start tracking it or the ownership the `ensures` just
     /// granted would be left over.
@@ -18310,7 +18374,7 @@ impl<'a> Body<'a> {
     }
 
     fn has_ptr_diff(&self, e: &Expr) -> bool {
-        has_ptr_diff(e, &|x| {
+        has_ptr_diff(self.tds, e, &|x| {
             self.ty_of(x)
                 .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
         })
@@ -18328,7 +18392,7 @@ impl<'a> Body<'a> {
     /// `p - q` in an assertion, between pointers into one array parameter:
     /// the number of elements between them, as in a contract.
     fn pos_diff(&mut self, e: &Expr) -> Option<Result<String, String>> {
-        let ExprT::BinOp(BinOp::Sub, l, r) = &strip_vattr(e).val else {
+        let ExprT::BinOp(BinOp::Sub, l, r) = &keeps_diff(self.tds, e).val else {
             return None;
         };
         let is_ptr = |x: &Expr| {
@@ -19488,7 +19552,15 @@ impl<'a> Body<'a> {
                     self.lines.push("};".to_string());
                     return Ok(t);
                 }
-                let b = self.rvalue(r)?;
+                let b = match matches!(op, BinOp::Shl | BinOp::Shr)
+                    .then(|| wide_shift_count(self.tds, |x| self.ty_of(x).ok(), r))
+                    .flatten()
+                {
+                    Some((inner, m)) => {
+                        format!("(FStar.UInt32.uint_to_t ({}.v {}))", m, self.rvalue(inner)?)
+                    }
+                    None => self.rvalue(r)?,
+                };
                 Ok(format!("({} {} {})", a, opstr, b))
             }
             // `x++` is a read, an add and a write. The old value has to be
@@ -19968,6 +20040,7 @@ impl<'a> Body<'a> {
         let nullables = c.nullables.clone();
         let callee_spliced = c.spliced_own;
         let null_inputs = c.null_inputs.clone();
+        let refined_pointees = c.refined_pointees.clone();
         let (implicits, ghost_args) = (c.implicits.clone(), c.ghost_args.clone());
         // A `$witness` before a direct call names the callee's `_ghost_arg`s,
         // which appear only inside `pure`s and so cannot be read off the
@@ -20012,7 +20085,7 @@ impl<'a> Body<'a> {
             }
             if let Some(at) = opened.get(&i) {
                 out += &format!(" {}", at);
-                if nullables.get(i) == Some(&true) {
+                if nullables.get(i) == Some(&true) && refined_pointees.get(i) != Some(&true) {
                     self.take_back_nullable(
                         a,
                         at,
@@ -20177,6 +20250,7 @@ impl<'a> Body<'a> {
                 self.author_slots.insert(x.val.to_string());
             }
             if nullables.get(i) == Some(&true)
+                && refined_pointees.get(i) != Some(&true)
                 && arr_args.get(i) != Some(&true)
                 && arrayptr_args.get(i) != Some(&true)
                 && plain_ptrs.get(i) != Some(&true)
@@ -20275,8 +20349,9 @@ impl<'a> Body<'a> {
     /// over a resource written down outright (see `null_input`).
     ///
     /// Anything else is left alone: a caller's own `_nullable` parameter is
-    /// forwarded with its guard untouched, and ownership a hand-written
-    /// contract supplies is the author's to open.
+    /// forwarded with its guard untouched, ownership a hand-written contract
+    /// supplies is the author's to open, and so is a pointee whose refinement
+    /// is a guard of its own (see `refined_pointee`).
     fn take_back_nullable(
         &mut self,
         a: &Expr,
@@ -25046,9 +25121,35 @@ fn float_literal(tds: &Typedefs, text: &str, ty: &Type) -> Result<String, String
 /// for a signed type, `MAX - a` for an unsigned one. Neither can overflow,
 /// and unlike F*'s `lognot` the solver can reason about either -- including
 /// through the narrowing cast that `(uint8_t)~x` puts around a promoted `~`.
-fn bitnot(tds: &Typedefs, ty: &Type, a: &str) -> Option<String> {
-    let TypeT::Int { signed, width } = peel(tds, ty).val else {
+/// A shift count wider than the `UInt32.t` F*'s shifts take: elab casts it
+/// to `uint32_t`, and that cast would truncate -- a count of 2^32 would
+/// become 0 and its shift look defined. Returns the uncast count and the F*
+/// module whose `v` reads it, so the count can be narrowed by the checked
+/// `UInt32.uint_to_t` instead, which owes `0 <= v < 2^32`.
+fn wide_shift_count<'e>(
+    tds: &Typedefs,
+    ty_of: impl Fn(&Expr) -> Option<Rc<Type>>,
+    r: &'e Expr,
+) -> Option<(&'e Expr, String)> {
+    let ExprT::Cast(inner, _) = &r.val else {
         return None;
+    };
+    let ty = ty_of(inner)?;
+    let m = match &peel(tds, &ty).val {
+        TypeT::SizeT => "SizeT".to_string(),
+        TypeT::Int { signed, width } if *width > 32 => {
+            format!("{}Int{}", if *signed { "" } else { "U" }, width)
+        }
+        _ => return None,
+    };
+    Some((inner, m))
+}
+
+fn bitnot(tds: &Typedefs, ty: &Type, a: &str) -> Option<String> {
+    let (signed, width) = match peel(tds, ty).val {
+        TypeT::Int { signed, width } => (signed, width),
+        TypeT::SizeT => return Some(format!("(Pulse.Lib.C.SizeT.lognot {})", a)),
+        _ => return None,
     };
     let all = if signed {
         BigInt::from(-1)
@@ -25301,14 +25402,41 @@ fn ptr_elem_size(tds: &Typedefs, ty: &Type) -> Option<u64> {
 /// `p - q`, or arithmetic and conversions of one. Such a distance is an
 /// element count, and a specification reads it, and everything it is
 /// combined with, as a mathematical integer.
-fn has_ptr_diff(e: &Expr, is_ptr: &dyn Fn(&Expr) -> bool) -> bool {
+///
+/// Only a conversion that keeps every distance's value is looked through:
+/// to `ptrdiff_t`, to a signed type at least as wide, or to `_specint`.
+/// Under a narrowing or unsigned one, `(uint8_t)(p - a)`, the distance is a
+/// machine value like any other and the conversion has to be translated.
+fn has_ptr_diff(tds: &Typedefs, e: &Expr, is_ptr: &dyn Fn(&Expr) -> bool) -> bool {
     match &strip_vattr(e).val {
         ExprT::BinOp(BinOp::Sub, l, r) if is_ptr(l) && is_ptr(r) => true,
         ExprT::BinOp(BinOp::Add | BinOp::Sub | BinOp::Mul, l, r) => {
-            has_ptr_diff(l, is_ptr) || has_ptr_diff(r, is_ptr)
+            has_ptr_diff(tds, l, is_ptr) || has_ptr_diff(tds, r, is_ptr)
         }
-        ExprT::UnOp(UnOp::Neg, i) | ExprT::Old(i) | ExprT::Cast(i, _) => has_ptr_diff(i, is_ptr),
+        ExprT::UnOp(UnOp::Neg, i) | ExprT::Old(i) => has_ptr_diff(tds, i, is_ptr),
+        ExprT::Cast(i, to) if keeps_diff_ty(tds, to) => has_ptr_diff(tds, i, is_ptr),
         _ => false,
+    }
+}
+
+/// Whether converting a pointer distance to `to` keeps its value.
+fn keeps_diff_ty(tds: &Typedefs, to: &Type) -> bool {
+    matches!(
+        tds.resolve(to).val,
+        TypeT::PtrdiffT
+            | TypeT::SpecInt
+            | TypeT::Int {
+                signed: true,
+                width: 64..
+            }
+    )
+}
+
+/// `e` without the value-keeping conversions (see `has_ptr_diff`) around it.
+fn keeps_diff<'a>(tds: &Typedefs, e: &'a Expr) -> &'a Expr {
+    match &strip_vattr(e).val {
+        ExprT::Cast(i, to) if keeps_diff_ty(tds, to) => keeps_diff(tds, i),
+        _ => strip_vattr(e),
     }
 }
 
@@ -25403,13 +25531,13 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
         BinOp::LEq => return Ok(format!("`{}.lte`", m)),
         // The bitwise operators are defined on the whole range at both
         // signednesses, so they need no obligation and no wrapping variant.
-        // `FStar.SizeT` does not have them, hence the guard.
+        // `FStar.SizeT` does not have them, so `size_t` gets its own.
         // C requires the shift count to be below the width, which PAL turns
         // into a proof obligation and the source discharges with a
         // `_requires`; a signed left shift additionally needs a non-negative
         // operand. Both come out of the contract, so an untranslated one has
         // to refuse rather than emit a failure about something else.
-        BinOp::Shl | BinOp::Shr if matches!(t.val, TypeT::Int { .. }) => {
+        BinOp::Shl | BinOp::Shr if matches!(t.val, TypeT::Int { .. } | TypeT::SizeT) => {
             if !signed_ok {
                 return Err(
                     "a shift, whose width obligation needs the untranslated `_requires`"
@@ -25418,7 +25546,11 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
             }
             return Ok(format!(
                 "`{}.shift_{}`",
-                m,
+                if matches!(t.val, TypeT::SizeT) {
+                    "Pulse.Lib.C.SizeT"
+                } else {
+                    m.as_str()
+                },
                 if matches!(op, BinOp::Shl) {
                     "left"
                 } else {
@@ -25426,10 +25558,16 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
                 }
             ));
         }
-        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor if matches!(t.val, TypeT::Int { .. }) => {
+        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            if matches!(t.val, TypeT::Int { .. } | TypeT::SizeT) =>
+        {
             return Ok(format!(
-                "`FStar.{}.log{}`",
-                m,
+                "`{}.log{}`",
+                if matches!(t.val, TypeT::SizeT) {
+                    "Pulse.Lib.C.SizeT".to_string()
+                } else {
+                    format!("FStar.{}", m)
+                },
                 match op {
                     BinOp::BitAnd => "and",
                     BinOp::BitOr => "or",
@@ -25446,12 +25584,15 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
     // `_requires` clause. When the contract did not translate, emitting it
     // would produce a failure that says nothing about the memory model, so it
     // is refused instead.
-    if let TypeT::Int {
-        signed: false,
-        width,
-    } = &t.val
-    {
-        let wrap = format!("Pulse.Lib.C.UInt{}", width);
+    let wrap = match &t.val {
+        TypeT::Int {
+            signed: false,
+            width,
+        } => Some(format!("Pulse.Lib.C.UInt{}", width)),
+        TypeT::SizeT => Some("Pulse.Lib.C.SizeT".to_string()),
+        _ => None,
+    };
+    if let Some(wrap) = wrap {
         // Division is partial at either signedness: by zero it is undefined.
         if matches!(op, BinOp::Div | BinOp::Mod) && !signed_ok {
             return Err(
