@@ -780,6 +780,26 @@ impl<'a> Elaborator<'a> {
                             }
                             return;
                         }
+                        // An array parameter compared with, or subtracted
+                        // from, a pointer into it (a contract about a walked
+                        // pointer): the two differ only in the pointer kind,
+                        // and the array side is read as the plain pointer.
+                        if matches!(bin_op, BinOp::Eq | BinOp::LEq | BinOp::Lt | BinOp::Sub) {
+                            if let (TypeT::Pointer(lt, lk), TypeT::Pointer(rt, rk)) =
+                                (&lhs_w.val, &rhs_w.val)
+                            {
+                                if lk != rk && env.vtype_eq(lt.clone().into(), rt.clone().into()) {
+                                    if matches!(lk, PointerKind::Array) {
+                                        cast_to(lhs, rhs_w.to_rc());
+                                        return;
+                                    }
+                                    if matches!(rk, PointerKind::Array) {
+                                        cast_to(rhs, lhs_w.to_rc());
+                                        return;
+                                    }
+                                }
+                            }
+                        }
                         if let Some(mut meet_type) = env.meet_type(lhs_ty.clone(), rhs_ty.clone()) {
                             // C integer promotion: Bool → int for arithmetic/bitwise ops
                             if env.is_bool(meet_type.clone())

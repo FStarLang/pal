@@ -2756,6 +2756,8 @@ struct OwnedParam {
     /// array's sequence states it again, or the refinement would be lost on
     /// the first iteration.
     elem_refine: Option<String>,
+    /// A `const` pointee, which nothing in the body can change.
+    fixed: bool,
 }
 
 /// Which values a specification expression refers to: the ones on entry, the
@@ -2841,6 +2843,11 @@ struct Spec<'a> {
     /// Arrays whose value here is a sequence of `option`s: an `_out` array
     /// in a loop invariant, while it is still being filled.
     maybes: HashSet<String>,
+    /// Pointers a loop walks through an array parameter, as
+    /// (the array parameter, its element size as a `nat` term, its base).
+    /// Only a loop invariant has any: anywhere else a pointer parameter is
+    /// the base of its own array.
+    walks: HashMap<String, (String, String, String)>,
     /// What the comparison being translated needs to be defined: that each
     /// cell of a `maybes` array it reads holds a value. Unlike `guards`, this
     /// is part of the claim, at the comparison itself -- reading a cell is a
@@ -3093,6 +3100,7 @@ impl<'a> Spec<'a> {
                         valued: RefCell::new(Vec::new()),
                         maybes: self.maybes.clone(),
                         defined: RefCell::new(Vec::new()),
+                        walks: self.walks.clone(),
                     };
                     let p = inner.prop(body, w)?;
                     self.uses
@@ -3173,6 +3181,20 @@ impl<'a> Spec<'a> {
         {
             {
                 let ty = self.ty_of(l)?;
+                if self.has_ptr_diff(l) || self.has_ptr_diff(r) {
+                    let o = match op {
+                        BinOp::Eq => "==",
+                        BinOp::Lt => "<",
+                        BinOp::LEq => "<=",
+                        _ => return Err("an unsupported operator in a contract".to_string()),
+                    };
+                    return Ok(format!(
+                        "({} {} {})",
+                        self.pos_num(l, w)?,
+                        o,
+                        self.pos_num(r, w)?
+                    ));
+                }
                 if matches!(op, BinOp::Eq) {
                     // `_Bool` equality is equivalence of the two conditions,
                     // not equality of two values: one side is often a
@@ -3190,6 +3212,11 @@ impl<'a> Spec<'a> {
                     BinOp::LEq => "<=",
                     _ => return Err("an unsupported operator in a contract".to_string()),
                 };
+                // Pointers into one array are ordered by where in it they are.
+                if pointee(self.tds, peel(self.tds, &ty)).is_some() {
+                    let (pl, pr) = self.ptr_positions(l, r, w)?;
+                    return Ok(format!("({} {} {})", pl, o, pr));
+                }
                 // C compares machine integers directly; F* orders only
                 // mathematical ones, so an uncast comparison needs the `.v`
                 // that an explicit `(_specint)` would have supplied.
@@ -3216,9 +3243,23 @@ impl<'a> Spec<'a> {
                     .map(|o| format!("(Seq.length {})", o)),
             );
         }
+        let (inner, w) = match &strip_vattr(inner).val {
+            ExprT::Old(i) => (i, When::Old),
+            _ => (inner, w),
+        };
         let ExprT::Var(v) = &inner.val else {
             return Some(Err("`_length` of a computed pointer".to_string()));
         };
+        // A walked pointer is an array of what is left from where it points.
+        if w != When::Old
+            && self.walks.contains_key(&*v.val)
+            && let Some(r) = self.ptr_pos(inner, w)
+        {
+            return Some(r.and_then(|(owner, pos)| match self.pointees.get(&owner) {
+                Some((Some(t), _)) => Ok(format!("(Seq.length {} - {})", t, pos)),
+                _ => Err(format!("`{}._length` is not available here", v.val)),
+            }));
+        }
         // A `_pure` array global is published as a sequence constant rather
         // than as an object, so there is no ownership to read the length off
         // and no need for one: the sequence itself has it, and its refined
@@ -3347,7 +3388,112 @@ impl<'a> Spec<'a> {
     /// `*p` and `p[i]`. For a scalar parameter the pointee *is* the ghost
     /// value; for an array parameter it is an index into the ghost sequence,
     /// which is why the two cannot share a translation.
+    /// Where a pointer into an array parameter points, as an element index
+    /// from the array's base, and which array that is. `None` is a pointer
+    /// this does not know as one; an array parameter itself is at 0, and a
+    /// pointer a loop walks is wherever its invariant binder says.
+    fn ptr_pos(&self, e: &Expr, w: When) -> Option<Result<(String, String), String>> {
+        match &strip_vattr(e).val {
+            ExprT::Old(inner) => self.ptr_pos(inner, When::Old),
+            ExprT::Var(v) => {
+                if w != When::Old
+                    && let Some((owner, esize, addr)) = self.walks.get(&*v.val)
+                    && let Some(cur) = self.locals.get(&*v.val)
+                {
+                    return Some(Ok((
+                        owner.clone(),
+                        format!("(walk_idx {} {} {})", esize, addr, cur),
+                    )));
+                }
+                if self.walks.values().any(|(o, _, _)| *o == *v.val) {
+                    return Some(Ok((v.val.to_string(), "0".to_string())));
+                }
+                None
+            }
+            ExprT::BinOp(op @ (BinOp::Add | BinOp::Sub), l, r) => {
+                let lt = self.ty_of(l).ok()?;
+                pointee(self.tds, peel(self.tds, &lt))?;
+                let rt = self.ty_of(r).ok()?;
+                if pointee(self.tds, peel(self.tds, &rt)).is_some() {
+                    return None;
+                }
+                let (owner, pos) = match self.ptr_pos(l, w)? {
+                    Ok(x) => x,
+                    Err(e) => return Some(Err(e)),
+                };
+                Some(
+                    self.num(r, w)
+                        .map(|n| (owner, format!("({} {} {})", pos, op.to_str(), n))),
+                )
+            }
+            ExprT::Cast(inner, to) => {
+                let it = self.ty_of(inner).ok()?;
+                let from = pointee(self.tds, peel(self.tds, &it))?;
+                let to = pointee(self.tds, peel(self.tds, to))?;
+                if palow_name(self.tds, from)? != palow_name(self.tds, to)? {
+                    return None;
+                }
+                self.ptr_pos(inner, w)
+            }
+            _ => None,
+        }
+    }
+
+    /// `p - q` between two pointers into the same array parameter: the
+    /// number of elements between them, which is what C means by it.
+    fn ptr_diff(&self, e: &Expr, w: When) -> Option<Result<String, String>> {
+        let ExprT::BinOp(BinOp::Sub, l, r) = &keeps_diff(self.tds, e).val else {
+            return None;
+        };
+        let lt = self.ty_of(l).ok()?;
+        let rt = self.ty_of(r).ok()?;
+        pointee(self.tds, peel(self.tds, &lt))?;
+        pointee(self.tds, peel(self.tds, &rt))?;
+        Some(
+            self.ptr_positions(l, r, w)
+                .and_then(|(pl, pr)| Ok(format!("({} - {})", pl, pr))),
+        )
+    }
+
+    /// The positions of two pointers into one array parameter.
+    fn ptr_positions(&self, l: &Expr, r: &Expr, w: When) -> Result<(String, String), String> {
+        let err = || "a contract that compares pointers not known to be into one array".to_string();
+        let (ol, pl) = self.ptr_pos(l, w).ok_or_else(err)??;
+        let (or, pr) = self.ptr_pos(r, w).ok_or_else(err)??;
+        if ol != or {
+            return Err(err());
+        }
+        Ok((pl, pr))
+    }
+
     fn pointee_at(&self, base: &Expr, idx: Option<&Expr>, w: When) -> Result<String, String> {
+        self.pointee_at_in(base, idx, w, w)
+    }
+
+    fn has_ptr_diff(&self, e: &Expr) -> bool {
+        has_ptr_diff(self.tds, e, &|x| {
+            self.ty_of(x)
+                .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
+        })
+    }
+
+    /// An operand next to a distance between pointers, as a number.
+    fn pos_num(&self, e: &Expr, w: When) -> Result<String, String> {
+        match ptrdiff_conv(self.tds, e, &|x| self.ty_of(x).ok()) {
+            Some(inner) => self.num(inner, w),
+            None => self.num(e, w),
+        }
+    }
+
+    /// `pointee_at` with the index read at `wi`: `_old(p)[k]` is the entry
+    /// array at the index `k` has here.
+    fn pointee_at_in(
+        &self,
+        base: &Expr,
+        idx: Option<&Expr>,
+        w: When,
+        wi: When,
+    ) -> Result<String, String> {
         // `*(s->f)` where the contract owns `s` deeply. The deep half already
         // names the value behind every pointer field, so the dereference is a
         // projection out of it rather than something the contract has to be
@@ -3367,11 +3513,27 @@ impl<'a> Spec<'a> {
             && !self.pointees.contains_key(&*v.val)
             && let Some(t) = self.global_array_const(v)
         {
-            let i = self.num(i, w)?;
+            let i = self.num(i, wi)?;
             self.guards
                 .borrow_mut()
                 .push(format!("{} < Seq.length {}", i, t));
             return Ok(format!("(Seq.index {} {})", t, i));
+        }
+        if w != When::Old
+            && self.walks.contains_key(&*v.val)
+            && let Some(Ok((owner, pos))) = self.ptr_pos(base, w)
+        {
+            let Some((Some(term), _)) = self.pointees.get(&owner) else {
+                return Err(format!("`*{}` in a contract", v.val));
+            };
+            let i = match idx {
+                None => pos,
+                Some(i) => format!("({} + {})", pos, self.num(i, wi)?),
+            };
+            self.guards
+                .borrow_mut()
+                .push(format!("0 <= {} /\\ {} < Seq.length {}", i, i, term));
+            return Ok(format!("(Seq.index {} {})", term, i));
         }
         let Some((pre, post)) = self.pointees.get(&*v.val) else {
             return Err(format!("`*{}` in a contract", v.val));
@@ -3395,7 +3557,7 @@ impl<'a> Spec<'a> {
         if self.arrays.contains(&*v.val) {
             let i = match idx {
                 None => "0".to_string(),
-                Some(i) => self.num(i, w)?,
+                Some(i) => self.num(i, wi)?,
             };
             self.guards
                 .borrow_mut()
@@ -3649,7 +3811,24 @@ impl<'a> Spec<'a> {
         if let Some(l) = self.length_of(e, w) {
             return l;
         }
+        if let Some(d) = self.ptr_diff(e, w) {
+            return d;
+        }
         let ty = self.ty_of(e)?;
+        // A distance between pointers is an element count, a mathematical
+        // integer, and so is anything computed from one: the `size_t` the
+        // elaborator converted to `ptrdiff_t` to meet it is read as the
+        // number it is, not through a machine conversion.
+        if let ExprT::BinOp(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), l, r) = &strip_vattr(e).val
+            && self.has_ptr_diff(e)
+        {
+            return Ok(format!(
+                "({} {} {})",
+                self.pos_num(l, w)?,
+                op.to_str(),
+                self.pos_num(r, w)?
+            ));
+        }
         // Signed arithmetic is undefined on overflow, so where a contract
         // measures it the source can only mean the mathematical result, and
         // the two agree on every program C defines. Saying it that way rather
@@ -3857,6 +4036,16 @@ impl<'a> Spec<'a> {
         match &e.val {
             ExprT::Old(inner) => self.value(inner, When::Old),
             ExprT::Cast(..) if let Some(c) = self.cast_bits(e) => self.value(&c, w),
+            // A conversion that can change a distance's value -- narrower, or
+            // unsigned -- would need the distance as a machine value, which a
+            // contract does not have.
+            ExprT::Cast(inner, to)
+                if !keeps_diff_ty(self.tds, to)
+                    && !matches!(self.tds.resolve(to).val, TypeT::SpecNat)
+                    && self.ptr_diff(inner, w).is_some() =>
+            {
+                Err("a conversion of a pointer distance that can change its value".to_string())
+            }
             ExprT::Cast(inner, to) => {
                 let to = self.tds.resolve(to);
                 match &to.val {
@@ -3866,6 +4055,9 @@ impl<'a> Spec<'a> {
                     TypeT::SpecInt | TypeT::SpecNat => {
                         if let Some(l) = self.length_of(inner, w) {
                             return l;
+                        }
+                        if let Some(d) = self.ptr_diff(inner, w) {
+                            return d;
                         }
                         let ity = self.ty_of(inner)?;
                         match self.int_module(&ity) {
@@ -4005,6 +4197,12 @@ impl<'a> Spec<'a> {
             ExprT::Deref(inner) => self.pointee_at(inner, None, w),
             ExprT::Index(base, idx) if matches!(strip_vattr(base).val, ExprT::Var(_)) => {
                 self.pointee_at(base, Some(idx), w)
+            }
+            ExprT::Index(base, idx)
+                if let ExprT::Old(b) = &strip_vattr(base).val
+                    && matches!(strip_vattr(b).val, ExprT::Var(_)) =>
+            {
+                self.pointee_at_in(b, Some(idx), When::Old, w)
             }
             // An `_array` field's elements are not in the struct's value at
             // all -- the value holds only the pointer -- so the sequence comes
@@ -4465,6 +4663,7 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
         valued: RefCell::new(Vec::new()),
         maybes: HashSet::new(),
         defined: RefCell::new(Vec::new()),
+        walks: HashMap::new(),
     };
     let clause = |es: &Exprs| -> Result<String, String> {
         let mut props: Vec<String> = Vec::new();
@@ -4564,6 +4763,7 @@ fn emit_pure_fn(
         valued: RefCell::new(Vec::new()),
         maybes: HashSet::new(),
         defined: RefCell::new(Vec::new()),
+        walks: HashMap::new(),
     };
     let clause = |sp: &Spec, es: &Exprs| -> Result<String, String> {
         let mut props: Vec<String> = Vec::new();
@@ -5188,6 +5388,7 @@ fn emit_fn(
                             uninit: Some(format!("{}_pts_to_uninit {}", pn, pname)),
                             entry: String::new(),
                             elem_refine: None,
+                            fixed: false,
                         });
                     }
                     if !ens_own {
@@ -5278,6 +5479,7 @@ fn emit_fn(
                         uninit: Some(format!("{}_pts_to_uninit {}", pn, pname)),
                         entry: String::new(),
                         elem_refine: None,
+                        fixed: false,
                     });
                 }
                 // The mode is a statement about the *pre*condition: what
@@ -5330,6 +5532,7 @@ fn emit_fn(
                     uninit: None,
                     entry: format!("(reveal {})", vname),
                     elem_refine: elem_refine.clone(),
+                    fixed: true,
                 });
                 if let Some((sn, osty)) = &own_info {
                     ghosts.push(format!("(#{}: erased ({}))", oname, osty));
@@ -5355,6 +5558,7 @@ fn emit_fn(
                     uninit: None,
                     entry: format!("(reveal {})", vname),
                     elem_refine: elem_refine.clone(),
+                    fixed: false,
                 });
                 if let Some((sn, osty)) = &own_info {
                     ghosts.push(format!("(#{}: erased ({}))", oname, osty));
@@ -5381,6 +5585,7 @@ fn emit_fn(
                     uninit: None,
                     entry: format!("(reveal {})", vname),
                     elem_refine: elem_refine.clone(),
+                    fixed: false,
                 });
                 fresh.push((
                     format!("{}'", vname),
@@ -5681,6 +5886,7 @@ fn emit_fn(
         valued: RefCell::new(Vec::new()),
         maybes: HashSet::new(),
         defined: RefCell::new(Vec::new()),
+        walks: HashMap::new(),
     };
     let translate = |es: &Exprs, w: When| -> Result<Vec<String>, String> {
         es.iter()
@@ -5860,6 +6066,7 @@ fn emit_fn(
             valued: RefCell::new(Vec::new()),
             maybes: HashSet::new(),
             defined: RefCell::new(Vec::new()),
+            walks: HashMap::new(),
         };
         let r = how(&inner, w);
         spec.uses
@@ -7209,6 +7416,7 @@ fn refine_prop(
         valued: RefCell::new(Vec::new()),
         maybes: HashSet::new(),
         defined: RefCell::new(Vec::new()),
+        walks: HashMap::new(),
     };
     let mut out = Vec::new();
     for p in &ps {
@@ -7310,6 +7518,7 @@ fn struct_elem_refine(tds: &Typedefs, env: &Env, name: &str) -> Option<String> {
         valued: RefCell::new(Vec::new()),
         maybes: HashSet::new(),
         defined: RefCell::new(Vec::new()),
+        walks: HashMap::new(),
     };
     let mut out = Vec::new();
     for p in &ps {
@@ -14074,6 +14283,9 @@ struct Body<'a> {
     /// Locals that are another name for an array: `T *p = a;`. A subscript of
     /// one is a subscript of the array it names. See `array_alias_map`.
     array_aliases: HashMap<String, String>,
+    /// Pointers the body moves through an array parameter, and which one.
+    /// See `walk_map`.
+    walks: HashMap<String, Result<String, String>>,
     /// Which member of a union at a given address is live, where the emitter
     /// knows. C's rule is that reading a member other than the one last
     /// written is not reading what you wrote, and Palow says the same thing by
@@ -16730,7 +16942,7 @@ impl<'a> Body<'a> {
         // focus would be applied to the array itself.
         if let ExprT::Deref(inner) = &strip_vattr(base).val
             && let ExprT::Var(v) = &strip_vattr(inner).val
-            && self.arrays.contains_key(&v.val.to_string())
+            && (self.arrays.contains_key(&v.val.to_string()) || self.walk_owner(&v.val).is_some())
         {
             let inner = inner.clone();
             let f = self.focus_elem(&inner, None, false)?;
@@ -16792,6 +17004,102 @@ impl<'a> Body<'a> {
             .any(|b| b.var == v && b.checked && !b.freed && b.array.is_some())
             || self.slots.iter().any(|s| s.name == v && s.array.is_some())
             || self.arrays.contains_key(&v)
+            || self.walk_owner(&v).is_some()
+    }
+
+    /// The array parameter a pointer slot has been walked through, when the
+    /// body moves it (or copies it) from one. `Err` is a walked pointer whose
+    /// array cannot be pinned down, which is reported at the access. A
+    /// parameter the body never reassigns has no slot and is not a walk: it
+    /// is its own array's base. See `walk_map`.
+    fn walk_owner(&self, v: &str) -> Option<Result<String, String>> {
+        let s = self.slots.iter().rev().find(|s| s.name == v)?;
+        if s.array.is_some() || s.global {
+            return None;
+        }
+        match self.walks.get(v)? {
+            Ok(o)
+                if self.arrays.get(o).is_some_and(|a| !a.maybe) && !self.out_params.contains(o) =>
+            {
+                Some(Ok(o.clone()))
+            }
+            Ok(_) => None,
+            Err(e) => Some(Err(e.clone())),
+        }
+    }
+
+    /// The walked pointer a pointer expression steps from, when it is one
+    /// moved by `++`/`--` or offset by an integer: `*p++` and `*(p + 1)`
+    /// are accesses through `p`'s array as much as `*p` is.
+    fn walk_root(&self, e: &Expr) -> Option<String> {
+        match &strip_vattr(e).val {
+            ExprT::Var(v) => self.walk_owner(&v.val).map(|_| v.val.to_string()),
+            ExprT::PreIncr(x) | ExprT::PostIncr(x) | ExprT::PreDecr(x) | ExprT::PostDecr(x) => {
+                match &strip_vattr(x).val {
+                    ExprT::Var(_) => self.walk_root(x),
+                    _ => None,
+                }
+            }
+            ExprT::BinOp(BinOp::Add | BinOp::Sub, l, r) => {
+                let rt = self.ty_of(r).ok()?;
+                if pointee(self.tds, peel(self.tds, &rt)).is_some() {
+                    return None;
+                }
+                self.walk_root(l)
+            }
+            _ => None,
+        }
+    }
+
+    /// `*p` where `p` is, or walks through, an array parameter: `p[0]`.
+    fn read_elem(&mut self, p: &Expr) -> Result<String, String> {
+        let f = self.focus_elem(p, None, false)?;
+        self.lines.extend(f.open_read.iter().cloned());
+        let t = self.fresh("elem");
+        self.lines
+            .push(format!("let {} = {} {};", t, f.read_fn(), f.at));
+        self.lines.extend(f.close_read);
+        Ok(t)
+    }
+
+    /// That `q` points into array parameter `owner`, at an element boundary.
+    fn walk_ok(&self, owner: &str, q: &str) -> String {
+        let a = &self.arrays[owner];
+        format!("pure (walk_ok (SizeT.v {}) {} {})", a.esize, a.addr, q)
+    }
+
+    /// An access through a walked pointer: the ownership is at the array's
+    /// base, and the pointer says where in it.
+    fn walk_place(&mut self, e: &Expr, owner: &str) -> Result<ArrayPlace, String> {
+        let ap = self.arrays[owner].clone();
+        if !ap.known_len && !self.requires_ok {
+            return Err(
+                "a dereference of a walked pointer, whose bounds obligation needs a `_requires` \
+                 that is not translated"
+                    .to_string(),
+            );
+        }
+        let ty = self.ty_of(e)?;
+        let elem = pointee(self.tds, peel(self.tds, &ty))
+            .ok_or_else(|| "a dereference of a walked non-pointer".to_string())?;
+        if palow_name(self.tds, elem).as_deref() != Some(&*ap.pn) {
+            return Err(format!(
+                "a dereference of a pointer walked through `{}` at {}, which is not its element type",
+                owner,
+                describe(elem)
+            ));
+        }
+        let cur = self.rvalue(e)?;
+        Ok(ArrayPlace {
+            addr: ap.addr,
+            pn: ap.pn,
+            esize: ap.esize,
+            base: 0,
+            close_read: Vec::new(),
+            close_write: Vec::new(),
+            maybe: ap.maybe,
+            walk: Some(cur),
+        })
     }
 
     /// The array a local is another name for, or the name itself.
@@ -16849,6 +17157,12 @@ impl<'a> Body<'a> {
     /// its sequence outright, or a fixed-size array field, which has to be
     /// focused out of its struct first.
     fn array_place(&mut self, e: &Expr) -> Result<ArrayPlace, String> {
+        if !matches!(strip_vattr(e).val, ExprT::Var(_))
+            && let Some(v) = self.walk_root(e)
+        {
+            let owner = self.walk_owner(&v).unwrap()?;
+            return self.walk_place(e, &owner);
+        }
         match &strip_vattr(e).val {
             ExprT::Var(v) => {
                 // A local that is another name for an array is that array:
@@ -16873,7 +17187,16 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: true,
+                        walk: None,
                     });
+                }
+                if let Some(w) = self.walk_owner(&v) {
+                    let owner = w?;
+                    if let ExprT::Var(n) = &strip_vattr(e).val
+                        && *n.val == *v
+                    {
+                        return self.walk_place(e, &owner);
+                    }
                 }
                 // A local array's elements are `option`s; a parameter's are
                 // not, because the caller has already initialised them.
@@ -16893,6 +17216,7 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: esize.1,
+                        walk: None,
                     });
                 }
                 let Some(ap) = self.arrays.get(&v) else {
@@ -16921,6 +17245,7 @@ impl<'a> Body<'a> {
                     close_read: Vec::new(),
                     close_write: Vec::new(),
                     maybe: ap.maybe,
+                    walk: None,
                 })
             }
             // An array arm of a union. The arm has to be the live one
@@ -16950,6 +17275,7 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: true,
+                        walk: None,
                     });
                 }
                 let fty = self.field_ty(b2, f)?;
@@ -16971,6 +17297,7 @@ impl<'a> Body<'a> {
                     close_read: uf.close_read,
                     close_write: uf.close_write,
                     maybe: false,
+                    walk: None,
                     base: 0,
                 })
             }
@@ -16996,6 +17323,7 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: true,
+                        walk: None,
                     });
                 }
                 // An `_array` field holds a pointer, not the elements, so its
@@ -17018,6 +17346,7 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: false,
+                        walk: None,
                     });
                 }
                 // The flexible tail of a block that is still in pieces is
@@ -17041,6 +17370,7 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: !b.scattered.contains(&fx.field),
+                        walk: None,
                     });
                 }
                 let (pn, esize) = match field_shape(self.tds, &fty) {
@@ -17073,6 +17403,7 @@ impl<'a> Body<'a> {
                     close_read,
                     close_write,
                     maybe: false,
+                    walk: None,
                 })
             }
             // `m->arr[2][3]`: the outer subscript of a multidimensional array
@@ -17129,6 +17460,7 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write,
                         maybe,
+                        walk: None,
                     });
                 }
             }
@@ -17166,6 +17498,7 @@ impl<'a> Body<'a> {
             close_read: Vec::new(),
             close_write: Vec::new(),
             maybe: storage.is_some(),
+            walk: None,
         })
     }
 
@@ -17202,6 +17535,7 @@ impl<'a> Body<'a> {
             close_read: cl_read,
             close_write: cl_write,
             maybe,
+            walk,
             base: elem_base,
         } = self.array_place(base)?;
         let i = match idx {
@@ -17225,7 +17559,12 @@ impl<'a> Body<'a> {
             }
         };
         let off = format!("({} `SizeT.mul` {})", esize, i);
-        let at = format!("({} +! {})", arr, off);
+        // A walked pointer is focused where it points, but the ownership is
+        // the array's, so the element is found relative to the base.
+        let (at, cur, at_sfx) = match &walk {
+            Some(cur) => (format!("({} +! {})", cur, off), format!(" {}", cur), "_at"),
+            None => (format!("({} +! {})", arr, off), String::new(), ""),
+        };
         let repr = if maybe {
             format!("(maybe_repr {}_repr (SizeT.v {}))", pn, esize)
         } else {
@@ -17235,23 +17574,23 @@ impl<'a> Body<'a> {
             s.array_value = None;
         }
         self.lines.push(format!(
-            "array_offset_fits {} {} {} {}_alignof {};",
-            repr, arr, esize, pn, i
+            "array_offset_fits{} {} {} {} {}_alignof{} {};",
+            at_sfx, repr, arr, esize, pn, cur, i
         ));
         self.lines.push(format!(
-            "array_focus {} {} {} {}_alignof {} {};",
-            repr, arr, esize, pn, i, off
+            "array_focus{} {} {} {} {}_alignof{} {} {};",
+            at_sfx, repr, arr, esize, pn, cur, i, off
         ));
-        let common = format!("{} {} {}_alignof {} {}", arr, esize, pn, i, off);
+        let common = format!("{} {} {}_alignof{} {} {}", arr, esize, pn, cur, i, off);
         if !maybe {
             self.lines.push(format!("{}_of_elem {};", pn, at));
             let mut close_read = vec![
                 format!("{}_to_elem {};", pn, at),
-                format!("array_unfocus_read {} {};", repr, common),
+                format!("array_unfocus_read{} {} {};", at_sfx, repr, common),
             ];
             let mut close_write = vec![
                 format!("{}_to_elem {};", pn, at),
-                format!("array_unfocus {} {};", repr, common),
+                format!("array_unfocus{} {} {};", at_sfx, repr, common),
             ];
             close_read.extend(cl_read);
             close_write.extend(cl_write);
@@ -17285,7 +17624,7 @@ impl<'a> Body<'a> {
         let mut both = vec![
             format!("{}_to_elem {};", pn, at),
             format!("elem_maybe_put {}_repr {} {};", pn, esize, at),
-            format!("array_unfocus {} {};", repr, common),
+            format!("array_unfocus{} {} {};", at_sfx, repr, common),
         ];
         let mut close_write = both.clone();
         let mut close_read = both;
@@ -17751,6 +18090,17 @@ impl<'a> Body<'a> {
                     return Ok(format!("({} {} {})", a, o, b));
                 }
                 let ty = self.ty_of(l)?;
+                if self.has_ptr_diff(l) || self.has_ptr_diff(r) {
+                    let o = match op {
+                        BinOp::Eq => "==",
+                        BinOp::Lt => "<",
+                        BinOp::LEq => "<=",
+                        _ => return Err("an unsupported operator in an assertion".to_string()),
+                    };
+                    let a = self.pos_num(l)?;
+                    let b = self.pos_num(r)?;
+                    return Ok(format!("({} {} {})", a, o, b));
+                }
                 if matches!(op, BinOp::Eq) {
                     if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
                         let a = self.prop(l)?;
@@ -17790,6 +18140,16 @@ impl<'a> Body<'a> {
 
     /// A specification expression inside a body, as a mathematical integer.
     fn num(&mut self, e: &Expr) -> Result<String, String> {
+        if let Some(d) = self.pos_diff(e) {
+            return d;
+        }
+        if let ExprT::BinOp(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), l, r) = &strip_vattr(e).val
+            && self.has_ptr_diff(e)
+        {
+            let a = self.pos_num(l)?;
+            let b = self.pos_num(r)?;
+            return Ok(format!("({} {} {})", a, op.to_str(), b));
+        }
         // `p._length` is how the source asks how long an array is. For a block
         // this body allocated the answer is the count it asked for -- the
         // sequence it was claimed at has exactly that length -- so the question
@@ -17849,6 +18209,107 @@ impl<'a> Body<'a> {
         match int_module(self.tds, &ty) {
             Some(m) => Ok(format!("({}.v {})", m, self.inline(e)?)),
             None => self.inline(e),
+        }
+    }
+
+    fn has_ptr_diff(&self, e: &Expr) -> bool {
+        has_ptr_diff(self.tds, e, &|x| {
+            self.ty_of(x)
+                .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
+        })
+    }
+
+    /// An operand next to a distance between pointers, as a number.
+    fn pos_num(&mut self, e: &Expr) -> Result<String, String> {
+        let ty_of = |x: &Expr| self.ty_of(x).ok();
+        match ptrdiff_conv(self.tds, e, &ty_of) {
+            Some(inner) => self.num(inner),
+            None => self.num(e),
+        }
+    }
+
+    /// `p - q` in an assertion, between pointers into one array parameter:
+    /// the number of elements between them, as in a contract.
+    fn pos_diff(&mut self, e: &Expr) -> Option<Result<String, String>> {
+        let ExprT::BinOp(BinOp::Sub, l, r) = &keeps_diff(self.tds, e).val else {
+            return None;
+        };
+        let is_ptr = |x: &Expr| {
+            self.ty_of(x)
+                .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
+        };
+        if !is_ptr(l) || !is_ptr(r) {
+            return None;
+        }
+        let (ol, pl) = match self.body_ptr_pos(l)? {
+            Ok(x) => x,
+            Err(e) => return Some(Err(e)),
+        };
+        let (or, pr) = match self.body_ptr_pos(r)? {
+            Ok(x) => x,
+            Err(e) => return Some(Err(e)),
+        };
+        if ol != or {
+            return Some(Err(
+                "an assertion that subtracts pointers into different arrays".to_string(),
+            ));
+        }
+        Some(Ok(format!("({} - {})", pl, pr)))
+    }
+
+    /// Where a pointer into an array parameter points, as an element index
+    /// from the array's base, and which array that is.
+    fn body_ptr_pos(&mut self, e: &Expr) -> Option<Result<(String, String), String>> {
+        match &strip_vattr(e).val {
+            ExprT::Old(inner) => {
+                let ExprT::Var(v) = &strip_vattr(inner).val else {
+                    return None;
+                };
+                let a = self.arrays.get(&*v.val)?;
+                (!a.maybe).then(|| Ok((v.val.to_string(), "0".to_string())))
+            }
+            ExprT::Var(v) => {
+                let owner = match self.walk_owner(&v.val) {
+                    Some(Ok(o)) => o,
+                    Some(Err(e)) => return Some(Err(e)),
+                    None if self.arrays.get(&*v.val).is_some_and(|a| !a.maybe) => v.val.to_string(),
+                    None => return None,
+                };
+                let (esize, addr) = {
+                    let a = &self.arrays[&owner];
+                    (a.esize.clone(), a.addr.clone())
+                };
+                Some(self.inline(e).map(|cur| {
+                    (
+                        owner,
+                        format!("(walk_idx (SizeT.v {}) {} {})", esize, addr, cur),
+                    )
+                }))
+            }
+            ExprT::BinOp(op @ (BinOp::Add | BinOp::Sub), l, r) => {
+                let rt = self.ty_of(r).ok()?;
+                if pointee(self.tds, peel(self.tds, &rt)).is_some() {
+                    return None;
+                }
+                let (owner, pos) = match self.body_ptr_pos(l)? {
+                    Ok(x) => x,
+                    Err(e) => return Some(Err(e)),
+                };
+                Some(
+                    self.num(r)
+                        .map(|n| (owner, format!("({} {} {})", pos, op.to_str(), n))),
+                )
+            }
+            ExprT::Cast(inner, to) => {
+                let it = self.ty_of(inner).ok()?;
+                let from = pointee(self.tds, peel(self.tds, &it))?;
+                let to = pointee(self.tds, peel(self.tds, to))?;
+                if palow_name(self.tds, from)? != palow_name(self.tds, to)? {
+                    return None;
+                }
+                self.body_ptr_pos(inner)
+            }
+            _ => None,
         }
     }
 
@@ -18498,15 +18959,32 @@ impl<'a> Body<'a> {
                     }
                     // `*p` on an array parameter is `p[0]`: the ownership is a
                     // sequence either way, so the access has to be focused.
-                    if self.arrays.contains_key(&*v.val.to_string()) {
-                        let f = self.focus_elem(inner, None, false)?;
-                        self.lines.extend(f.open_read.iter().cloned());
-                        let t = self.fresh("elem");
-                        self.lines
-                            .push(format!("let {} = {} {};", t, f.read_fn(), f.at));
-                        self.lines.extend(f.close_read);
-                        return Ok(t);
+                    if self.arrays.contains_key(&*v.val.to_string())
+                        || self.walk_owner(&v.val).is_some()
+                    {
+                        return self.read_elem(inner);
                     }
+                }
+                if self.walk_root(inner).is_some() {
+                    return self.read_elem(inner);
+                }
+                // `*(unsigned char *)p` on an array of `char`: C lets an
+                // object be read through the other-signedness version of its
+                // type (C11 6.5p7), and the value read is the stored bits at
+                // the new type -- the conversion, on a two's-complement target.
+                if let ExprT::Cast(x, to) = &strip_vattr(inner).val
+                    && let Some(to_el) = pointee(self.tds, peel(self.tds, to))
+                    && let TypeT::Int { width: tw, .. } = self.tds.resolve(to_el).val
+                    && let Ok(xty) = self.ty_of(x)
+                    && let Some(x_el) = pointee(self.tds, peel(self.tds, &xty))
+                    && let TypeT::Int { width: xw, .. } = self.tds.resolve(x_el).val
+                    && tw == xw
+                    && (self.walk_root(x).is_some()
+                        || matches!(&strip_vattr(x).val, ExprT::Var(v) if self.arrays.contains_key(&*v.val.to_string())))
+                {
+                    let read = ExprT::Deref(x.clone()).with_loc(e.loc.clone());
+                    let conv = ExprT::Cast(read, to_el.clone()).with_loc(e.loc.clone());
+                    return self.rvalue(&conv);
                 }
                 let ty = self.ty_of(e)?;
                 if self.union_of(e).is_some() {
@@ -21475,8 +21953,10 @@ impl<'a> Body<'a> {
             }
         }
         if let ExprT::Deref(inner) = &lhs.val {
-            if let ExprT::Var(v) = &inner.val {
-                if self.arrays.contains_key(&*v.val.to_string()) {
+            if self.walk_root(inner).is_some()
+                || matches!(&inner.val, ExprT::Var(v) if self.arrays.contains_key(&*v.val.to_string()))
+            {
+                {
                     let f = self.focus_elem(inner, None, true)?;
                     self.lines.extend(f.open_write.iter().cloned());
                     self.lines
@@ -21636,6 +22116,7 @@ impl<'a> Body<'a> {
         let mut mentioned = Touched::default();
         touch_exprs(&named, &mut mentioned);
         let mut deref_slots: Vec<(String, String)> = Vec::new();
+        let mut walks: HashMap<String, (String, String, String)> = HashMap::new();
         for (i, s) in self.slots.clone().into_iter().enumerate() {
             let s = &s;
             // A struct `_out` parameter's slot is named `*p`; the body
@@ -21688,6 +22169,35 @@ impl<'a> Body<'a> {
             if !s.init {
                 return Err(format!("{} with `{}` not yet written", what, s.name));
             }
+            // A pointer walked through an array parameter is only somewhere
+            // in that array if the invariant says so, and saying that much is
+            // the emitter's job: it is true by construction, and without it
+            // no access through the pointer can be focused. A walked pointer
+            // the loop does not move keeps the value it came in with.
+            let walk = match self.walk_owner(&s.name) {
+                Some(Ok(o)) => Some(o),
+                _ => None,
+            };
+            if let Some(o) = &walk {
+                let a = &self.arrays[o];
+                walks.insert(
+                    s.name.clone(),
+                    (o.clone(), format!("(SizeT.v {})", a.esize), a.addr.clone()),
+                );
+            }
+            if let Some(o) = &walk
+                && body_touches.as_ref().is_some_and(|t| {
+                    !t.written.contains(&s.name) && !t.rebound.contains_key(&s.name)
+                })
+            {
+                let value = self.fresh("loop_ptr");
+                self.lines
+                    .push(format!("let {} = {}_read {};", value, s.palow_ty, s.addr));
+                owns.push(s.pts_to(&value));
+                owns.push(self.walk_ok(o, &value));
+                locals.insert(s.name.clone(), value);
+                continue;
+            }
             // Element writes do not change an addressable array parameter.
             if self.params.contains(&s.name)
                 && self.arrays.contains_key(&s.name)
@@ -21705,6 +22215,9 @@ impl<'a> Body<'a> {
             let b = format!("inv_{}", touch);
             binders.push(format!("({}: {})", b, s.fstar_ty));
             owns.push(s.pts_to(&b));
+            if let Some(o) = &walk {
+                owns.push(self.walk_ok(o, &b));
+            }
             bound.push(s.name.clone());
             if touch != s.name {
                 deref_slots.push((touch.to_string(), b.clone()));
@@ -21765,6 +22278,17 @@ impl<'a> Body<'a> {
         }
         for o in self.owned {
             if stated.contains(&o.base) {
+                continue;
+            }
+            // A `const` pointee is held at a fraction the body cannot write
+            // with, so it is still what it was on entry.
+            if o.fixed {
+                owns.push(format!("{}{}", o.pre, o.entry));
+                pointees.insert(
+                    o.base.clone(),
+                    (Some(o.entry.clone()), Some(o.entry.clone())),
+                );
+                olds.insert(o.base.clone(), o.entry.clone());
                 continue;
             }
             let b = format!("inv_val_{}", o.base);
@@ -21873,6 +22397,7 @@ impl<'a> Body<'a> {
             valued: RefCell::new(Vec::new()),
             maybes,
             defined: RefCell::new(Vec::new()),
+            walks,
         };
         for e in own_clauses.iter() {
             let ExprT::InlinePulse(code, _) = &strip_vattr(e).val else {
@@ -23076,8 +23601,12 @@ impl<'a> Body<'a> {
                         pn,
                         close_write: close,
                         maybe,
+                        walk,
                         ..
                     } = self.whole_array_place(p)?;
+                    if walk.is_some() {
+                        return Err("a whole-array operation on a moved pointer".to_string());
+                    }
                     if let Some(slot) = self.slots.iter_mut().find(|slot| slot.addr == arr) {
                         slot.array_value = None;
                     }
@@ -24675,6 +25204,69 @@ fn ptr_elem_size(tds: &Typedefs, ty: &Type) -> Option<u64> {
     palow_sizeof(tds, &pt).filter(|n| *n > 0)
 }
 
+/// Whether a specification expression measures a distance between pointers:
+/// `p - q`, or arithmetic and conversions of one. Such a distance is an
+/// element count, and a specification reads it, and everything it is
+/// combined with, as a mathematical integer.
+///
+/// Only a conversion that keeps every distance's value is looked through:
+/// to `ptrdiff_t`, to a signed type at least as wide, or to `_specint`.
+/// Under a narrowing or unsigned one, `(uint8_t)(p - a)`, the distance is a
+/// machine value like any other and the conversion has to be translated.
+fn has_ptr_diff(tds: &Typedefs, e: &Expr, is_ptr: &dyn Fn(&Expr) -> bool) -> bool {
+    match &strip_vattr(e).val {
+        ExprT::BinOp(BinOp::Sub, l, r) if is_ptr(l) && is_ptr(r) => true,
+        ExprT::BinOp(BinOp::Add | BinOp::Sub | BinOp::Mul, l, r) => {
+            has_ptr_diff(tds, l, is_ptr) || has_ptr_diff(tds, r, is_ptr)
+        }
+        ExprT::UnOp(UnOp::Neg, i) | ExprT::Old(i) => has_ptr_diff(tds, i, is_ptr),
+        ExprT::Cast(i, to) if keeps_diff_ty(tds, to) => has_ptr_diff(tds, i, is_ptr),
+        _ => false,
+    }
+}
+
+/// Whether converting a pointer distance to `to` keeps its value.
+fn keeps_diff_ty(tds: &Typedefs, to: &Type) -> bool {
+    matches!(
+        tds.resolve(to).val,
+        TypeT::PtrdiffT
+            | TypeT::SpecInt
+            | TypeT::Int {
+                signed: true,
+                width: 64..
+            }
+    )
+}
+
+/// `e` without the value-keeping conversions (see `has_ptr_diff`) around it.
+fn keeps_diff<'a>(tds: &Typedefs, e: &'a Expr) -> &'a Expr {
+    match &strip_vattr(e).val {
+        ExprT::Cast(i, to) if keeps_diff_ty(tds, to) => keeps_diff(tds, i),
+        _ => strip_vattr(e),
+    }
+}
+
+/// The integer under the conversion to `ptrdiff_t` the elaborator puts on
+/// a `size_t` or other integer that meets a pointer distance.
+fn ptrdiff_conv<'a>(
+    tds: &Typedefs,
+    e: &'a Expr,
+    ty_of: &dyn Fn(&Expr) -> Option<Rc<Type>>,
+) -> Option<&'a Expr> {
+    let ExprT::Cast(inner, to) = &strip_vattr(e).val else {
+        return None;
+    };
+    if !matches!(tds.resolve(to).val, TypeT::PtrdiffT) {
+        return None;
+    }
+    let it = ty_of(inner)?;
+    matches!(
+        tds.resolve(&it).val,
+        TypeT::Int { .. } | TypeT::SizeT | TypeT::Bool
+    )
+    .then_some(&**inner)
+}
+
 fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String, String> {
     let t = peel(tds, ty);
     let m = match &t.val {
@@ -24853,6 +25445,10 @@ struct ArrayPlace {
     close_read: Vec<String>,
     close_write: Vec<String>,
     maybe: bool,
+    /// Set when the access is through a pointer walked through the array
+    /// rather than at its base: the term for that pointer's current value.
+    /// `addr` is then the base the ownership is at.
+    walk: Option<String>,
 }
 
 struct Focus {
@@ -25222,6 +25818,233 @@ fn array_alias_map(tds: &Typedefs, body: &Stmts) -> HashMap<String, String> {
             continue;
         }
         out.insert(q, a.val.to_string());
+    }
+    out
+}
+
+/// The array parameter each pointer the body walks is a pointer into.
+///
+/// `for (; *s; s++)` moves `s` rather than indexing it, so the ownership the
+/// contract granted stays at the address `s` had on entry while `s` itself
+/// goes somewhere else. A dereference of `s` is still an element of that
+/// array, and finding the array is a question about where every value `s` can
+/// hold came from: the array parameter itself, another such pointer, or one of
+/// those moved by `+`, `-`, `++` or `--`. A pointer every one of whose values
+/// comes from the same array is a pointer into it (`Ok`). One that is moved
+/// and has a value from anywhere else -- a second array, a call, its own
+/// address escaping -- is one this cannot place (`Err`, with the reason). One
+/// that is never moved and is not placed is left out: it is a pointer object
+/// like any other, and an access through it asks for ownership at whatever it
+/// holds.
+///
+/// Nothing here is trusted. The access focuses the array at the pointer with
+/// a precondition that says the pointer really is in it, and that is what F*
+/// checks; this only decides which array to ask.
+fn walk_map(body: &Stmts, arrays: &HashSet<String>) -> HashMap<String, Result<String, String>> {
+    #[derive(Default)]
+    struct Facts {
+        srcs: HashMap<String, Vec<String>>,
+        stepped: HashSet<String>,
+        unknown: HashSet<String>,
+    }
+    // The names a value comes from, or `None` when it comes from something
+    // that is not a pointer this can follow.
+    fn sources(e: &Expr) -> Option<(Vec<String>, bool)> {
+        match &strip_vattr(e).val {
+            ExprT::Var(v) => Some((vec![v.val.to_string()], false)),
+            ExprT::Cast(x, _) => sources(x),
+            ExprT::BinOp(BinOp::Add, l, r) => sources(l)
+                .filter(|_| !matches!(strip_vattr(l).val, ExprT::IntLit(..)))
+                .or_else(|| sources(r))
+                .map(|(s, _)| (s, true)),
+            ExprT::BinOp(BinOp::Sub, l, _) => sources(l).map(|(s, _)| (s, true)),
+            ExprT::Cond(_, a, b) => {
+                let (mut x, s1) = sources(a)?;
+                let (y, s2) = sources(b)?;
+                x.extend(y);
+                Some((x, s1 || s2))
+            }
+            ExprT::PreIncr(x) | ExprT::PostIncr(x) | ExprT::PreDecr(x) | ExprT::PostDecr(x) => {
+                sources(x).map(|(s, _)| (s, true))
+            }
+            ExprT::AssignExpr(_, r) => sources(r),
+            _ => None,
+        }
+    }
+    fn assign(f: &mut Facts, x: String, rhs: &Expr) {
+        match sources(rhs) {
+            Some((s, stepped)) => {
+                if stepped || s.iter().any(|n| *n == x) {
+                    f.stepped.insert(x.clone());
+                }
+                f.srcs.entry(x).or_default().extend(s);
+            }
+            None => {
+                f.unknown.insert(x);
+            }
+        }
+    }
+    fn expr(f: &mut Facts, e: &Expr) {
+        match &e.val {
+            ExprT::AssignExpr(l, r) => {
+                if let ExprT::Var(v) = &strip_vattr(l).val {
+                    assign(f, v.val.to_string(), r);
+                }
+                expr(f, l);
+                expr(f, r);
+            }
+            ExprT::PreIncr(x) | ExprT::PostIncr(x) | ExprT::PreDecr(x) | ExprT::PostDecr(x) => {
+                if let ExprT::Var(v) = &strip_vattr(x).val {
+                    f.stepped.insert(v.val.to_string());
+                }
+                expr(f, x);
+            }
+            ExprT::Ref(x) => {
+                if let Some(n) = lvalue_name(strip_vattr(x)) {
+                    f.unknown.insert(n);
+                }
+                expr(f, x);
+            }
+            ExprT::FnCall(_, args) | ExprT::FnPtrCall(_, args) => {
+                for a in args.iter() {
+                    expr(f, a);
+                }
+            }
+            ExprT::Deref(x)
+            | ExprT::Member(x, _)
+            | ExprT::VAttr(_, x)
+            | ExprT::UnOp(_, x)
+            | ExprT::Cast(x, _) => expr(f, x),
+            ExprT::Index(x, y) | ExprT::BinOp(_, x, y) => {
+                expr(f, x);
+                expr(f, y);
+            }
+            ExprT::Cond(a, b, c) => {
+                expr(f, a);
+                expr(f, b);
+                expr(f, c);
+            }
+            _ => {}
+        }
+    }
+    fn stmts(f: &mut Facts, ss: &Stmts) {
+        for s in ss.iter() {
+            match &s.val {
+                StmtT::Call(e) | StmtT::Return(Some(e)) => expr(f, e),
+                StmtT::Let(x, _, e) => {
+                    assign(f, x.val.to_string(), e);
+                    expr(f, e);
+                }
+                StmtT::Assign(l, r) => {
+                    if let ExprT::Var(v) = &strip_vattr(l).val {
+                        assign(f, v.val.to_string(), r);
+                    }
+                    expr(f, l);
+                    expr(f, r);
+                }
+                StmtT::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    expr(f, cond);
+                    stmts(f, then_branch);
+                    stmts(f, else_branch);
+                }
+                StmtT::Match {
+                    scrutinee,
+                    branches,
+                    default_branch,
+                    ..
+                } => {
+                    expr(f, scrutinee);
+                    for b in branches.iter() {
+                        stmts(f, &b.body);
+                    }
+                    stmts(f, default_branch);
+                }
+                StmtT::While { cond, body, .. } => {
+                    expr(f, cond);
+                    stmts(f, body);
+                }
+                StmtT::GotoBlock { body, .. } => stmts(f, body),
+                // A ghost statement can say anything about a pointer it names.
+                StmtT::GhostStmt(c) => {
+                    let mut out = HashSet::new();
+                    spliced_addresses(c, &mut out);
+                    f.unknown.extend(out);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut f = Facts::default();
+    stmts(&mut f, body);
+    // Owners by fixpoint: an array parameter owns itself, and a name owns
+    // whatever its sources own. A source that is neither an array parameter
+    // nor assigned here holds a value from outside, which is unknown.
+    let mut owners: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut unknown = f.unknown.clone();
+    for a in arrays {
+        owners.entry(a.clone()).or_default().insert(a.clone());
+    }
+    for srcs in f.srcs.values() {
+        for s in srcs {
+            if !arrays.contains(s) && !f.srcs.contains_key(s) {
+                unknown.insert(s.clone());
+            }
+        }
+    }
+    loop {
+        let mut changed = false;
+        for (x, srcs) in &f.srcs {
+            for s in srcs {
+                if unknown.contains(s) && unknown.insert(x.clone()) {
+                    changed = true;
+                }
+                let add: Vec<String> = owners.get(s).into_iter().flatten().cloned().collect();
+                let o = owners.entry(x.clone()).or_default();
+                for a in add {
+                    changed |= o.insert(a);
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut out = HashMap::new();
+    let names: BTreeSet<&String> = f.srcs.keys().chain(f.stepped.iter()).collect();
+    for x in names {
+        let os = owners.get(x).cloned().unwrap_or_default();
+        let stepped = f.stepped.contains(x);
+        if unknown.contains(x) || os.is_empty() {
+            if stepped && !os.is_empty() {
+                out.insert(
+                    x.clone(),
+                    Err(format!(
+                        "a dereference of `{}`, a pointer moved through an array but also given \
+                         a value that does not come from one",
+                        x
+                    )),
+                );
+            }
+        } else if os.len() == 1 {
+            out.insert(x.clone(), Ok(os.into_iter().next().unwrap()));
+        } else if stepped {
+            out.insert(
+                x.clone(),
+                Err(format!(
+                    "a dereference of `{}`, a pointer moved through more than one array ({})",
+                    x,
+                    os.into_iter()
+                        .map(|o| format!("`{}`", o))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            );
+        }
     }
     out
 }
@@ -25793,6 +26616,18 @@ fn emit_body(
     let aliases = alias_map(&defn.body, &|x| ptr_base(tds, &env, x));
     let mut arrays = HashMap::new();
     let mut array_facts = Vec::new();
+    let walked: HashSet<String> = {
+        let names = defn
+            .decl
+            .args
+            .iter()
+            .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
+            .collect();
+        walk_map(&defn.body, &names)
+            .into_values()
+            .filter_map(|o| o.ok())
+            .collect()
+    };
     for a in &defn.decl.args {
         // An `_arrayptr` is not an array here: Palow grants it nothing, so
         // there is no sequence to focus an element out of, and the parameter
@@ -25828,6 +26663,12 @@ fn emit_body(
                 "array_fits {repr} var_{} {esize}sz {pn}_alignof;",
                 name.val
             ));
+            if walked.contains(&base) {
+                array_facts.push(format!(
+                    "array_walk_base {repr} var_{} {esize}sz {pn}_alignof;",
+                    name.val
+                ));
+            }
         }
         arrays.insert(
             base,
@@ -25885,7 +26726,7 @@ fn emit_body(
         spec_binders: HashMap::new(),
         ret_binding: None,
         fp_witness: None,
-        arrays,
+        arrays: arrays.clone(),
         olens: sig.olens.clone(),
         requires_ok: sig.req_props,
         owned: &sig.owned,
@@ -25941,6 +26782,7 @@ fn emit_body(
         byte_bases: byte_base_map(&defn.body),
         fp_from_call: call_bound_map(&defn.body),
         array_aliases: array_alias_map(tds, &defn.body),
+        walks: walk_map(&defn.body, &arrays.keys().cloned().collect()),
         active: HashMap::new(),
         union_values: HashMap::new(),
         // Only where the contract survived: a dropped `_requires` is not a

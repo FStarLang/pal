@@ -7029,3 +7029,75 @@ Limitations:
     `test/u64_shift_count_bad` are the regressions. `mul_wrap` and
     `shift_left` now both state their result as `% Target.addr_limit` of the
     product, so `y <<= 1` is provably `y * two` when `two == 2`.
+
+54. **Walking a pointer through an array.** musl's string functions move
+    the pointer instead of indexing: `for (a=s; *s; s++); return s-a;`.
+    The ownership of an `_array` parameter stays at its base `var_s`, so
+    `*s` after `s++` used to be refused, or focused as if the current `s`
+    were still the base. The body is now scanned (`walk_map`) for every
+    pointer slot -- a reassigned parameter or a local -- whose values all
+    come from one `_array` parameter through copies, `±` an integer,
+    `++`/`--` and `?:`. A dereference or subscript of such a slot, or of
+    `p++`, `--p`, `p + i` on one, is focused out of the owning array at
+    the pointer's current value (`array_focus_at` and its unfocus
+    counterparts in `Pulse.Lib.C.Palow.Array`), which asks for
+    `walk_ok esize var_s q` -- same provenance, at or above the base, a
+    whole number of elements on -- and for the element index
+    `walk_idx esize var_s q` to be in bounds. Every loop invariant states
+    `walk_ok` for every walked pointer it binds; that much is true by
+    construction and survives `+!`/`-!` of a step. The bounds are the
+    source's `_invariant`, because one past the end is a pointer C lets a
+    loop stop at. A walked pointer the loop does not move is read once
+    before the loop instead of rebound, and a `const` array's sequence is
+    the entry value throughout (it is held at a fraction nothing can write
+    with). In a contract `p - q` between two pointers into the same array
+    is `walk_idx p - walk_idx q`, `<`/`<=` compare those positions, and
+    `p[k]`, `*p` and `p._length` of a walked `p` are relative to where it
+    points. `_old(p)[k]` reads the entry array. `array_walk_base` (emitted
+    for arrays a pointer walks) and `walk_is_add` give the facts a
+    contract needs to tell a returned walked pointer from `NULL` and to
+    match it against `src + i`. `*(unsigned char *)p` on a `char` array is
+    the element read and converted (C11 6.5p7), which is what `strcmp`
+    returns. A slot whose values come from two arrays, or from an array and
+    something else, is refused at the access instead of focused at a
+    guess. `s - a` in the body is `ptr_diff`, whose precondition (the byte
+    distance fits `ptrdiff_t`) is the caller's: wcslen asks for a length
+    bound. A contract comparing or subtracting the array parameter itself
+    and a pointer (`s <= p`, `p - s`) reads the array as the plain pointer
+    it is (elaboration casts across the pointer kinds). A step back,
+    `q -! n`, has its address and provenance from `walk_sub`, triggered on
+    the step itself. A subscript is converted to `size_t`, so `p[-1]` is an
+    out-of-bounds index that does not verify; `*(p - 1)` is the way to
+    read behind a walked pointer. `test/array_pointer_walk` verifies musl's
+    `wcslen`, `strcmp`, `memchr` and `memcpy` loops with functional
+    specifications, a backward walk and offsets either side of a moved
+    pointer; `test/array_pointer_walk_bad` is the refusals.
+
+55. **Positions next to integers.** A position (`p - q` between walked
+    pointers) is an `int`, but the elaborator types it `ptrdiff_t` and
+    converts the `size_t` it meets to `ptrdiff_t`, so `l - _old(l) ==
+    _old(n) - n` came out as an `Int64` conversion of a `SizeT` beside an
+    `int`, and `(l - _old(l)) + n` as signed machine arithmetic refused
+    for want of an overflow obligation. In a contract and in an `_assert`
+    alike, a comparison or `+`/`-`/`*` with a position anywhere inside it
+    is now mathematical, and an integer converted to `ptrdiff_t` beside one
+    is read as the number it is (`has_ptr_diff`, `ptrdiff_conv`). An
+    `_assert` reads a position as `walk_idx` of the pointer's current
+    value, as a contract does, rather than as `ptr_diff` divided by the
+    element size. A `_exists(size_t i, ...)` whose witness is a position --
+    the index where `wcscmp`'s loop stopped -- needs a `SizeT.t` term for
+    the solver to try, which an `int` position is not: `walk_size` is the
+    position as a `SizeT.t` where it is one, and `walk_size_v` puts it next
+    to every `walk_idx` the proof mentions. `test/array_pointer_walk` adds
+    musl's `wmemcmp`, `wcsncmp` and `wcscmp` and a `size_t`-bounded
+    `wcslen` invariant.
+
+    Only a conversion that keeps every distance's value is looked through
+    this way: to `ptrdiff_t`, a signed type of 64 bits or more, or
+    `_specint`. Looking through every cast read `(uint8_t)(p - a)` as the
+    untruncated count, so an invariant `(uint8_t)(p - a) == i` verified at
+    `i == 256`, where C says 0. A distance under a narrowing or unsigned
+    conversion is now refused in a contract (`array_pointer_walk_bad`), and
+    `(int64_t)(p - a)` is read through (`count_wide`). Positions exist only
+    where there are walked pointers -- loop invariants and `_assert` -- so a
+    function's `_requires`/`_ensures` cannot subtract pointers.
