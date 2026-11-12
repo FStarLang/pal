@@ -189,6 +189,35 @@ Inside `_invariant`:
 - `_live(x)` is accepted but unnecessary (the frame is generated).
 - Ownership PAL does not generate — a helper predicate, part of an array named through an `_arrayptr` — goes in an slprop clause: `_invariant(_inline_pulse(Helpers.claim $(lo) $`arr))`. `` $`name `` there is quantified by the invariant (see `test/arrayptrs`).
 
+#### Pointers walked through an array
+
+A loop may move a pointer through an `_array` parameter instead of indexing it, as musl's string functions do:
+
+```c
+size_t wcslen(_array const wchar_t *s)
+  _requires(_exists(size_t i, i < s._length && s[i] == 0))
+  _requires(s._length <= 1000000)            // `s - a` must fit in ptrdiff_t
+  _ensures(return < s._length && s[return] == 0)
+  _ensures(_forall(size_t k, k < return ==> s[k] != 0))
+{
+  const wchar_t *a;
+  for (a=s; *s; s++)
+    _invariant(s - a < _old(s)._length)
+    _invariant(_forall(_specint k, 0 <= k && k < s - a ==> a[k] != 0));
+  return s-a;
+}
+```
+
+A reassigned array parameter, or a local pointer, is *walked* when every value it is given comes from one `_array` parameter: a copy of it or of another walked pointer, `p ± n`, `p++`/`p--`/`++p`/`--p`, `p += n`, `c ? p : q`. `*p`, `p[i]`, `*p++` and `*(p + i)` on it read and write the owning array at wherever `p` points now. PAL adds to every loop invariant that each walked pointer is inside that array's allocation at an element boundary (`walk_ok`); that it is *in bounds* is for the `_invariant` to say. A pointer given values from two arrays, or from an array and anything else, is refused at the access.
+
+In a contract (an `_invariant` especially), for pointers walked through the same array:
+
+- `p - q` is the number of elements between them, a mathematical integer; `p < q` and `p <= q` compare positions. Either may be the array parameter itself (`p - s`, `s <= p`). `_old(s)` is the parameter's entry value, the array's base.
+- `p[k]`, `*p` and `p._length` are relative to where `p` points: `p._length` is the number of elements left. `_old(p)[k]` is the array at entry.
+- A walked pointer the loop does not move (`a` above) keeps its value; a `const` array's contents are its entry contents.
+
+`*(unsigned char *)p` on an array of `char` is the element converted to `unsigned char`. A subscript is a `size_t`, so read behind a walked pointer with `*(p - 1)`, not `p[-1]`. `test/array_pointer_walk` has `wcslen`, `strcmp`, `memchr`, `memcpy` and a backward walk.
+
 `_ensures(p)` may also be attached to a loop. It states what holds when the loop exits. Without a `break` the loop exits only when the condition is false, and the clause is asserted after the loop. With a `break`, Pulse no longer knows the condition is false on exit, so:
 
 - if the loop body contains no nested loop, PAL mirrors the locals the `_ensures` names in ghost references and states it as the loop's Pulse `ensures`: it is proved at every `break` and at the normal exit;

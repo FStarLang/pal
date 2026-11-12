@@ -372,6 +372,14 @@ Key facts:
   helper predicate over an `_arrayptr` range, or your own struct invariant.
   Use `` $`name `` for an existential the invariant should quantify
   (`test/arrayptrs`).
+- **Walking a pointer through an array** (`for (; *s; s++)`,
+  `*d++ = *s++`) works on `_array` parameters and locals copied from them:
+  PAL keeps the ownership at the array's base and adds to the invariant that
+  the pointer is inside it. You state the bounds, e.g.
+  `_invariant(s - _old(s) < _old(s)._length)`; in a contract `p - q` is an
+  element count, and `p[k]` / `p._length` are relative to where `p` points
+  (`test/array_pointer_walk`, and *Loop invariants* in
+  `doc/pal_surface_syntax.md`).
 - **`_ensures` on a loop is a pure prop** about the exit. A loop without a
   `break` exits only when `cond` is false; Pulse knows `¬cond` there, and PAL
   asserts the `_ensures` right after the loop.

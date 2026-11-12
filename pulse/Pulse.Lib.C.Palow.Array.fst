@@ -513,6 +513,164 @@ ghost fn array_offset_fits (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (es
 }
 
 (* ---------------------------------------------------------------------------
+   Walking a pointer through an array
+
+   `for (; *s; s++)` never indexes the array it reads: it moves `s` itself.
+   The ownership stays where the contract put it, at the array's base `a`, and
+   `s` is just some pointer into it. What makes `*s` an element of that array
+   is three facts about `s` relative to `a`: the same provenance (it was formed
+   from `a` by `+!` and `-!`, which keep provenance), an address at or above
+   `a`'s, and an offset that is a whole number of elements. `walk_ok` is those
+   three, and `walk_idx` is the element `s` is at. Neither says `s` is in
+   bounds -- one past the end is a pointer C lets a loop stop at -- so the
+   element access asks for that separately.
+
+   Both survive a step of `esize` that does not wrap, which is what lets a loop
+   carry them: the emitter states `walk_ok` in every invariant for every
+   pointer it walks, and the bounds are the invariant the source writes.
+   --------------------------------------------------------------------------- *)
+
+let walk_ok (esize: nat) (a q: ptr) : prop =
+  esize > 0 /\ prov_of q == prov_of a /\ addr_of a <= addr_of q /\
+  (addr_of q - addr_of a) % esize == 0
+
+let walk_idx (esize: nat) (a q: ptr) : GTot int =
+  if esize > 0 then (addr_of q - addr_of a) / esize else 0
+
+let walk_addr (esize: nat) (a q: ptr) (i: nat)
+  : Lemma (requires walk_ok esize a q)
+          (ensures  addr_of q + esize * i == addr_of a + esize * (walk_idx esize a q + i))
+  = M.euclidean_division_definition (addr_of q - addr_of a) esize;
+    M.distributivity_add_right esize (walk_idx esize a q) i
+
+(* The base, offset to the element `q[i]` stands for, is `q +! off`: the same
+   provenance and, because the owned range does not reach `addr_limit`, the
+   same address without wrapping on either side. *)
+let walk_same (esize: nat) (a q: ptr) (n: nat) (i: nat) (off offj: SZ.t)
+  : Lemma (requires walk_ok esize a q /\ walk_idx esize a q + i < n /\
+                    addr_of a + esize * n < T.addr_limit /\
+                    SZ.v off == esize * i /\ SZ.v offj == esize * (walk_idx esize a q + i))
+          (ensures  a +! offj == q +! off)
+  = walk_addr esize a q i;
+    elem_fits esize n (walk_idx esize a q + i);
+    addr_of_add_nowrap a offj;
+    addr_of_add_nowrap q off;
+    ptr_ext (a +! offj) (q +! off)
+
+ghost fn array_offset_fits_at (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                              (q: ptr) (#p: perm) (#xs: Seq.seq t) (i: SZ.t { walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q + SZ.v i < Seq.length xs })
+  preserves array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
+  ensures   pure (SZ.fits (SZ.v esize * SZ.v i))
+{
+  array_fits t_repr a esize ealign;
+  let w : erased nat = walk_idx (SZ.v esize) a q;
+  elem_fits (SZ.v esize) (Seq.length xs) (w + SZ.v i);
+  M.distributivity_add_right (SZ.v esize) w (SZ.v i);
+  SZ.fits_lte (SZ.v esize * SZ.v i) (addr_of a + SZ.v esize * Seq.length xs);
+}
+
+ghost fn array_focus_at (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                        (q: ptr) (#p: perm) (#xs: Seq.seq t)
+                        (i: SZ.t { walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q + SZ.v i < Seq.length xs })
+                        (off: SZ.t { SZ.v off == SZ.v esize * SZ.v i })
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
+  ensures  array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p
+                        (Seq.slice xs 0 (walk_idx (SZ.v esize) a q + SZ.v i))
+  ensures  elem_pts_to t_repr (q +! off) p (Seq.index xs (walk_idx (SZ.v esize) a q + SZ.v i))
+  ensures  array_pts_to t_repr (SZ.v esize) (SZ.v ealign) ((q +! off) +! esize) p
+                        (Seq.slice xs (walk_idx (SZ.v esize) a q + SZ.v i + 1) (Seq.length xs))
+  ensures  pure (array_aligned (SZ.v esize) (SZ.v ealign) (q +! off))
+  ensures  pure (SZ.fits (addr_of a + SZ.v esize * Seq.length xs) /\
+                 addr_of a + SZ.v esize * Seq.length xs < T.addr_limit)
+{
+  array_fits t_repr a esize ealign;
+  let w : erased nat = walk_idx (SZ.v esize) a q;
+  elem_fits (SZ.v esize) (Seq.length xs) (w + SZ.v i);
+  M.lemma_mult_le_right (SZ.v esize) 1 (Seq.length xs);
+  SZ.fits_lte (w + SZ.v i) (addr_of a + SZ.v esize * Seq.length xs);
+  SZ.fits_lte (SZ.v esize * (w + SZ.v i)) (addr_of a + SZ.v esize * Seq.length xs);
+  let j = SZ.uint_to_t (w + SZ.v i);
+  let offj = SZ.uint_to_t (SZ.v esize * (w + SZ.v i));
+  walk_same (SZ.v esize) a q (Seq.length xs) (SZ.v i) off offj;
+  array_focus t_repr a esize ealign j offj;
+  rewrite each (a +! offj) as (q +! off);
+}
+
+ghost fn array_unfocus_at (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                          (q: ptr) (#p: perm) (#xs: Seq.seq t) (#y: t)
+                          (i: SZ.t { walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q + SZ.v i < Seq.length xs })
+                          (off: SZ.t { SZ.v off == SZ.v esize * SZ.v i })
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p
+                        (Seq.slice xs 0 (walk_idx (SZ.v esize) a q + SZ.v i))
+  requires elem_pts_to t_repr (q +! off) p y
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) ((q +! off) +! esize) p
+                        (Seq.slice xs (walk_idx (SZ.v esize) a q + SZ.v i + 1) (Seq.length xs))
+  requires pure (forall (b: bytes). t_repr y b ==> len b == SZ.v esize)
+  requires pure (array_aligned (SZ.v esize) (SZ.v ealign) (q +! off))
+  requires pure (SZ.fits (addr_of a + SZ.v esize * Seq.length xs) /\
+                 addr_of a + SZ.v esize * Seq.length xs < T.addr_limit)
+  ensures  array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p
+                        (Seq.upd xs (walk_idx (SZ.v esize) a q + SZ.v i) y)
+{
+  let w : erased nat = walk_idx (SZ.v esize) a q;
+  elem_fits (SZ.v esize) (Seq.length xs) (w + SZ.v i);
+  M.lemma_mult_le_right (SZ.v esize) 1 (Seq.length xs);
+  SZ.fits_lte (w + SZ.v i) (addr_of a + SZ.v esize * Seq.length xs);
+  SZ.fits_lte (SZ.v esize * (w + SZ.v i)) (addr_of a + SZ.v esize * Seq.length xs);
+  let j = SZ.uint_to_t (w + SZ.v i);
+  let offj = SZ.uint_to_t (SZ.v esize * (w + SZ.v i));
+  walk_same (SZ.v esize) a q (Seq.length xs) (SZ.v i) off offj;
+  rewrite each (q +! off) as (a +! offj);
+  array_unfocus t_repr a esize ealign #p #xs #y j offj;
+}
+
+ghost fn array_unfocus_read_at (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                               (q: ptr) (#p: perm) (#xs: Seq.seq t)
+                               (i: SZ.t { walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q + SZ.v i < Seq.length xs })
+                               (off: SZ.t { SZ.v off == SZ.v esize * SZ.v i })
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p
+                        (Seq.slice xs 0 (walk_idx (SZ.v esize) a q + SZ.v i))
+  requires elem_pts_to t_repr (q +! off) p (Seq.index xs (walk_idx (SZ.v esize) a q + SZ.v i))
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) ((q +! off) +! esize) p
+                        (Seq.slice xs (walk_idx (SZ.v esize) a q + SZ.v i + 1) (Seq.length xs))
+  requires pure (forall (b: bytes).
+                   t_repr (Seq.index xs (walk_idx (SZ.v esize) a q + SZ.v i)) b ==> len b == SZ.v esize)
+  requires pure (array_aligned (SZ.v esize) (SZ.v ealign) (q +! off))
+  requires pure (SZ.fits (addr_of a + SZ.v esize * Seq.length xs) /\
+                 addr_of a + SZ.v esize * Seq.length xs < T.addr_limit)
+  ensures  array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
+{
+  array_unfocus_at t_repr a esize ealign q #p #xs i off;
+  Seq.lemma_eq_intro (Seq.upd xs (walk_idx (SZ.v esize) a q + SZ.v i)
+                              (Seq.index xs (walk_idx (SZ.v esize) a q + SZ.v i))) xs;
+  rewrite (array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p
+                        (Seq.upd xs (walk_idx (SZ.v esize) a q + SZ.v i)
+                                 (Seq.index xs (walk_idx (SZ.v esize) a q + SZ.v i))))
+       as (array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs);
+}
+
+(* A step back keeps the provenance and moves the address. `addr_of_sub` says
+   so, but is triggered on an `addr_of` that a `walk_ok` on `q -! n` only
+   mentions after unfolding; this is the same fact triggered on the step. *)
+let walk_sub (q: ptr) (n: SZ.t { SZ.v n <= addr_of q })
+  : Lemma (addr_of (q -! n) == addr_of q - SZ.v n /\ prov_of (q -! n) == prov_of q)
+          [SMTPat (q -! n)]
+  = addr_of_sub q n
+
+(* A walked pointer is the base plus its byte offset, which is how a contract
+   that names a position in the array as `a + i` recognises it. *)
+let walk_is_add (esize: nat) (a q: ptr)
+  : Lemma (requires walk_ok esize a q)
+          (ensures  SZ.fits (addr_of q - addr_of a) ==>
+                    q == a +! SZ.uint_to_t (addr_of q - addr_of a))
+          [SMTPat (walk_ok esize a q)]
+  = if SZ.fits (addr_of q - addr_of a) then begin
+      let d = SZ.uint_to_t (addr_of q - addr_of a) in
+      addr_of_add_nowrap a d;
+      ptr_ext (a +! d) q
+    end
+
+(* ---------------------------------------------------------------------------
    Storage that is not yet initialised
 
    A C array local is `esize * n` bytes of automatic storage whose elements are
@@ -884,6 +1042,26 @@ ghost fn array_pts_to_not_null (#t: Type0) (t_repr: t -> bytes -> prop)
   mem_pts_to_not_null a;
   fold array_pts_to t_repr esize ealign a p xs;
 }
+
+(* A pointer walked through an array shares the array's provenance, so when
+   the array is a real allocation -- whenever it is non-empty -- no position
+   in it is null. This is what lets a function return a walked pointer as a
+   found-it result and the caller tell it from `NULL`. *)
+ghost fn array_walk_base (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                         (#p: perm) (#xs: Seq.seq t)
+  preserves array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
+  ensures   pure (SZ.v esize > 0 /\ Seq.length xs > 0 ==> Some? (prov_of a))
+{
+  if (SZ.v esize > 0 && Seq.length xs > 0) {
+    array_pts_to_not_null t_repr (SZ.v esize) (SZ.v ealign) a;
+  }
+}
+
+let walk_not_null (esize: nat) (a q: ptr)
+  : Lemma (requires walk_ok esize a q /\ Some? (prov_of a))
+          (ensures  ~(q == null) /\ not (is_null q))
+          [SMTPat (walk_ok esize a q)]
+  = null_addr
 
 (* ---------------------------------------------------------------------------
    Element refinements

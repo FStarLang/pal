@@ -6982,3 +6982,46 @@ Limitations:
     `test/core_ref_out_cell_bad` is the refusal of a cast claiming another
     Palow type (`(uint32_t *)&int32_local`, `(char **)&int_local`) and of
     a local array's address.
+
+53. **Walking a pointer through an array.** musl's string functions move
+    the pointer instead of indexing: `for (a=s; *s; s++); return s-a;`.
+    The ownership of an `_array` parameter stays at its base `var_s`, so
+    `*s` after `s++` used to be refused, or focused as if the current `s`
+    were still the base. The body is now scanned (`walk_map`) for every
+    pointer slot -- a reassigned parameter or a local -- whose values all
+    come from one `_array` parameter through copies, `±` an integer,
+    `++`/`--` and `?:`. A dereference or subscript of such a slot, or of
+    `p++`, `--p`, `p + i` on one, is focused out of the owning array at
+    the pointer's current value (`array_focus_at` and its unfocus
+    counterparts in `Pulse.Lib.C.Palow.Array`), which asks for
+    `walk_ok esize var_s q` -- same provenance, at or above the base, a
+    whole number of elements on -- and for the element index
+    `walk_idx esize var_s q` to be in bounds. Every loop invariant states
+    `walk_ok` for every walked pointer it binds; that much is true by
+    construction and survives `+!`/`-!` of a step. The bounds are the
+    source's `_invariant`, because one past the end is a pointer C lets a
+    loop stop at. A walked pointer the loop does not move is read once
+    before the loop instead of rebound, and a `const` array's sequence is
+    the entry value throughout (it is held at a fraction nothing can write
+    with). In a contract `p - q` between two pointers into the same array
+    is `walk_idx p - walk_idx q`, `<`/`<=` compare those positions, and
+    `p[k]`, `*p` and `p._length` of a walked `p` are relative to where it
+    points. `_old(p)[k]` reads the entry array. `array_walk_base` (emitted
+    for arrays a pointer walks) and `walk_is_add` give the facts a
+    contract needs to tell a returned walked pointer from `NULL` and to
+    match it against `src + i`. `*(unsigned char *)p` on a `char` array is
+    the element read and converted (C11 6.5p7), which is what `strcmp`
+    returns. A slot whose values come from two arrays, or from an array and
+    something else, is refused at the access instead of focused at a
+    guess. `s - a` in the body is `ptr_diff`, whose precondition (the byte
+    distance fits `ptrdiff_t`) is the caller's: wcslen asks for a length
+    bound. A contract comparing or subtracting the array parameter itself
+    and a pointer (`s <= p`, `p - s`) reads the array as the plain pointer
+    it is (elaboration casts across the pointer kinds). A step back,
+    `q -! n`, has its address and provenance from `walk_sub`, triggered on
+    the step itself. A subscript is converted to `size_t`, so `p[-1]` is an
+    out-of-bounds index that does not verify; `*(p - 1)` is the way to
+    read behind a walked pointer. `test/array_pointer_walk` verifies musl's
+    `wcslen`, `strcmp`, `memchr` and `memcpy` loops with functional
+    specifications, a backward walk and offsets either side of a moved
+    pointer; `test/array_pointer_walk_bad` is the refusals.
