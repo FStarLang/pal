@@ -394,8 +394,8 @@ Key facts:
   through a walked pointer into a byte array reads/writes `W` elements as one
   little-endian integer (`word_byte W x j == x / pow2 (8*j) % 256`). State
   `pos + W <= length` and alignment (`(uintptr_t)w % 8 == 0`). A `strlen`-style
-  aligned read past the end needs the trusted `_pal_overread` function marker
-  (`test/array_word_access`).
+  aligned read past the end needs the word pointer declared with the trusted
+  `_pal_overread` (`_pal_overread const word *w;`, `test/array_word_access`).
 - **`_ensures` on a loop is a pure prop** about the exit. A loop without a
   `break` exits only when `cond` is false; Pulse knows `¬cond` there, and PAL
   asserts the `_ensures` right after the loop.

@@ -191,7 +191,6 @@ impl Env {
                     is_pure: !let_decl.is_impure,
                     is_rec: let_decl.is_rec,
                     is_total: false,
-                    is_overread: false,
                     adopts_signature: false,
                     decreases: None,
                 });
@@ -644,6 +643,7 @@ impl Env {
                     | TypeT::RefineValue(..)
                     | TypeT::Plain(..)
                     | TypeT::Nullable(..)
+                    | TypeT::Overread(..)
             ) => None,
         }
     }
@@ -692,7 +692,8 @@ impl Env {
             | TypeT::RefineUninit(ty, _)
             | TypeT::RefineValue(ty, ..)
             | TypeT::Plain(ty)
-            | TypeT::Nullable(ty) => Some(ty.clone().into()),
+            | TypeT::Nullable(ty)
+            | TypeT::Overread(ty) => Some(ty.clone().into()),
         }
     }
 

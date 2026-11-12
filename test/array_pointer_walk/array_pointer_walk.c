@@ -106,7 +106,7 @@ int wmemcmp(_array const wchar_t *l, _array const wchar_t *r, size_t n)
 			&& (l[i] > r[i] ==> return == 1))))
 {
 	for (; n && *l==*r; n--, l++, r++)
-		_invariant(l - _old(l) == r - _old(r) && l - _old(l) == _old(n) - n)
+		_invariant(n <= _old(n) && l - _old(l) == r - _old(r) && l - _old(l) == _old(n) - n)
 		_invariant(_forall(_specint k, 0 <= k && k < l - _old(l) ==>
 			_old(l)[k] == _old(r)[k]));
 	return n ? (*l < *r ? -1 : *l > *r) : 0;
@@ -162,4 +162,21 @@ size_t wcslen_sized(_array const wchar_t *s)
 		_invariant(s - a < _old(s)._length)
 		_invariant(_forall(size_t k, k < s - a ==> a[k] != 0));
 	return s-a;
+}
+
+/* A conversion that keeps every distance, to a wide signed type, is read
+   through. */
+size_t count_wide(_array const unsigned char *s, size_t n)
+	_requires(s._length == n && n <= 1000000)
+	_ensures(return == n)
+{
+	const unsigned char *p = s;
+	size_t c = 0;
+	while (c < n)
+		_invariant(c <= n && (int64_t)(p - s) == (_specint)c)
+	{
+		p++;
+		c++;
+	}
+	return c;
 }

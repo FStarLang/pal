@@ -249,7 +249,6 @@ mod crate::clang {
         fn set_pure(&mut self);
         fn set_rec(&mut self);
         fn set_total(&mut self);
-        fn set_overread(&mut self);
         fn set_adopts_signature(&mut self);
         fn set_eager_unfold_pred(&mut self);
         fn set_overlay(&mut self);
@@ -302,6 +301,7 @@ mod crate::clang {
     fn mk_type_array(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_type_arrayptr(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_type_core_ref(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
+    fn mk_type_overread(Rc<SourceInfo>, Rc<Type>) -> Rc<Type>;
     fn mk_type_err(Rc<SourceInfo>) -> Rc<Type>;
 
     fn mk_bigint(&str) -> Rc<BigInt>;

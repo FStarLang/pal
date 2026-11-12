@@ -5755,8 +5755,9 @@ Limitations:
    needs it, conjoined to its own left: `p /\ q` types `q` with `p` assumed,
    which is precisely the scope the application was missing. The clause is
    then a stronger statement than C's and provable from the `_requires` that
-   motivated it -- and `size_t`, whose F\* operations are the checked ones,
-   owes exactly the same thing.
+   motivated it. (`size_t` once owed the same for `+`, `-` and `*`, its F\*
+   operations being the checked ones; it now wraps as C's unsigned arithmetic
+   does -- see item 53 -- and owes only the shift and division guards.)
 
    A cast from a specification type reads as the number it already is. PAL
    writes `arr[(size_t) ((_specint) (len - j) - 1)]` when the author wrote
@@ -6896,7 +6897,17 @@ Limitations:
     state nothing beyond a `pts_to` qualify -- scalars and structs of them;
     a refinement or an owned pointer field would be a second guarded
     conjunct, and an array has no canonical length -- so those are still
-    written by hand (`test/nullable`, `test/struct_pointee_refine`). The
+    written by hand (`test/nullable`, `test/struct_pointee_refine`). A
+    refinement anywhere in the pointee counts: a struct-level `_refine`, a
+    refined field, or either in a nested struct -- exactly the refinements
+    the contract states, so a `_plain` nested struct, whose `_refine` it does
+    not state, does not count (`refined_pointee` asks `struct_refines` and
+    `field_refines`, the walk the contract is built from). Such a pointee is
+    also left out of entry 48's take-back, since its supplied guard has two
+    conjuncts. The last cases of `test/nullable_const_in` decline and supply
+    a struct whose nested member carries a struct-level `_refine`, with the
+    guards written by hand, and supply one whose nested member is `_plain`,
+    which PAL handles. The
     take-back of entry 48 also covers `&s->f` (and `&u->m`), a field
     opened for the call -- by `field_args` for an input or a union member,
     and by `out_arg` for a single struct field handed to an `_out` -- or
@@ -6983,7 +6994,43 @@ Limitations:
     Palow type (`(uint32_t *)&int32_local`, `(char **)&int_local`) and of
     a local array's address.
 
-53. **Walking a pointer through an array.** musl's string functions move
+53. **`size_t` is an unsigned integer type.** `+`, `-` and `*` on `size_t`
+    emitted `SizeT.add`/`sub`/`mul`, which are checked, so C's wrapping was a
+    proof obligation; and `~`, `&`, `|`, `^`, `<<` and `>>` were refused
+    outright, `FStar.SizeT` having no such operations. musl's word-at-a-time
+    string routines are built on `HASZERO(x) = ((x) - ONES) & ~(x) & HIGHS`
+    over `size_t`, which wraps by design. `size_t` now goes through
+    `Pulse.Lib.C.SizeT`, the analogue of `Pulse.Lib.C.UInt64` at the
+    target's abstract width `8 * Target.ptr_bytes`: the arithmetic wraps
+    modulo `Target.addr_limit` with a postcondition that is exact when the
+    result fits, so code that never wraps reasons as before; `~x` is stated
+    as `addr_limit - 1 - x`; `&` and `|` carry their bounds against the
+    operands as well as their `FStar.UInt` meaning; and the shifts owe a
+    count below the width, as for the fixed-width types. Since the width is
+    abstract, a concrete bitwise result such as `12 & 6 == 4` is not
+    computed; what follows from the bounds is. `test/sizet_wrap_bitwise`
+    covers `HASZERO`, wrapping and exact arithmetic, the bitwise bounds and
+    the shifts.
+
+    The wrapping applies in contracts too: `_requires(i + n <= len)` over
+    `size_t` operands is `add_wrap i n <= len`, which a wrapped sum satisfies,
+    so it no longer rules out overflow the way the checked `SizeT.add` did.
+    A contract that means the mathematical bound must say so, e.g.
+    `_requires(n <= len && i <= len - n)`. (An operand that is an integer
+    literal still makes the contract arithmetic mathematical.)
+
+    A shift count wider than 32 bits -- a `size_t` or a 64-bit integer --
+    is narrowed to the `UInt32.t` that F*'s shifts take by the checked
+    `UInt32.uint_to_t (M.v s)`, and the definedness obligation is stated of
+    `M.v s` itself. Elaboration casts every count to `uint32_t`, and that
+    cast truncates: a count of 2^32 used to become 0, so the shift looked
+    defined and `a >> s` verified as `a` (this held for `uint64_t` before
+    `size_t` had shifts). `test/sizet_shift_count_bad` and
+    `test/u64_shift_count_bad` are the regressions. `mul_wrap` and
+    `shift_left` now both state their result as `% Target.addr_limit` of the
+    product, so `y <<= 1` is provably `y * two` when `two == 2`.
+
+54. **Walking a pointer through an array.** musl's string functions move
     the pointer instead of indexing: `for (a=s; *s; s++); return s-a;`.
     The ownership of an `_array` parameter stays at its base `var_s`, so
     `*s` after `s++` used to be refused, or focused as if the current `s`
@@ -7026,7 +7073,7 @@ Limitations:
     specifications, a backward walk and offsets either side of a moved
     pointer; `test/array_pointer_walk_bad` is the refusals.
 
-54. **Positions next to integers.** A position (`p - q` between walked
+55. **Positions next to integers.** A position (`p - q` between walked
     pointers) is an `int`, but the elaborator types it `ptrdiff_t` and
     converts the `size_t` it meets to `ptrdiff_t`, so `l - _old(l) ==
     _old(n) - n` came out as an `Int64` conversion of a `SizeT` beside an
@@ -7044,7 +7091,18 @@ Limitations:
     to every `walk_idx` the proof mentions. `test/array_pointer_walk` adds
     musl's `wmemcmp`, `wcsncmp` and `wcscmp` and a `size_t`-bounded
     `wcslen` invariant.
-55. **Words through byte arrays.** musl's fast string functions cast a
+
+    Only a conversion that keeps every distance's value is looked through
+    this way: to `ptrdiff_t`, a signed type of 64 bits or more, or
+    `_specint`. Looking through every cast read `(uint8_t)(p - a)` as the
+    untruncated count, so an invariant `(uint8_t)(p - a) == i` verified at
+    `i == 256`, where C says 0. A distance under a narrowing or unsigned
+    conversion is now refused in a contract (`array_pointer_walk_bad`), and
+    `(int64_t)(p - a)` is read through (`count_wide`). Positions exist only
+    where there are walked pointers -- loop invariants and `_assert` -- so a
+    function's `_requires`/`_ensures` cannot subtract pointers.
+
+56. **Words through byte arrays.** musl's fast string functions cast a
     walked `const unsigned char *` to a pointer to `size_t` and read (or
     write) eight elements at once. A walked pointer now stays walked through
     a cast to a pointer to `uint16_t`/`uint32_t`/`uint64_t`/`size_t` and
@@ -7070,12 +7128,16 @@ Limitations:
     array and whose rest may not be -- is undefined in ISO C and cannot be
     proved: there is no `mem_pts_to` for bytes past the array. It is
     *assumed*, in `Pulse.Lib.C.Palow.Overread.fsti` (an interface with no
-    implementation), and only in a function marked `_pal_overread`
-    (`FnDecl.is_overread`; `Body.overread`), where a word read is a call to
-    `array_overread_T`: it needs `pos < length` and alignment and gives
-    `word_bytes_upto` -- the bytes inside the array, nothing about the rest.
-    Elsewhere the read still needs `pos + W <= length`
-    (`test/array_word_overread_bad`).
+    implementation), and only for a word read through a pointer declared
+    `_pal_overread` (`TypeT::Overread`, a wrapper transparent everywhere
+    else; `overreads` checks the declared type of the variable the read
+    steps from), where the read is a call to `array_overread_T`: it needs
+    `pos < length` and alignment and gives `word_bytes_upto` -- the bytes
+    inside the array, nothing about the rest. The marker is on the pointer
+    rather than the function so that the trust covers the one read the
+    hardware argument is about: every other read in the function, word or
+    not, still needs `pos + W <= length` (`test/array_word_overread_bad`
+    marks a sibling pointer and reads through an unmarked one).
 
     Pulse's join of an unannotated `if` loses every fact about a value an
     arm computed, so a word loop inside `if (n && *s != c)` left nothing
@@ -7086,9 +7148,9 @@ Limitations:
     value it has at the `if`, and the clause is stated over them.
     `test/array_word_access` has a `memchr`-like search (alignment prologue,
     word loop in an `if`, byte loop), a word copy, `uint32_t` stores and a
-    `_pal_overread` `strlen`.
+    `strlen` whose word pointer is `_pal_overread`.
 
-56. **Walk follow-ups from musl.** A contract's `s + i` with a computed
+57. **Walk follow-ups from musl.** A contract's `s + i` with a computed
     `size_t i` and elements wider than a byte is `elem_ptr esize s i`
     (`Pulse.Lib.C.Palow.Array`), a total ghost pointer: `s +! (esize * i)`
     when that neither overflows `size_t` nor wraps the address space, else
@@ -7124,13 +7186,12 @@ Limitations:
 
     musl's `while (n--)` and `if (!n--)` decrement a zero `size_t`, which
     PAL's checked arithmetic refuses; the tests test before decrementing.
-    An invariant `l - _old(l) == _old(n) - n` is checked `SizeT.sub` here,
-    whose definedness puts `n <= _old(n)` in the invariant; where `size_t`
-    `-` wraps (`sub_wrap`) it says only that the position is `_old(n) - n`
-    modulo `2^64` and bounds nothing without `n <= _old(n)` beside it, which
-    `l - _old(l) + n == _old(n)` implies on its own.
+    A contract's `size_t` `-` wraps (item 53), so an invariant
+    `l - _old(l) == _old(n) - n` says only that the position is
+    `_old(n) - n` modulo `2^64` and bounds nothing without `n <= _old(n)`
+    beside it; `l - _old(l) + n == _old(n)` implies that on its own.
 
-57. **musl gaps: loop conditions, lent suffixes, spec asserts, aliases.**
+58. **musl gaps: loop conditions, lent suffixes, spec asserts, aliases.**
     A loop's condition is part of every iteration, so `frame` sees
     `body; cond` when it collects what the loop writes: musl's
     `while ((*d++ = *s++))` moves `d` and `s` in the condition alone, and
