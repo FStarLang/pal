@@ -369,7 +369,11 @@ int platform_identity(int x) _ensures(return == x) {
 }
 ```
 
-Contracts on an earlier prototype are retained. `_pal_admit` applies only to
+Contracts on an earlier prototype are retained, including across later
+unannotated redeclarations (such as a system header included after a header
+of contracts). A redeclaration that states a contract must state all of it:
+one that restates only some clauses (`_requires` but not `_ensures`, say) is
+reported as having differing specifications. `_pal_admit` applies only to
 functions; `_pal_ignore` takes precedence if both markers are present.
 
 `_pal_ignore` omits declarations entirely: functions, typedefs, structs/unions,
