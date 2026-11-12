@@ -977,6 +977,9 @@ public:
         } else if (ann->getAnnotation() == "pal-core-ref" &&
                    ann->args_size() == 0) {
           ty = mk_type_core_ref(std::move(loc), std::move(ty));
+        } else if (ann->getAnnotation() == "pal-overread" &&
+                   ann->args_size() == 0) {
+          ty = mk_type_overread(std::move(loc), std::move(ty));
         }
       }
     }

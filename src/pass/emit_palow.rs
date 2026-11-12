@@ -1543,7 +1543,8 @@ fn peel<'b>(tds: &'b Typedefs, ty: &'b Type) -> &'b Type {
             | TypeT::RefineUninit(t, _)
             | TypeT::RefineValue(t, ..)
             | TypeT::Plain(t)
-            | TypeT::Nullable(t) => tds.resolve(t),
+            | TypeT::Nullable(t)
+            | TypeT::Overread(t) => tds.resolve(t),
             _ => return ty,
         };
     }
@@ -1566,7 +1567,8 @@ fn describe(ty: &Type) -> String {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => describe(t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => describe(t),
         TypeT::Float { width } => format!("a {}-bit float", width),
         TypeT::SizeT => "size_t".to_string(),
         TypeT::PtrdiffT => "ptrdiff_t".to_string(),
@@ -1703,7 +1705,8 @@ fn strip_annotations(ty: &Type) -> &Type {
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
-        | TypeT::Nullable(t) => strip_annotations(t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => strip_annotations(t),
         _ => ty,
     }
 }
@@ -1716,7 +1719,8 @@ fn is_plain_chain(ty: &Type) -> bool {
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
-        | TypeT::Nullable(t) => is_plain_chain(t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => is_plain_chain(t),
         _ => false,
     }
 }
@@ -1753,7 +1757,8 @@ fn palow_name(tds: &Typedefs, ty: &Type) -> Option<String> {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => palow_name(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => palow_name(tds, t),
         _ => None,
     }
 }
@@ -1793,7 +1798,8 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => fstar_type(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => fstar_type(tds, t),
         _ => None,
     }
 }
@@ -1852,7 +1858,8 @@ fn is_arrayptr(tds: &Typedefs, ty: &Type) -> bool {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => is_arrayptr(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => is_arrayptr(tds, t),
         _ => false,
     }
 }
@@ -1866,7 +1873,8 @@ fn extent(tds: &Typedefs, ty: &Type) -> Option<Extent> {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => extent(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => extent(tds, t),
         _ => None,
     }
 }
@@ -1902,7 +1910,8 @@ fn palow_sizeof(tds: &Typedefs, ty: &Type) -> Option<u64> {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => palow_sizeof(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => palow_sizeof(tds, t),
         _ => None,
     }
 }
@@ -1980,7 +1989,8 @@ fn uninit_below_pointer(tds: &Typedefs, ty: &Type) -> bool {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, _, _, _)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => uninit_below_pointer(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => uninit_below_pointer(tds, t),
         _ => false,
     }
 }
@@ -1999,6 +2009,7 @@ fn always_refines(tds: &Typedefs, ty: &Type) -> Vec<Rc<Expr>> {
         | TypeT::RefineValue(t, _, _, _)
         | TypeT::Plain(t)
         | TypeT::Nullable(t)
+        | TypeT::Overread(t)
         | TypeT::Pointer(t, _) => always_refines(tds, t),
         _ => Vec::new(),
     }
@@ -2041,7 +2052,9 @@ fn collect_refinements(
             b.push((n.clone(), vty.clone(), p.clone()));
             Ok((v, u, b))
         }
-        TypeT::Plain(t) | TypeT::Nullable(t) => collect_refinements(tds, t, stop_at_plain, ptr),
+        TypeT::Plain(t) | TypeT::Nullable(t) | TypeT::Overread(t) => {
+            collect_refinements(tds, t, stop_at_plain, ptr)
+        }
         TypeT::Pointer(t, _) if ptr => collect_refinements(tds, t, stop_at_plain, ptr),
         _ => Ok((Vec::new(), Vec::new(), Vec::new())),
     }
@@ -2069,7 +2082,7 @@ fn refinements_above_plain(tds: &Typedefs, ty: &Type) -> Result<Refinements, Str
             b.push((n.clone(), vty.clone(), p.clone()));
             Ok((v, u, b))
         }
-        TypeT::Nullable(t) => refinements_above_plain(tds, t),
+        TypeT::Nullable(t) | TypeT::Overread(t) => refinements_above_plain(tds, t),
         _ => Ok((Vec::new(), Vec::new(), Vec::new())),
     }
 }
@@ -2316,9 +2329,11 @@ fn allocated_return(tds: &Typedefs, ty: &Type) -> Option<String> {
 fn refined(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Refine(..) | TypeT::RefineAlways(..) | TypeT::RefineUninit(..) => true,
-        TypeT::RefineValue(t, ..) | TypeT::Plain(t) | TypeT::Nullable(t) | TypeT::Pointer(t, _) => {
-            refined(tds, t)
-        }
+        TypeT::RefineValue(t, ..)
+        | TypeT::Plain(t)
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t)
+        | TypeT::Pointer(t, _) => refined(tds, t),
         _ => false,
     }
 }
@@ -2359,6 +2374,7 @@ fn is_void_ptr(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Pointer(to, _) => matches!(tds.resolve(to).val, TypeT::Void),
         TypeT::Nullable(t)
+        | TypeT::Overread(t)
         | TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
@@ -2387,6 +2403,7 @@ fn pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
         TypeT::Pointer(_, PointerKind::Core) => None,
         TypeT::Pointer(to, _) => Some(to),
         TypeT::Nullable(t)
+        | TypeT::Overread(t)
         | TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
@@ -2591,7 +2608,8 @@ fn field_refines(tds: &Typedefs, ty: &Type) -> Vec<FieldRefinement> {
 fn is_nullable(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Nullable(_) => true,
-        TypeT::Refine(t, _)
+        TypeT::Overread(t)
+        | TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..) => is_nullable(tds, t),
@@ -3421,22 +3439,40 @@ impl<'a> Spec<'a> {
                     Ok(x) => x,
                     Err(e) => return Some(Err(e)),
                 };
-                Some(
-                    self.num(r, w)
-                        .map(|n| (owner, format!("({} {} {})", pos, op.to_str(), n))),
-                )
+                // A position counts the array's elements; a step of a pointer
+                // to something wider (a word through a byte array) is that
+                // many of them.
+                let lsz = palow_sizeof(self.tds, pointee(self.tds, peel(self.tds, &lt))?)?;
+                let osz = self.owner_elem_size(&owner)?;
+                if osz == 0 || lsz % osz != 0 {
+                    return None;
+                }
+                Some(self.num(r, w).map(|n| {
+                    let n = match lsz / osz {
+                        1 => n,
+                        k => format!("({} * {})", k, n),
+                    };
+                    (owner, format!("({} {} {})", pos, op.to_str(), n))
+                }))
             }
+            // A cast moves no pointer: where it points is still a position in
+            // the same array, counted in that array's elements.
             ExprT::Cast(inner, to) => {
                 let it = self.ty_of(inner).ok()?;
                 let from = pointee(self.tds, peel(self.tds, &it))?;
                 let to = pointee(self.tds, peel(self.tds, to))?;
-                if palow_name(self.tds, from)? != palow_name(self.tds, to)? {
-                    return None;
-                }
+                palow_sizeof(self.tds, from)?;
+                palow_sizeof(self.tds, to)?;
                 self.ptr_pos(inner, w)
             }
             _ => None,
         }
+    }
+
+    /// The size of an element of the array parameter `owner`.
+    fn owner_elem_size(&self, owner: &str) -> Option<u64> {
+        let t = self.env.local_type(owner)?;
+        palow_sizeof(self.tds, pointee(self.tds, peel(self.tds, &t))?)
     }
 
     /// `p - q` between two pointers into the same array parameter: the
@@ -4116,6 +4152,28 @@ impl<'a> Spec<'a> {
                                     zero
                                 ));
                             }
+                        }
+                        // `(uintptr_t) p`: the address the body's
+                        // `ptr_to_uintptr` observes, as a ghost term.
+                        if matches!(peel(self.tds, &from).val, TypeT::Pointer(..))
+                            && matches!(peel(self.tds, to).val, TypeT::Int { .. } | TypeT::SizeT)
+                        {
+                            let q = self.value(inner, w)?;
+                            if matches!(
+                                peel(self.tds, to).val,
+                                TypeT::Int {
+                                    signed: false,
+                                    width: 64
+                                }
+                            ) {
+                                return Ok(format!("(uintptr_u64 {})", q));
+                            }
+                            let a = format!("(uintptr_of {})", q);
+                            let sz: Rc<Type> = TypeT::SizeT.with_loc(e.loc.clone());
+                            return convert(&sz, peel(self.tds, to), &a, self.tds.ptr_bytes)
+                                .map_err(|_| {
+                                    format!("a contract converting a pointer to {}", describe(to))
+                                });
                         }
                         if fstar_type(self.tds, &from) == fstar_type(self.tds, to) {
                             return self.value(inner, w);
@@ -11582,7 +11640,8 @@ fn collect_array_fill_type(tds: &Typedefs, ty: &Type, out: &mut BTreeMap<String,
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, ..)
-        | TypeT::Nullable(inner) => {
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => {
             collect_array_fill_type(tds, inner, out);
         }
         _ => {}
@@ -12043,6 +12102,15 @@ struct Touched {
     addressed: HashSet<String>,
     /// The names the body declares a local under, in any block.
     declared: HashSet<String>,
+}
+
+/// A clause that only claims storage, `_live(x) && _live(y)`.
+fn live_only(e: &Expr) -> bool {
+    match &strip_vattr(e).val {
+        ExprT::Live(_) => true,
+        ExprT::BinOp(BinOp::LogAnd, a, b) => live_only(a) && live_only(b),
+        _ => false,
+    }
 }
 
 /// The variable an lvalue ultimately reaches through, if it is a named object.
@@ -13356,6 +13424,7 @@ open Pulse.Lib.C.Palow.Float\n\
 open Pulse.Lib.C.Palow.CTypes\n\
 open Pulse.Lib.C.Palow.Machine\n\
 open Pulse.Lib.C.Palow.Array\n\
+open Pulse.Lib.C.Palow.Word\n\
 open Pulse.Lib.C.Palow.Unaligned\n\
 open Pulse.Lib.C.Palow.ConstSeq\n\
 open Pulse.Lib.C.Palow.Local\n\
@@ -14252,6 +14321,10 @@ struct Body<'a> {
     break_flag: Option<String>,
     /// The slots the last `frame` gave a binder to, in order.
     frame_slots: Vec<String>,
+    /// While framing the join of an `if` with a pure `_ensures`: the names
+    /// its arms may write. Every other slot keeps the value it holds at the
+    /// `if`, bound by a `with` just before it.
+    join_written: Option<HashSet<String>>,
     /// Functions already known to be divergent. Calling one makes this body
     /// divergent too, which is why the whole set is reached by a fixpoint
     /// rather than in one pass.
@@ -17047,12 +17120,132 @@ impl<'a> Body<'a> {
                 }
                 self.walk_root(l)
             }
+            // `*(uint32_t *)(p + 4)`: a word of the byte array `p` walks
+            // through. Only a cast to a word type is seen through; a cast to
+            // the other signedness of the element type is a different access
+            // (see `rvalue`).
+            ExprT::Cast(x, ty) if self.word_ty(ty).is_some() => self.walk_root(x),
             _ => None,
         }
     }
 
+    /// The pointee of a pointer to an unsigned integer type wider than a
+    /// byte, and its size as a `SizeT.t` term: what a word access through a
+    /// byte array reads.
+    fn word_ty(&self, ty: &Type) -> Option<(String, &'static str)> {
+        let elem = pointee(self.tds, peel(self.tds, ty))?;
+        let wpn = palow_name(self.tds, elem)?;
+        let w = match &*wpn {
+            "uint16_t" => "2sz",
+            "uint32_t" => "4sz",
+            "uint64_t" => "8sz",
+            "size_t" => "size_t_sizeof",
+            _ => return None,
+        };
+        Some((wpn, w))
+    }
+
+    /// A word access: `*w` where `w` walks through an array of one-byte
+    /// elements but points to an unsigned integer type of `W` bytes, as the
+    /// word loop of a fast `strlen` or `memchr` does after `w = (const void
+    /// *)s`. The access is to the `W` elements at `w`'s position, read as one
+    /// integer (`Pulse.Lib.C.Palow.Word`): the owner, the word type, and its
+    /// size.
+    fn word_walk(&self, e: &Expr) -> Option<(String, String, &'static str)> {
+        let v = self.walk_root(e)?;
+        let owner = self.walk_owner(&v)?.ok()?;
+        let ap = self.arrays.get(&owner)?;
+        if ap.maybe || !matches!(&*ap.pn, "uint8_t" | "int8_t") {
+            return None;
+        }
+        let (wpn, w) = self.word_ty(&*self.ty_of(e).ok()?)?;
+        Some((owner, wpn, w))
+    }
+
+    /// Whether the pointer a word access steps from was declared
+    /// `_pal_overread`. Only that variable's reads are trusted to overrun.
+    fn overreads(&self, e: &Expr) -> bool {
+        let Some(v) = self.walk_root(e) else {
+            return false;
+        };
+        let Some(ty) = self.env.local_type(&v) else {
+            return false;
+        };
+        let mut ty: &Type = &ty;
+        loop {
+            ty = match &self.tds.resolve(ty).val {
+                TypeT::Overread(_) => return true,
+                TypeT::Refine(t, _)
+                | TypeT::RefineAlways(t, _)
+                | TypeT::RefineUninit(t, _)
+                | TypeT::RefineValue(t, ..)
+                | TypeT::Plain(t)
+                | TypeT::Nullable(t) => t,
+                _ => return false,
+            };
+        }
+    }
+
+    /// The arguments every word operation takes: the element type's byte
+    /// view, the array, and the word's address and size.
+    fn word_args(&mut self, e: &Expr, owner: &str, w: &str) -> Result<(String, String), String> {
+        let ap = self.arrays[owner].clone();
+        if !ap.known_len && !self.requires_ok {
+            return Err(
+                "a word access through a walked pointer, whose bounds obligation needs a \
+                 `_requires` that is not translated"
+                    .to_string(),
+            );
+        }
+        let cur = self.rvalue(e)?;
+        let cur = if cur.contains(' ') && !cur.starts_with('(') {
+            format!("({})", cur)
+        } else {
+            cur
+        };
+        let pn = &ap.pn;
+        let args = format!(
+            "{pn}_repr {pn}_byte {pn}_of_byte {pn}_bytelike {} {} {pn}_alignof {} {}",
+            ap.addr, ap.esize, cur, w
+        );
+        Ok((args, cur))
+    }
+
+    /// `*w` for a word access: the word's own points-to, focused out of the
+    /// array and put back as its bytes.
+    fn focus_word(&mut self, e: &Expr, owner: &str, wpn: &str, w: &str) -> Result<Focus, String> {
+        let (args, at) = self.word_args(e, owner, w)?;
+        self.lines
+            .push(format!("array_word_focus_{} {};", wpn, args));
+        Ok(Focus {
+            bits: None,
+            at,
+            write_fn: format!("{}_write", wpn),
+            unaligned: false,
+            pn: wpn.to_string(),
+            open_read: Vec::new(),
+            open_write: Vec::new(),
+            close_read: vec![format!("array_word_unfocus_read_{} {};", wpn, args)],
+            close_write: vec![format!("array_word_unfocus_{} {};", wpn, args)],
+        })
+    }
+
     /// `*p` where `p` is, or walks through, an array parameter: `p[0]`.
     fn read_elem(&mut self, p: &Expr) -> Result<String, String> {
+        // A word read through a `_pal_overread` pointer need only start
+        // inside the array; what it returns is known only for the bytes that
+        // are.
+        if let Some((owner, wpn, w)) = self.word_walk(p)
+            && self.overreads(p)
+        {
+            let (args, _) = self.word_args(p, &owner, w)?;
+            let t = self.fresh("word");
+            self.lines.push(format!(
+                "let {} = Pulse.Lib.C.Palow.Overread.array_overread_{} {};",
+                t, wpn, args
+            ));
+            return Ok(t);
+        }
         let f = self.focus_elem(p, None, false)?;
         self.lines.extend(f.open_read.iter().cloned());
         let t = self.fresh("elem");
@@ -17527,6 +17720,15 @@ impl<'a> Body<'a> {
                 "a subscript, whose bounds obligation needs the untranslated `_requires`"
                     .to_string(),
             );
+        }
+        if let Some((owner, wpn, w)) = self.word_walk(base) {
+            if idx.is_some() {
+                return Err(format!(
+                    "a subscript of a {} pointer walked through `{}`; a word is accessed only as `*p`",
+                    wpn, owner
+                ));
+            }
+            return self.focus_word(base, &owner, &wpn, w);
         }
         let ArrayPlace {
             addr: arr,
@@ -22212,6 +22414,19 @@ impl<'a> Body<'a> {
                 locals.insert(s.name.clone(), value);
                 continue;
             }
+            // A slot the arms of an `if` leave alone holds the same value
+            // after it, and naming that value keeps what is known about it.
+            if let Some(w) = &self.join_written
+                && !w.contains(touch)
+                && !w.contains(&s.name)
+            {
+                let value = self.fresh("join");
+                self.lines
+                    .push(format!("with {}. assert ({});", value, s.pts_to(&value)));
+                owns.push(s.pts_to(&value));
+                locals.insert(s.name.clone(), value);
+                continue;
+            }
             let b = format!("inv_{}", touch);
             binders.push(format!("({}: {})", b, s.fstar_ty));
             owns.push(s.pts_to(&b));
@@ -23939,7 +24154,27 @@ impl<'a> Body<'a> {
                     }
                     None => (Vec::new(), Vec::new()),
                 };
+                // A pure `_ensures` is the author's statement of what the
+                // join keeps. Pulse's own join forgets every fact about a
+                // value an arm computed, so a loop inside an arm leaves
+                // nothing behind but the clause. The slots the arms do not
+                // write keep their values, and walked pointers their walk.
+                let pure_join = !states_own && ensures.iter().any(|e| !live_only(e));
+                let join = if pure_join {
+                    let mut t = Touched::default();
+                    touch_stmts(then_branch, &mut t);
+                    touch_stmts(else_branch, &mut t);
+                    self.join_written = Some(t.written);
+                    let j = self.frame_slprop(ensures, "an `if`", "    ");
+                    self.join_written = None;
+                    Some(j?)
+                } else {
+                    None
+                };
                 self.lines.push(format!("if ({})", c));
+                if let Some(j) = join {
+                    self.lines.push(format!("  ensures {}", j));
+                }
                 if states_own {
                     // Pulse does not frame an `if`'s annotation, so it has to
                     // be the whole state at the join: the author's ownership
@@ -25534,7 +25769,7 @@ fn pieces_named(contract: &str) -> HashSet<String> {
 fn is_plain(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Plain(_) => true,
-        TypeT::Nullable(t) | TypeT::RefineValue(t, ..) => is_plain(tds, t),
+        TypeT::Nullable(t) | TypeT::Overread(t) | TypeT::RefineValue(t, ..) => is_plain(tds, t),
         _ => false,
     }
 }
@@ -26767,6 +27002,7 @@ fn emit_body(
         mirror_reads: false,
         break_flag: None,
         frame_slots: Vec::new(),
+        join_written: None,
         divergent_fns,
         blocks: Vec::new(),
         stored_aliases: {

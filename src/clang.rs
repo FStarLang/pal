@@ -823,6 +823,13 @@ fn mk_type_plain(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
 fn mk_type_nullable(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
     TypeT::Nullable(ty).with_loc(loc)
 }
+fn mk_type_overread(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
+    if !matches!(ty.val, TypeT::Pointer(..)) {
+        eprintln!("warning: _pal_overread on non-pointer type: {}", ty);
+        return ty;
+    }
+    TypeT::Overread(ty).with_loc(loc)
+}
 fn mk_type_array(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
     match &ty.val {
         TypeT::Pointer(elem, PointerKind::Unknown) => {

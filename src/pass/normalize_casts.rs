@@ -46,7 +46,8 @@ fn normalize_type(env: &Env, ty: &mut Rc<Type>) {
         | TypeT::FixedArray(inner, _)
         | TypeT::FlexArray(inner)
         | TypeT::Plain(inner)
-        | TypeT::Nullable(inner) => normalize_type(env, inner),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => normalize_type(env, inner),
         TypeT::FnPtr { args, ret } => {
             for arg in args {
                 normalize_type(env, arg);

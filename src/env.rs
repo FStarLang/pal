@@ -263,6 +263,11 @@ impl Env {
         self.locals.get(&ident.val)
     }
 
+    /// A local's declared type, by name.
+    pub fn local_type(&self, name: &str) -> Option<Rc<Type>> {
+        self.locals.get(name).map(|d| d.ty.clone())
+    }
+
     pub fn lookup_global_var(&self, ident: &Ident) -> Option<&GlobalVar> {
         self.globals.vars.get(&ident.val)
     }
@@ -637,6 +642,7 @@ impl Env {
                     | TypeT::RefineValue(..)
                     | TypeT::Plain(..)
                     | TypeT::Nullable(..)
+                    | TypeT::Overread(..)
             ) => None,
         }
     }
@@ -685,7 +691,8 @@ impl Env {
             | TypeT::RefineUninit(ty, _)
             | TypeT::RefineValue(ty, ..)
             | TypeT::Plain(ty)
-            | TypeT::Nullable(ty) => Some(ty.clone().into()),
+            | TypeT::Nullable(ty)
+            | TypeT::Overread(ty) => Some(ty.clone().into()),
         }
     }
 

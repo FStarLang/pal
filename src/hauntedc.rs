@@ -517,9 +517,26 @@ fn type_parser<
             .map(|name| TypeT::TypeRef(TypeRefKind::Typedef(name))),
     ));
 
-    base_type
+    // A qualifier says nothing about a value, which is all a specification
+    // has: `(const unsigned char *)w` is the same cast without it.
+    let qualifier = select! {
+        Token::Ident("const") => (),
+        Token::Ident("volatile") => (),
+    }
+    .padded_by(ws());
+
+    qualifier
+        .clone()
+        .repeated()
+        .ignore_then(base_type)
+        .then_ignore(qualifier.clone().repeated())
         .map_with(|ty, e| ty.with_loc(sift.resolve_source_info(&e.span())))
-        .then(punct(Punct::Star).repeated().collect::<Vec<_>>())
+        .then(
+            punct(Punct::Star)
+                .then_ignore(qualifier.repeated())
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
         .map_with(|(base_ty, stars), e| {
             let loc = sift.resolve_source_info(&e.span());
             stars.into_iter().fold(base_ty, |inner, _| {
@@ -638,9 +655,25 @@ fn expr_parser<
                 .map(|name| TypeT::TypeRef(TypeRefKind::Typedef(name))),
         ));
 
-        let type_name = base_type
+        // As in `type_parser`: qualifiers are dropped.
+        let qualifier = select! {
+            Token::Ident("const") => (),
+            Token::Ident("volatile") => (),
+        }
+        .padded_by(ws());
+
+        let type_name = qualifier
+            .clone()
+            .repeated()
+            .ignore_then(base_type)
+            .then_ignore(qualifier.clone().repeated())
             .map_with(|ty, e| ty.with_loc(sift.resolve_source_info(&e.span())))
-            .then(punct(Punct::Star).repeated().collect::<Vec<_>>())
+            .then(
+                punct(Punct::Star)
+                    .then_ignore(qualifier.repeated())
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
             .map_with(|(base_ty, stars), e| {
                 let loc = sift.resolve_source_info(&e.span());
                 stars.into_iter().fold(base_ty, |inner, _| {

@@ -211,6 +211,12 @@ pub enum TypeT {
     /// `unless_null this (…)` so the resource is `emp` when the pointer is null.
     Nullable(Rc<Type>),
 
+    /// `_pal_overread` on a pointer: a word read through it, or through a
+    /// pointer stepped from it, may reach past the end of the byte array it
+    /// walks, on the trusted assumption in `Pulse.Lib.C.Palow.Overread`.
+    /// Transparent everywhere else.
+    Overread(Rc<Type>),
+
     /// Placeholder for type inference (resolved during elaboration).
     Unknown,
     Error,
@@ -551,7 +557,8 @@ pub fn peel_type(ty: &Rc<Type>) -> &Rc<Type> {
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, ..)
         | TypeT::Plain(inner)
-        | TypeT::Nullable(inner) => peel_type(inner),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => peel_type(inner),
         _ => ty,
     }
 }

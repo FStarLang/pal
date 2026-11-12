@@ -134,7 +134,7 @@ fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
             scan_expr(deps, p);
         }
         TypeT::Plain(ty) => scan_type(deps, ty),
-        TypeT::Nullable(ty) => scan_type(deps, ty),
+        TypeT::Nullable(ty) | TypeT::Overread(ty) => scan_type(deps, ty),
         TypeT::SpecInt | TypeT::SpecNat => {}
     }
 }

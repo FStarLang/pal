@@ -190,6 +190,9 @@ impl PrettyIR for TypeT {
             TypeT::Nullable(ty) => RcDoc::text("_nullable")
                 .append(RcDoc::line())
                 .append(ty.to_doc()),
+            TypeT::Overread(ty) => RcDoc::text("_pal_overread")
+                .append(RcDoc::line())
+                .append(ty.to_doc()),
             TypeT::Unknown => RcDoc::text("?unknown"),
             TypeT::Error => RcDoc::text("???"),
         }
