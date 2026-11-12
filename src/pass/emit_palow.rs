@@ -2489,7 +2489,7 @@ fn null_input(tds: &Typedefs, ty: &Type) -> Option<String> {
             _ => false,
         }
     }
-    if refined(tds, ty) || extent(tds, ty) != Some(Extent::One) {
+    if refined(tds, ty) || refined_pointee(tds, ty) || extent(tds, ty) != Some(Extent::One) {
         return None;
     }
     let TypeT::Pointer(pt, _) = &peel(tds, ty).val else {
@@ -2501,6 +2501,91 @@ fn null_input(tds: &Typedefs, ty: &Type) -> Option<String> {
     let pn = palow_name(tds, pt)?;
     let zero = zero_value(tds, pt).ok()?;
     Some(format!("{}_pts_to null 1.0R ({})", pn, zero))
+}
+
+/// Whether a pointer's pointee is, or holds, a struct with a `_refine` --
+/// written on the struct or on one of its fields. The callee states that
+/// refinement as a conjunct of its own beside the pointee's `_pts_to`, so an
+/// optional parameter's guard is two guards, and a call site that introduces
+/// or eliminates only the `_pts_to` one would leave the other unmatched (or
+/// matched against the wrong value). Asked of the same walk `emit_fn_sig`
+/// states the contract from, so the two agree on which pointees those are.
+fn refined_pointee(tds: &Typedefs, ty: &Type) -> bool {
+    match &peel(tds, ty).val {
+        TypeT::Pointer(pt, _) => {
+            !struct_refines(tds, pt).is_empty() || !field_refines(tds, pt).is_empty()
+        }
+        _ => false,
+    }
+}
+
+/// The clauses of the `_refine` on a struct declaration, for a value of
+/// that type (empty for any other type).
+fn struct_refines(tds: &Typedefs, ty: &Type) -> Vec<Rc<Expr>> {
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
+        return Vec::new();
+    };
+    tds.refined_structs
+        .get(&*n.val.to_string())
+        .and_then(|r| refinements(tds, r).ok())
+        .map(|(ps, _, _)| ps)
+        .unwrap_or_default()
+}
+
+// A `_refine` written on one *field* of a struct is an invariant of the
+// struct type just as a struct-level one is, and it means the same thing
+// wherever a value of that type is: `this` is the field. The generated
+// ownership cannot carry it -- it is built from representations and has no
+// hook for a clause -- so it is stated in the contract of every function
+// that holds such a struct, at whichever ends the struct itself is stated.
+fn field_refines(tds: &Typedefs, ty: &Type) -> Vec<FieldRefinement> {
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
+        return Vec::new();
+    };
+    let sname = n.val.to_string();
+    let Some(si) = tds.structs.get(&sname) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for f in &si.fields {
+        let Ok((mut ps, _, _)) = field_refinements(tds, &f.ty) else {
+            continue;
+        };
+        // An embedded struct carries its declaration's invariant just
+        // as a parameter of that type does. Do not follow pointers:
+        // storing an address is not ownership of the pointed-to object.
+        let nested = !is_plain(tds, &f.ty)
+            && !is_plain_chain(&f.ty)
+            && matches!(peel(tds, &f.ty).val, TypeT::TypeRef(TypeRefKind::Struct(_)));
+        if nested {
+            if let TypeT::TypeRef(TypeRefKind::Struct(child)) = &peel(tds, &f.ty).val
+                && let Some(r) = tds.refined_structs.get(&*child.val)
+                && let Ok((clauses, _, _)) = refinements(tds, r)
+            {
+                for cl in clauses {
+                    if !ps.iter().any(|p| Rc::ptr_eq(p, &cl)) {
+                        ps.push(cl);
+                    }
+                }
+            }
+        }
+        for cl in ps {
+            out.push(FieldRefinement {
+                parents: Vec::new(),
+                container: sname.clone(),
+                field: f.name.clone(),
+                ty: f.ty.clone(),
+                clause: cl,
+            });
+        }
+        if nested {
+            for mut child in field_refines(tds, &f.ty) {
+                child.parents.insert(0, f.name.clone());
+                out.push(child);
+            }
+        }
+    }
+    out
 }
 
 fn is_nullable(tds: &Typedefs, ty: &Type) -> bool {
@@ -4653,71 +4738,7 @@ fn emit_fn(
     // parameter's own refinements is what makes it reach the contract, and
     // binding `this` to the struct value is what makes it mean the same thing
     // it means in the declaration.
-    let struct_refines = |ty: &Type| -> Vec<Rc<Expr>> {
-        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
-            return Vec::new();
-        };
-        tds.refined_structs
-            .get(&*n.val.to_string())
-            .and_then(|r| refinements(tds, r).ok())
-            .map(|(ps, _, _)| ps)
-            .unwrap_or_default()
-    };
-    // A `_refine` written on one *field* of a struct is an invariant of the
-    // struct type just as a struct-level one is, and it means the same thing
-    // wherever a value of that type is: `this` is the field. The generated
-    // ownership cannot carry it -- it is built from representations and has no
-    // hook for a clause -- so it is stated in the contract of every function
-    // that holds such a struct, at whichever ends the struct itself is stated.
-    fn field_refines(tds: &Typedefs, ty: &Type) -> Vec<FieldRefinement> {
-        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
-            return Vec::new();
-        };
-        let sname = n.val.to_string();
-        let Some(si) = tds.structs.get(&sname) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for f in &si.fields {
-            let Ok((mut ps, _, _)) = field_refinements(tds, &f.ty) else {
-                continue;
-            };
-            // An embedded struct carries its declaration's invariant just
-            // as a parameter of that type does. Do not follow pointers:
-            // storing an address is not ownership of the pointed-to object.
-            let nested = !is_plain(tds, &f.ty)
-                && !is_plain_chain(&f.ty)
-                && matches!(peel(tds, &f.ty).val, TypeT::TypeRef(TypeRefKind::Struct(_)));
-            if nested {
-                if let TypeT::TypeRef(TypeRefKind::Struct(child)) = &peel(tds, &f.ty).val
-                    && let Some(r) = tds.refined_structs.get(&*child.val)
-                    && let Ok((clauses, _, _)) = refinements(tds, r)
-                {
-                    for cl in clauses {
-                        if !ps.iter().any(|p| Rc::ptr_eq(p, &cl)) {
-                            ps.push(cl);
-                        }
-                    }
-                }
-            }
-            for cl in ps {
-                out.push(FieldRefinement {
-                    parents: Vec::new(),
-                    container: sname.clone(),
-                    field: f.name.clone(),
-                    ty: f.ty.clone(),
-                    clause: cl,
-                });
-            }
-            if nested {
-                for mut child in field_refines(tds, &f.ty) {
-                    child.parents.insert(0, f.name.clone());
-                    out.push(child);
-                }
-            }
-        }
-        out
-    }
+    let struct_refines = |ty: &Type| struct_refines(tds, ty);
     // The `_own` predicate a value of this type carries, when its type is a
     // struct that has one.
     // `peel` and not `resolve`: the annotation that makes a struct interesting
@@ -12833,6 +12854,11 @@ pub fn emit_palow(
                     .map(|a| is_nullable(&tds, &a.ty))
                     .collect(),
                 spliced_own: sig.spliced_own,
+                refined_pointees: fndecl
+                    .args
+                    .iter()
+                    .map(|a| refined_pointee(&tds, &a.ty))
+                    .collect(),
                 null_inputs: fndecl
                     .args
                     .iter()
@@ -13721,6 +13747,8 @@ struct Callee {
     /// For each optional input whose guarded resource a declining call site
     /// can write down outright, that resource at a null pointer.
     null_inputs: Vec<Option<String>>,
+    /// Which parameters point at a refined struct; see `refined_pointee`.
+    refined_pointees: Vec<bool>,
     /// What the call hands the caller, when the return type grants a block.
     /// The caller has to start tracking it or the ownership the `ensures` just
     /// granted would be left over.
@@ -19339,6 +19367,7 @@ impl<'a> Body<'a> {
         let nullables = c.nullables.clone();
         let callee_spliced = c.spliced_own;
         let null_inputs = c.null_inputs.clone();
+        let refined_pointees = c.refined_pointees.clone();
         let (implicits, ghost_args) = (c.implicits.clone(), c.ghost_args.clone());
         // A `$witness` before a direct call names the callee's `_ghost_arg`s,
         // which appear only inside `pure`s and so cannot be read off the
@@ -19383,7 +19412,7 @@ impl<'a> Body<'a> {
             }
             if let Some(at) = opened.get(&i) {
                 out += &format!(" {}", at);
-                if nullables.get(i) == Some(&true) {
+                if nullables.get(i) == Some(&true) && refined_pointees.get(i) != Some(&true) {
                     self.take_back_nullable(
                         a,
                         at,
@@ -19548,6 +19577,7 @@ impl<'a> Body<'a> {
                 self.author_slots.insert(x.val.to_string());
             }
             if nullables.get(i) == Some(&true)
+                && refined_pointees.get(i) != Some(&true)
                 && arr_args.get(i) != Some(&true)
                 && arrayptr_args.get(i) != Some(&true)
                 && plain_ptrs.get(i) != Some(&true)
@@ -19646,8 +19676,9 @@ impl<'a> Body<'a> {
     /// over a resource written down outright (see `null_input`).
     ///
     /// Anything else is left alone: a caller's own `_nullable` parameter is
-    /// forwarded with its guard untouched, and ownership a hand-written
-    /// contract supplies is the author's to open.
+    /// forwarded with its guard untouched, ownership a hand-written contract
+    /// supplies is the author's to open, and so is a pointee whose refinement
+    /// is a guard of its own (see `refined_pointee`).
     fn take_back_nullable(
         &mut self,
         a: &Expr,
