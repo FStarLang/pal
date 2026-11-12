@@ -4666,7 +4666,20 @@ fn emit_fn(
     // Whether the author's `_ensures` states ownership rather than only
     // propositions. Asked here, ahead of the parameter loop, because it
     // changes what a parameter mode is allowed to promise back.
-    let ens_own = decl.ensures.iter().any(|e| is_slprop_clause(tds, e));
+    // An `_out` object is handed over by the author's ownership clauses only
+    // when one of them names the parameter: a clause about something else
+    // leaves the object where the mode puts it, back with the caller.
+    let ens_own = |base: &str| {
+        decl.ensures.iter().any(|e| {
+            if !is_slprop_clause(tds, e) {
+                return false;
+            }
+            let mut names = HashSet::new();
+            spliced_names(e, &mut names);
+            spliced_reads(e, &mut names);
+            names.contains(base)
+        })
+    };
     let mut req: Vec<String> = Vec::new();
     // Hand-written ownership the contract hands back, which unlike the
     // generated kind binds no existential of its own -- the author names
@@ -5184,7 +5197,7 @@ fn emit_fn(
                             elem_refine: None,
                         });
                     }
-                    if !ens_own {
+                    if !ens_own(&base) {
                         fresh.push((
                             format!("{}'", vname),
                             vty,
@@ -5279,7 +5292,7 @@ fn emit_fn(
                 // unless the author wrote an `_ensures` that states ownership
                 // itself -- then the object has been handed somewhere, and
                 // promising it back as well would be promising it twice.
-                if !ens_own {
+                if !ens_own(&base) {
                     fresh.push((
                         format!("{}'", vname),
                         vty,
