@@ -36,3 +36,13 @@ uint32_t read_word(const uint32_t *p)
   typedef uint32_t __attribute__((__may_alias__)) u32;
   return *(const u32 *)p;
 }
+
+// A local `size_t` is the program's own type, not the target's.
+uint32_t shadow_size(void)
+  _ensures(return == 0)
+{
+  typedef uint8_t size_t;
+  size_t x = 255;
+  x = x + 1;
+  return x;
+}

@@ -776,7 +776,10 @@ public:
     t = t.IgnoreParens();
     auto loc = getRange(range);
 
-    if (t.getAsString() == "size_t") {
+    // By name *and* type: a program may declare its own `size_t`, such as a
+    // block-scope `typedef uint8_t size_t;`, which is not the target's.
+    if (t.getAsString() == "size_t" &&
+        astCtx->hasSameType(t, astCtx->getSizeType())) {
       return mk_sizet(std::move(loc));
     } else if (auto typeOf = dyn_cast<TypeOfType>(t)) {
       return trQualType(typeOf->desugar(), range, liftStructs);
@@ -790,8 +793,9 @@ public:
       // type: the IR's typedefs are file-scope names, and two functions may
       // each declare their own `word`.
       if (tydef->getDecl()->getDeclContext()->isFunctionOrMethod())
-        return trQualType(tydef->getDecl()->getUnderlyingType(), range,
-                          liftStructs, protoLoc);
+        return trQualType(
+            tydef->getDecl()->getUnderlyingType(), range, liftStructs,
+            findFnProtoTypeLoc(tydef->getDecl()->getTypeSourceInfo()));
       auto id = ctx.mk_ident(toStr(tydef->getDecl()->getName()), loc.clone());
       return mk_type_typedef(std::move(loc), std::move(id));
 #if LLVM_VERSION_MAJOR < 22
