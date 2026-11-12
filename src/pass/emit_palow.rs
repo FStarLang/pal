@@ -1255,10 +1255,13 @@ fn overlay_path(
 /// Whether a value of `ty` has part of an overlay union in it. Such a value
 /// is bytes, pointer provenance and all, so it is not something a program can
 /// hold, and there is no whole-value reader or writer for it: the fields are
-/// read and written one at a time.
+/// read and written one at a time. A tagged union is such a value when one of
+/// its members is.
 fn holds_overlay(tds: &Typedefs, ty: &Type) -> bool {
     match &peel(tds, ty).val {
-        TypeT::TypeRef(TypeRefKind::Union(n)) => is_overlay(tds, &n.val),
+        TypeT::TypeRef(TypeRefKind::Union(n)) => tds.unions.get(&*n.val).is_some_and(|ui| {
+            ui.overlay || ui.members.iter().any(|m| holds_overlay(tds, &m.ty))
+        }),
         TypeT::TypeRef(TypeRefKind::Struct(n)) => tds
             .structs
             .get(&*n.val)
@@ -9153,6 +9156,11 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
          {{\n  unfold {un}_pts_to_uninit a;\n  mem_stack_free a;\n}}\n\n",
         un = un
     );
+    // A union with an overlay union in a member is written member field by
+    // member field, like a struct with one; see `holds_overlay`.
+    if ui.members.iter().any(|m| holds_overlay(tds, &m.ty)) {
+        return c;
+    }
     // Storing a whole union value is the one operation that has to know which
     // member is live, and the value is where that is written down. The match
     // is on the *value*, not on memory, so nothing here reads a tag that C
