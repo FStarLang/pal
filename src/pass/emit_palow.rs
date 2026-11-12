@@ -3442,7 +3442,7 @@ impl<'a> Spec<'a> {
     /// `p - q` between two pointers into the same array parameter: the
     /// number of elements between them, which is what C means by it.
     fn ptr_diff(&self, e: &Expr, w: When) -> Option<Result<String, String>> {
-        let ExprT::BinOp(BinOp::Sub, l, r) = &strip_vattr(e).val else {
+        let ExprT::BinOp(BinOp::Sub, l, r) = &keeps_diff(self.tds, e).val else {
             return None;
         };
         let lt = self.ty_of(l).ok()?;
@@ -3471,7 +3471,7 @@ impl<'a> Spec<'a> {
     }
 
     fn has_ptr_diff(&self, e: &Expr) -> bool {
-        has_ptr_diff(e, &|x| {
+        has_ptr_diff(self.tds, e, &|x| {
             self.ty_of(x)
                 .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
         })
@@ -4036,6 +4036,16 @@ impl<'a> Spec<'a> {
         match &e.val {
             ExprT::Old(inner) => self.value(inner, When::Old),
             ExprT::Cast(..) if let Some(c) = self.cast_bits(e) => self.value(&c, w),
+            // A conversion that can change a distance's value -- narrower, or
+            // unsigned -- would need the distance as a machine value, which a
+            // contract does not have.
+            ExprT::Cast(inner, to)
+                if !keeps_diff_ty(self.tds, to)
+                    && !matches!(self.tds.resolve(to).val, TypeT::SpecNat)
+                    && self.ptr_diff(inner, w).is_some() =>
+            {
+                Err("a conversion of a pointer distance that can change its value".to_string())
+            }
             ExprT::Cast(inner, to) => {
                 let to = self.tds.resolve(to);
                 match &to.val {
@@ -18203,7 +18213,7 @@ impl<'a> Body<'a> {
     }
 
     fn has_ptr_diff(&self, e: &Expr) -> bool {
-        has_ptr_diff(e, &|x| {
+        has_ptr_diff(self.tds, e, &|x| {
             self.ty_of(x)
                 .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
         })
@@ -18221,7 +18231,7 @@ impl<'a> Body<'a> {
     /// `p - q` in an assertion, between pointers into one array parameter:
     /// the number of elements between them, as in a contract.
     fn pos_diff(&mut self, e: &Expr) -> Option<Result<String, String>> {
-        let ExprT::BinOp(BinOp::Sub, l, r) = &strip_vattr(e).val else {
+        let ExprT::BinOp(BinOp::Sub, l, r) = &keeps_diff(self.tds, e).val else {
             return None;
         };
         let is_ptr = |x: &Expr| {
@@ -25198,14 +25208,41 @@ fn ptr_elem_size(tds: &Typedefs, ty: &Type) -> Option<u64> {
 /// `p - q`, or arithmetic and conversions of one. Such a distance is an
 /// element count, and a specification reads it, and everything it is
 /// combined with, as a mathematical integer.
-fn has_ptr_diff(e: &Expr, is_ptr: &dyn Fn(&Expr) -> bool) -> bool {
+///
+/// Only a conversion that keeps every distance's value is looked through:
+/// to `ptrdiff_t`, to a signed type at least as wide, or to `_specint`.
+/// Under a narrowing or unsigned one, `(uint8_t)(p - a)`, the distance is a
+/// machine value like any other and the conversion has to be translated.
+fn has_ptr_diff(tds: &Typedefs, e: &Expr, is_ptr: &dyn Fn(&Expr) -> bool) -> bool {
     match &strip_vattr(e).val {
         ExprT::BinOp(BinOp::Sub, l, r) if is_ptr(l) && is_ptr(r) => true,
         ExprT::BinOp(BinOp::Add | BinOp::Sub | BinOp::Mul, l, r) => {
-            has_ptr_diff(l, is_ptr) || has_ptr_diff(r, is_ptr)
+            has_ptr_diff(tds, l, is_ptr) || has_ptr_diff(tds, r, is_ptr)
         }
-        ExprT::UnOp(UnOp::Neg, i) | ExprT::Old(i) | ExprT::Cast(i, _) => has_ptr_diff(i, is_ptr),
+        ExprT::UnOp(UnOp::Neg, i) | ExprT::Old(i) => has_ptr_diff(tds, i, is_ptr),
+        ExprT::Cast(i, to) if keeps_diff_ty(tds, to) => has_ptr_diff(tds, i, is_ptr),
         _ => false,
+    }
+}
+
+/// Whether converting a pointer distance to `to` keeps its value.
+fn keeps_diff_ty(tds: &Typedefs, to: &Type) -> bool {
+    matches!(
+        tds.resolve(to).val,
+        TypeT::PtrdiffT
+            | TypeT::SpecInt
+            | TypeT::Int {
+                signed: true,
+                width: 64..
+            }
+    )
+}
+
+/// `e` without the value-keeping conversions (see `has_ptr_diff`) around it.
+fn keeps_diff<'a>(tds: &Typedefs, e: &'a Expr) -> &'a Expr {
+    match &strip_vattr(e).val {
+        ExprT::Cast(i, to) if keeps_diff_ty(tds, to) => keeps_diff(tds, i),
+        _ => strip_vattr(e),
     }
 }
 
