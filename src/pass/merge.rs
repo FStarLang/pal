@@ -613,9 +613,10 @@ fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
     match &ty.val {
         // See the doc comment: `core_ref` imposes no emission-order dependency.
         TypeT::Pointer(_, PointerKind::Core) => {}
-        TypeT::Pointer(inner, _) | TypeT::FixedArray(inner, _) | TypeT::Plain(inner) => {
-            collect_type_refs(inner, out)
-        }
+        TypeT::Pointer(inner, _)
+        | TypeT::FixedArray(inner, _)
+        | TypeT::FlexArray(inner)
+        | TypeT::Plain(inner) => collect_type_refs(inner, out),
         TypeT::Refine(inner, _)
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
