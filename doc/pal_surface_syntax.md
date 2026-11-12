@@ -136,7 +136,7 @@ Beyond ownership, the user typically also wants to constrain values. PAL provide
 - `_preserves_value(x)` = `_ensures(x == _old(x))`.
 - `_invariant(p)` / `_ensures(p)` on a loop — see below.
 - `_decreases(p)` — termination measure on a `_rec` function (required there; not a loop annotation).
-- `_assert(p)` — verification assertion inside a function body. It may quantify over array contents (`_exists(size_t m, m < c._length && c[m] == 0)`) and read through walked pointers (`*s`); those are read at their current values, as in an `_invariant` (`test/assert_quantified_array`).
+- `_assert(p)` — verification assertion inside a function body. It may quantify over array contents (`_exists(size_t m, m < c._length && c[m] == 0)`) and read through walked pointers (`*s`); those are read at their current values, as in an `_invariant` (`test/assert_quantified_array`). `_old(d[k])` there is the array's element on entry, as in an `_invariant`.
 
 Inside any of these predicates the following spec-only constructs are available:
 
@@ -218,6 +218,7 @@ In a contract (an `_invariant` especially), for pointers walked through the same
 - Anything combined with a position is mathematical too: `(l - _old(l)) + n == _old(n)`, `l - _old(l) == _old(n) - n` and `_forall(size_t k, k < s - a ==> ...)` compare numbers, not `ptrdiff_t` values, and a `_exists(size_t i, ...)` whose witness is where a pointer stopped needs no hint.
 - `p[k]`, `*p` and `p._length` are relative to where `p` points: `p._length` is the number of elements left. `_old(p)[k]` is the array at entry.
 - A walked pointer the loop does not move (`a` above) keeps its value; a `const` array's contents are its entry contents.
+- A local that copies an array parameter before the parameter moves and is never reassigned (`wchar_t *a = d;`) is the array's base for the whole body, and `a[k]` is the same term as the contract's `d[k]`: a quantified `_assert` or `_invariant` through `a` matches an `_ensures` that says it about `d` (`test/array_walk_base`).
 
 `*(unsigned char *)p` on an array of `char` is the element converted to `unsigned char`, and so is `*l` where `const unsigned char *l = (void *)_l` walks a `char` array (musl's `strncmp`); writes through such a pointer are refused. In a contract `l - _l` between the two signednesses is a position difference too. A subscript is a `size_t`, so read behind a walked pointer with `*(p - 1)`, not `p[-1]`. `test/array_pointer_walk` has `wcslen`, `strcmp`, `memchr`, `memcpy` and a backward walk.
 

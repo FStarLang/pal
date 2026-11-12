@@ -7234,3 +7234,32 @@ Limitations:
       array to a pointer to its own element type, under a subscript -- is
       `p[k]`, and a `void *` compared with an array is compared as a
       pointer (`test/array_void_bytes`).
+60. **A copy of an array's base is the base.** In musl's `wcsncat`,
+    `wchar_t *a = d;` is taken before `d` moves, and the body's `a[k]` was
+    `Seq.index xs (walk_idx 4 var_d tmp + v k)` -- `tmp` the value read from
+    `a`'s slot -- while the `_ensures`' `d[k]` is `Seq.index xs (v k)`. Even
+    once `walk_idx_self` made the offset `0`, `0 + v k` and `v k` are
+    different terms, so a quantified `_assert` equal to the postcondition
+    never E-matched it. Now:
+    - *Base copies* (`base_copies`): a top-level `T *a = d;` (or a
+      declaration followed directly by that assignment), with `d` an
+      `_array` parameter not yet moved, declared or addressed, and `a`
+      declared once, never reassigned and not addressed, is the base for the
+      whole body. Functions with labels or `goto` have none. The frames of
+      loop invariants and quantified asserts state its slot as
+      `ptr_pts_to loc_a 1.0R var_d` rather than binding a `tmp_loop_ptr`, so
+      `a` is `var_d` there; Pulse checks that equation at every frame, so a
+      wrong analysis fails to verify rather than being unsound.
+    - *Positions* (`walk_pos`, `pos_op`): a pointer that is syntactically
+      the base has position `0`, and `0 + n`, `p + 0` and `p - 0` are not
+      written, in contracts and in bodies (`ptr_pos`, `ptr_diff`,
+      `pointee_at_in`, `length_of`, `pos_diff`, `body_ptr_pos`). So `a[k]`
+      is `Seq.index xs (v k)`, `d - a` is `walk_idx 4 var_d inv_d`, and
+      `a._length` is `Seq.length xs`.
+      Its definedness guard is the contract's `v k < Seq.length xs`, without
+      the `0 <=` a walked position needs.
+    - *`_old` in `_assert`.* A quantified `_assert` that the body cannot
+      translate falls back to the frame reading, but one with an `_old` was
+      refused outright; now only an `_old` naming a parameter a local
+      shadows is, so `_old(d[k])` (the entry element) works as in an
+      `_invariant` (`test/array_walk_base`).
