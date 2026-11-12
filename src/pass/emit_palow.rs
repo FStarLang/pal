@@ -5722,7 +5722,11 @@ fn emit_fn(
     // is the whole point of a flexible array member -- so they have to be in
     // scope both as terms and as types, and there is no function whose
     // environment could have put them there.
-    let with_this = |base: &str,
+    // `this_own` is the ownership record of a `this` that is an embedded
+    // struct, so that a clause about what it owns (`this.arr._length`) reads
+    // the sequence from the container's record.
+    let with_this = |this_own: Option<&str>,
+                     base: &str,
                      this_value: Option<(&str, Option<&str>, bool)>,
                      ty: &Rc<Type>,
                      p: &Rc<Expr>,
@@ -5736,6 +5740,10 @@ fn emit_fn(
         let mut arrays = spec.arrays.clone();
         let mut olens = spec.olens.clone();
         let mut locals = HashMap::new();
+        let mut owns = spec.owns.clone();
+        if let (Some(o), Some((v, _, _))) = (this_own, this_value) {
+            owns.insert(v.to_string(), (Some(o.to_string()), Some(o.to_string())));
+        }
         // A refinement read against the *storage* rather than the value --
         // which is the only reading an `_out` parameter has on the way in --
         // can still ask how much storage there is. `this._length` is then the
@@ -5843,7 +5851,7 @@ fn emit_fn(
             olds: spec.olds.clone(),
             arrays,
             olens,
-            owns: spec.owns.clone(),
+            owns,
             addrs: spec.addrs.clone(),
             guarded: spec.guarded.clone(),
             guards: RefCell::new(Vec::new()),
@@ -5869,6 +5877,7 @@ fn emit_fn(
                          as_value: bool,
                          siblings: &[(String, String, Rc<Type>)]| {
         with_this(
+            None,
             base,
             this_value,
             ty,
@@ -5914,7 +5923,12 @@ fn emit_fn(
                       via: bool,
                       w: When,
                       both: bool|
-     -> Option<(String, Option<String>, Vec<(String, String, Rc<Type>)>)> {
+     -> Option<(
+        String,
+        Option<String>,
+        Option<String>,
+        Vec<(String, String, Rc<Type>)>,
+    )> {
         let mut this = if via {
             let (pre, post) = spec
                 .pointees
@@ -5948,9 +5962,21 @@ fn emit_fn(
         let own = if flex_elem(tds, fty).is_some() {
             Some(format!("({}).fld_{}", this, fname))
         } else if matches!(extent(tds, fty), Some(Extent::Array)) {
-            container_own.map(|o| format!("({}).own_{}", o, fname))
+            container_own.as_ref().map(|o| format!("({}).own_{}", o, fname))
         } else {
             None
+        };
+        // An embedded struct's ownership is a component of its container's
+        // record, and its declaration's `_refine` may be about it.
+        let nested_own = match &peel(tds, fty).val {
+            TypeT::TypeRef(TypeRefKind::Struct(n))
+                if !is_plain(tds, fty)
+                    && !is_plain_chain(fty)
+                    && tds.structs.get(&*n.val).is_some_and(|si| !si.own.is_empty()) =>
+            {
+                container_own.as_ref().map(|o| format!("({}).own_{}", o, fname))
+            }
+            _ => None,
         };
         let siblings = tds
             .structs
@@ -5969,7 +5995,7 @@ fn emit_fn(
                     .collect()
             })
             .unwrap_or_default();
-        Some((format!("({}).fld_{}", this, fname), own, siblings))
+        Some((format!("({}).fld_{}", this, fname), own, nested_own, siblings))
     };
     let refine_props = |w: When| -> Result<Vec<String>, String> {
         if let Some(why) = &refine_err {
@@ -6051,7 +6077,7 @@ fn emit_fn(
                     t
                 }
                 None => {
-                    let t = with_this(base, None, ty, p, w, false, None, &[], &|sp: &Spec, w| {
+                    let t = with_this(None, base, None, ty, p, w, false, None, &[], &|sp: &Spec, w| {
                         sp.inline_pulse(code, w)
                     })?;
                     // A spliced ownership refinement on a function pointer
@@ -6114,6 +6140,7 @@ fn emit_fn(
             }
             let pure_guarded = null_wrap.get(base).filter(|_| !refine_states_own(tds, p));
             let t = with_this(
+            None,
                 base,
                 Some((this, None, false)),
                 ty,
@@ -6144,10 +6171,12 @@ fn emit_fn(
             // struct is consumed.
             let both =
                 owns && !*via && spec.pointees.get(base).is_none() && !consumed.contains(base);
-            let Some((this, own, sibs)) = field_this(base, field, *via, w, both) else {
+            let Some((this, own, nested_own, sibs)) = field_this(base, field, *via, w, both)
+            else {
                 continue;
             };
             let t = with_this(
+                nested_own.as_deref(),
                 base,
                 Some((&this, own.as_deref(), false)),
                 &field.ty,
@@ -6299,6 +6328,7 @@ fn emit_fn(
         let wrap = |t: String| t;
         let how = |sp: &Spec, w: When| sp.refinement(p, w);
         match with_this(
+            None,
             base,
             None,
             ty,
@@ -6338,6 +6368,7 @@ fn emit_fn(
             continue;
         }
         match with_this(
+            None,
             base,
             None,
             ty,
@@ -6378,6 +6409,7 @@ fn emit_fn(
     for p in &ret_slprops {
         let code = slprop_refine(tds, p).unwrap();
         match with_this(
+            None,
             "return",
             Some((&ret_name, None, true)),
             &decl.ret_type,
@@ -6397,6 +6429,7 @@ fn emit_fn(
     for (_, ty, ident, vty, binder, fty, p) in &ret_valued {
         let how = |sp: &Spec, w: When| sp.refinement(p, w);
         match with_this(
+            None,
             "return",
             Some((&ret_name, None, true)),
             ty,
@@ -9488,6 +9521,17 @@ fn has_pure_refine(tds: &Typedefs, ty: &Type) -> bool {
     }
 }
 
+/// Whether a field is an embedded struct written at a bare type name, so that
+/// every refinement it has is its type's declared invariant. Every contract
+/// that holds the container states that at the field, as it would for a
+/// parameter of the type (see `field_refines` in `emit_fn`), so it is no more
+/// dropped here than it is for the type itself.
+fn embedded_decl_refine(tds: &Typedefs, ty: &Type) -> bool {
+    matches!(ty.val, TypeT::TypeRef(_))
+        && matches!(peel(tds, ty).val, TypeT::TypeRef(TypeRefKind::Struct(_)))
+        && !is_plain(tds, ty)
+}
+
 fn own_kind(tds: &Typedefs, ty: &Type) -> bool {
     extent(tds, ty) == Some(Extent::Array) && flex_elem(tds, ty).is_none()
 }
@@ -9533,6 +9577,7 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             && f.inv.is_none()
             && si.inv.is_none()
             && has_pure_refine(tds, &f.ty)
+            && !embedded_decl_refine(tds, &f.ty)
         {
             c += &format!(
                 "(* contract dropped: the `_refine` on field `{}` is not a \
