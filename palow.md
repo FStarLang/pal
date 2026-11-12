@@ -5755,8 +5755,9 @@ Limitations:
    needs it, conjoined to its own left: `p /\ q` types `q` with `p` assumed,
    which is precisely the scope the application was missing. The clause is
    then a stronger statement than C's and provable from the `_requires` that
-   motivated it -- and `size_t`, whose F\* operations are the checked ones,
-   owes exactly the same thing.
+   motivated it. (`size_t` once owed the same for `+`, `-` and `*`, its F\*
+   operations being the checked ones; it now wraps as C's unsigned arithmetic
+   does -- see item 53 -- and owes only the shift and division guards.)
 
    A cast from a specification type reads as the number it already is. PAL
    writes `arr[(size_t) ((_specint) (len - j) - 1)]` when the author wrote
@@ -6992,3 +6993,39 @@ Limitations:
     `test/core_ref_out_cell_bad` is the refusal of a cast claiming another
     Palow type (`(uint32_t *)&int32_local`, `(char **)&int_local`) and of
     a local array's address.
+
+53. **`size_t` is an unsigned integer type.** `+`, `-` and `*` on `size_t`
+    emitted `SizeT.add`/`sub`/`mul`, which are checked, so C's wrapping was a
+    proof obligation; and `~`, `&`, `|`, `^`, `<<` and `>>` were refused
+    outright, `FStar.SizeT` having no such operations. musl's word-at-a-time
+    string routines are built on `HASZERO(x) = ((x) - ONES) & ~(x) & HIGHS`
+    over `size_t`, which wraps by design. `size_t` now goes through
+    `Pulse.Lib.C.SizeT`, the analogue of `Pulse.Lib.C.UInt64` at the
+    target's abstract width `8 * Target.ptr_bytes`: the arithmetic wraps
+    modulo `Target.addr_limit` with a postcondition that is exact when the
+    result fits, so code that never wraps reasons as before; `~x` is stated
+    as `addr_limit - 1 - x`; `&` and `|` carry their bounds against the
+    operands as well as their `FStar.UInt` meaning; and the shifts owe a
+    count below the width, as for the fixed-width types. Since the width is
+    abstract, a concrete bitwise result such as `12 & 6 == 4` is not
+    computed; what follows from the bounds is. `test/sizet_wrap_bitwise`
+    covers `HASZERO`, wrapping and exact arithmetic, the bitwise bounds and
+    the shifts.
+
+    The wrapping applies in contracts too: `_requires(i + n <= len)` over
+    `size_t` operands is `add_wrap i n <= len`, which a wrapped sum satisfies,
+    so it no longer rules out overflow the way the checked `SizeT.add` did.
+    A contract that means the mathematical bound must say so, e.g.
+    `_requires(n <= len && i <= len - n)`. (An operand that is an integer
+    literal still makes the contract arithmetic mathematical.)
+
+    A shift count wider than 32 bits -- a `size_t` or a 64-bit integer --
+    is narrowed to the `UInt32.t` that F*'s shifts take by the checked
+    `UInt32.uint_to_t (M.v s)`, and the definedness obligation is stated of
+    `M.v s` itself. Elaboration casts every count to `uint32_t`, and that
+    cast truncates: a count of 2^32 used to become 0, so the shift looked
+    defined and `a >> s` verified as `a` (this held for `uint64_t` before
+    `size_t` had shifts). `test/sizet_shift_count_bad` and
+    `test/u64_shift_count_bad` are the regressions. `mul_wrap` and
+    `shift_left` now both state their result as `% Target.addr_limit` of the
+    product, so `y <<= 1` is provably `y * two` when `two == 2`.

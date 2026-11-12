@@ -3525,19 +3525,41 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// The count of a shift, narrowed to `UInt32.t` without truncating (see
+    /// `wide_shift_count`), and the obligation that keeps it in range.
+    fn shift_count(&self, r: &Expr, w: When) -> Result<(String, Option<String>), String> {
+        match wide_shift_count(self.tds, |x| self.ty_of(x).ok(), r) {
+            Some((inner, m)) => {
+                let v = self.value(inner, w)?;
+                Ok((
+                    format!("(FStar.UInt32.uint_to_t ({}.v {}))", m, v),
+                    Some(format!("0 <= {m}.v {v} /\\ {m}.v {v}", m = m, v = v)),
+                ))
+            }
+            None => Ok((self.value(r, w)?, None)),
+        }
+    }
+
     /// What has to hold for a partial machine operator to be defined: a shift
     /// count below the width, and no overflow for signed arithmetic. These are
     /// C's own rules, so stating them costs the contract nothing it did not
     /// already owe.
     fn definedness(&self, op: BinOp, ty: &Type, l: &Expr, r: &Expr, w: When) -> Option<String> {
-        // `size_t` is unsigned and its F* operations are the checked ones, so
-        // what it owes is the same non-overflow C already demands of it.
+        // `size_t` is unsigned, so its arithmetic wraps and owes nothing; a
+        // shift owes a count below its width, and a division a divisor.
         if matches!(peel(self.tds, ty).val, TypeT::SizeT) {
-            let (a, b) = (self.value(l, w).ok()?, self.value(r, w).ok()?);
             return match op {
-                BinOp::Add => Some(format!("SizeT.fits (SizeT.v {} + SizeT.v {})", a, b)),
-                BinOp::Sub => Some(format!("SizeT.v {} >= SizeT.v {}", a, b)),
-                BinOp::Mul => Some(format!("SizeT.fits (SizeT.v {} * SizeT.v {})", a, b)),
+                BinOp::Shl | BinOp::Shr => {
+                    let bound = match self.shift_count(r, w).ok()? {
+                        (_, Some(g)) => g,
+                        (c, None) => format!("UInt32.v {}", c),
+                    };
+                    Some(format!(
+                        "{} < 8 * Pulse.Lib.C.Palow.Target.ptr_bytes",
+                        bound
+                    ))
+                }
+                BinOp::Div | BinOp::Mod => Some(format!("SizeT.v {} <> 0", self.value(r, w).ok()?)),
                 _ => None,
             };
         }
@@ -3557,13 +3579,17 @@ impl<'a> Spec<'a> {
                 else {
                     return None;
                 };
-                let mut g = format!(
-                    "{}Int{}.v {} < {}",
-                    if rs { "" } else { "U" },
-                    rw,
-                    self.value(r, w).ok()?,
-                    width
-                );
+                let (count, wide) = self.shift_count(r, w).ok()?;
+                let mut g = match wide {
+                    Some(b) => format!("{} < {}", b, width),
+                    None => format!(
+                        "{}Int{}.v {} < {}",
+                        if rs { "" } else { "U" },
+                        rw,
+                        count,
+                        width
+                    ),
+                };
                 // A shift of a negative signed value is undefined in C, and
                 // F* refuses it too; so is a left shift whose result does not
                 // fit.
@@ -3578,7 +3604,7 @@ impl<'a> Spec<'a> {
                             a,
                             if rs { "" } else { "U" },
                             rw,
-                            self.value(r, w).ok()?,
+                            count,
                             width
                         );
                     }
@@ -4218,12 +4244,12 @@ impl<'a> Spec<'a> {
                             binop(self.tds, *op, &ty, true)?
                         }
                     };
-                    return Ok(format!(
-                        "({} {} {})",
-                        self.value(l, w)?,
-                        o,
+                    let rv = if matches!(op, BinOp::Shl | BinOp::Shr) {
+                        self.shift_count(r, w)?.0
+                    } else {
                         self.value(r, w)?
-                    ));
+                    };
+                    return Ok(format!("({} {} {})", self.value(l, w)?, o, rv));
                 }
                 let o = match op {
                     BinOp::Add => "+",
@@ -18887,7 +18913,15 @@ impl<'a> Body<'a> {
                     self.lines.push("};".to_string());
                     return Ok(t);
                 }
-                let b = self.rvalue(r)?;
+                let b = match matches!(op, BinOp::Shl | BinOp::Shr)
+                    .then(|| wide_shift_count(self.tds, |x| self.ty_of(x).ok(), r))
+                    .flatten()
+                {
+                    Some((inner, m)) => {
+                        format!("(FStar.UInt32.uint_to_t ({}.v {}))", m, self.rvalue(inner)?)
+                    }
+                    None => self.rvalue(r)?,
+                };
                 Ok(format!("({} {} {})", a, opstr, b))
             }
             // `x++` is a read, an add and a write. The old value has to be
@@ -24364,9 +24398,35 @@ fn float_literal(tds: &Typedefs, text: &str, ty: &Type) -> Result<String, String
 /// for a signed type, `MAX - a` for an unsigned one. Neither can overflow,
 /// and unlike F*'s `lognot` the solver can reason about either -- including
 /// through the narrowing cast that `(uint8_t)~x` puts around a promoted `~`.
-fn bitnot(tds: &Typedefs, ty: &Type, a: &str) -> Option<String> {
-    let TypeT::Int { signed, width } = peel(tds, ty).val else {
+/// A shift count wider than the `UInt32.t` F*'s shifts take: elab casts it
+/// to `uint32_t`, and that cast would truncate -- a count of 2^32 would
+/// become 0 and its shift look defined. Returns the uncast count and the F*
+/// module whose `v` reads it, so the count can be narrowed by the checked
+/// `UInt32.uint_to_t` instead, which owes `0 <= v < 2^32`.
+fn wide_shift_count<'e>(
+    tds: &Typedefs,
+    ty_of: impl Fn(&Expr) -> Option<Rc<Type>>,
+    r: &'e Expr,
+) -> Option<(&'e Expr, String)> {
+    let ExprT::Cast(inner, _) = &r.val else {
         return None;
+    };
+    let ty = ty_of(inner)?;
+    let m = match &peel(tds, &ty).val {
+        TypeT::SizeT => "SizeT".to_string(),
+        TypeT::Int { signed, width } if *width > 32 => {
+            format!("{}Int{}", if *signed { "" } else { "U" }, width)
+        }
+        _ => return None,
+    };
+    Some((inner, m))
+}
+
+fn bitnot(tds: &Typedefs, ty: &Type, a: &str) -> Option<String> {
+    let (signed, width) = match peel(tds, ty).val {
+        TypeT::Int { signed, width } => (signed, width),
+        TypeT::SizeT => return Some(format!("(Pulse.Lib.C.SizeT.lognot {})", a)),
+        _ => return None,
     };
     let all = if signed {
         BigInt::from(-1)
@@ -24685,13 +24745,13 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
         BinOp::LEq => return Ok(format!("`{}.lte`", m)),
         // The bitwise operators are defined on the whole range at both
         // signednesses, so they need no obligation and no wrapping variant.
-        // `FStar.SizeT` does not have them, hence the guard.
+        // `FStar.SizeT` does not have them, so `size_t` gets its own.
         // C requires the shift count to be below the width, which PAL turns
         // into a proof obligation and the source discharges with a
         // `_requires`; a signed left shift additionally needs a non-negative
         // operand. Both come out of the contract, so an untranslated one has
         // to refuse rather than emit a failure about something else.
-        BinOp::Shl | BinOp::Shr if matches!(t.val, TypeT::Int { .. }) => {
+        BinOp::Shl | BinOp::Shr if matches!(t.val, TypeT::Int { .. } | TypeT::SizeT) => {
             if !signed_ok {
                 return Err(
                     "a shift, whose width obligation needs the untranslated `_requires`"
@@ -24700,7 +24760,11 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
             }
             return Ok(format!(
                 "`{}.shift_{}`",
-                m,
+                if matches!(t.val, TypeT::SizeT) {
+                    "Pulse.Lib.C.SizeT"
+                } else {
+                    m.as_str()
+                },
                 if matches!(op, BinOp::Shl) {
                     "left"
                 } else {
@@ -24708,10 +24772,16 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
                 }
             ));
         }
-        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor if matches!(t.val, TypeT::Int { .. }) => {
+        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            if matches!(t.val, TypeT::Int { .. } | TypeT::SizeT) =>
+        {
             return Ok(format!(
-                "`FStar.{}.log{}`",
-                m,
+                "`{}.log{}`",
+                if matches!(t.val, TypeT::SizeT) {
+                    "Pulse.Lib.C.SizeT".to_string()
+                } else {
+                    format!("FStar.{}", m)
+                },
                 match op {
                     BinOp::BitAnd => "and",
                     BinOp::BitOr => "or",
@@ -24728,12 +24798,15 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
     // `_requires` clause. When the contract did not translate, emitting it
     // would produce a failure that says nothing about the memory model, so it
     // is refused instead.
-    if let TypeT::Int {
-        signed: false,
-        width,
-    } = &t.val
-    {
-        let wrap = format!("Pulse.Lib.C.UInt{}", width);
+    let wrap = match &t.val {
+        TypeT::Int {
+            signed: false,
+            width,
+        } => Some(format!("Pulse.Lib.C.UInt{}", width)),
+        TypeT::SizeT => Some("Pulse.Lib.C.SizeT".to_string()),
+        _ => None,
+    };
+    if let Some(wrap) = wrap {
         // Division is partial at either signedness: by zero it is undefined.
         if matches!(op, BinOp::Div | BinOp::Mod) && !signed_ok {
             return Err(
