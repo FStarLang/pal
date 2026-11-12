@@ -3096,6 +3096,20 @@ impl<'a> Spec<'a> {
         {
             {
                 let ty = self.ty_of(l)?;
+                if self.has_ptr_diff(l) || self.has_ptr_diff(r) {
+                    let o = match op {
+                        BinOp::Eq => "==",
+                        BinOp::Lt => "<",
+                        BinOp::LEq => "<=",
+                        _ => return Err("an unsupported operator in a contract".to_string()),
+                    };
+                    return Ok(format!(
+                        "({} {} {})",
+                        self.pos_num(l, w)?,
+                        o,
+                        self.pos_num(r, w)?
+                    ));
+                }
                 if matches!(op, BinOp::Eq) {
                     // `_Bool` equality is equivalence of the two conditions,
                     // not equality of two values: one side is often a
@@ -3369,6 +3383,21 @@ impl<'a> Spec<'a> {
 
     fn pointee_at(&self, base: &Expr, idx: Option<&Expr>, w: When) -> Result<String, String> {
         self.pointee_at_in(base, idx, w, w)
+    }
+
+    fn has_ptr_diff(&self, e: &Expr) -> bool {
+        has_ptr_diff(e, &|x| {
+            self.ty_of(x)
+                .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
+        })
+    }
+
+    /// An operand next to a distance between pointers, as a number.
+    fn pos_num(&self, e: &Expr, w: When) -> Result<String, String> {
+        match ptrdiff_conv(self.tds, e, &|x| self.ty_of(x).ok()) {
+            Some(inner) => self.num(inner, w),
+            None => self.num(e, w),
+        }
     }
 
     /// `pointee_at` with the index read at `wi`: `_old(p)[k]` is the entry
@@ -3675,6 +3704,20 @@ impl<'a> Spec<'a> {
             return d;
         }
         let ty = self.ty_of(e)?;
+        // A distance between pointers is an element count, a mathematical
+        // integer, and so is anything computed from one: the `size_t` the
+        // elaborator converted to `ptrdiff_t` to meet it is read as the
+        // number it is, not through a machine conversion.
+        if let ExprT::BinOp(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), l, r) = &strip_vattr(e).val
+            && self.has_ptr_diff(e)
+        {
+            return Ok(format!(
+                "({} {} {})",
+                self.pos_num(l, w)?,
+                op.to_str(),
+                self.pos_num(r, w)?
+            ));
+        }
         // Signed arithmetic is undefined on overflow, so where a contract
         // measures it the source can only mean the mathematical result, and
         // the two agree on every program C defines. Saying it that way rather
@@ -17983,6 +18026,17 @@ impl<'a> Body<'a> {
                     return Ok(format!("({} {} {})", a, o, b));
                 }
                 let ty = self.ty_of(l)?;
+                if self.has_ptr_diff(l) || self.has_ptr_diff(r) {
+                    let o = match op {
+                        BinOp::Eq => "==",
+                        BinOp::Lt => "<",
+                        BinOp::LEq => "<=",
+                        _ => return Err("an unsupported operator in an assertion".to_string()),
+                    };
+                    let a = self.pos_num(l)?;
+                    let b = self.pos_num(r)?;
+                    return Ok(format!("({} {} {})", a, o, b));
+                }
                 if matches!(op, BinOp::Eq) {
                     if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
                         let a = self.prop(l)?;
@@ -18022,6 +18076,16 @@ impl<'a> Body<'a> {
 
     /// A specification expression inside a body, as a mathematical integer.
     fn num(&mut self, e: &Expr) -> Result<String, String> {
+        if let Some(d) = self.pos_diff(e) {
+            return d;
+        }
+        if let ExprT::BinOp(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), l, r) = &strip_vattr(e).val
+            && self.has_ptr_diff(e)
+        {
+            let a = self.pos_num(l)?;
+            let b = self.pos_num(r)?;
+            return Ok(format!("({} {} {})", a, op.to_str(), b));
+        }
         // `p._length` is how the source asks how long an array is. For a block
         // this body allocated the answer is the count it asked for -- the
         // sequence it was claimed at has exactly that length -- so the question
@@ -18081,6 +18145,107 @@ impl<'a> Body<'a> {
         match int_module(self.tds, &ty) {
             Some(m) => Ok(format!("({}.v {})", m, self.inline(e)?)),
             None => self.inline(e),
+        }
+    }
+
+    fn has_ptr_diff(&self, e: &Expr) -> bool {
+        has_ptr_diff(e, &|x| {
+            self.ty_of(x)
+                .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
+        })
+    }
+
+    /// An operand next to a distance between pointers, as a number.
+    fn pos_num(&mut self, e: &Expr) -> Result<String, String> {
+        let ty_of = |x: &Expr| self.ty_of(x).ok();
+        match ptrdiff_conv(self.tds, e, &ty_of) {
+            Some(inner) => self.num(inner),
+            None => self.num(e),
+        }
+    }
+
+    /// `p - q` in an assertion, between pointers into one array parameter:
+    /// the number of elements between them, as in a contract.
+    fn pos_diff(&mut self, e: &Expr) -> Option<Result<String, String>> {
+        let ExprT::BinOp(BinOp::Sub, l, r) = &strip_vattr(e).val else {
+            return None;
+        };
+        let is_ptr = |x: &Expr| {
+            self.ty_of(x)
+                .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
+        };
+        if !is_ptr(l) || !is_ptr(r) {
+            return None;
+        }
+        let (ol, pl) = match self.body_ptr_pos(l)? {
+            Ok(x) => x,
+            Err(e) => return Some(Err(e)),
+        };
+        let (or, pr) = match self.body_ptr_pos(r)? {
+            Ok(x) => x,
+            Err(e) => return Some(Err(e)),
+        };
+        if ol != or {
+            return Some(Err(
+                "an assertion that subtracts pointers into different arrays".to_string(),
+            ));
+        }
+        Some(Ok(format!("({} - {})", pl, pr)))
+    }
+
+    /// Where a pointer into an array parameter points, as an element index
+    /// from the array's base, and which array that is.
+    fn body_ptr_pos(&mut self, e: &Expr) -> Option<Result<(String, String), String>> {
+        match &strip_vattr(e).val {
+            ExprT::Old(inner) => {
+                let ExprT::Var(v) = &strip_vattr(inner).val else {
+                    return None;
+                };
+                let a = self.arrays.get(&*v.val)?;
+                (!a.maybe).then(|| Ok((v.val.to_string(), "0".to_string())))
+            }
+            ExprT::Var(v) => {
+                let owner = match self.walk_owner(&v.val) {
+                    Some(Ok(o)) => o,
+                    Some(Err(e)) => return Some(Err(e)),
+                    None if self.arrays.get(&*v.val).is_some_and(|a| !a.maybe) => v.val.to_string(),
+                    None => return None,
+                };
+                let (esize, addr) = {
+                    let a = &self.arrays[&owner];
+                    (a.esize.clone(), a.addr.clone())
+                };
+                Some(self.inline(e).map(|cur| {
+                    (
+                        owner,
+                        format!("(walk_idx (SizeT.v {}) {} {})", esize, addr, cur),
+                    )
+                }))
+            }
+            ExprT::BinOp(op @ (BinOp::Add | BinOp::Sub), l, r) => {
+                let rt = self.ty_of(r).ok()?;
+                if pointee(self.tds, peel(self.tds, &rt)).is_some() {
+                    return None;
+                }
+                let (owner, pos) = match self.body_ptr_pos(l)? {
+                    Ok(x) => x,
+                    Err(e) => return Some(Err(e)),
+                };
+                Some(
+                    self.num(r)
+                        .map(|n| (owner, format!("({} {} {})", pos, op.to_str(), n))),
+                )
+            }
+            ExprT::Cast(inner, to) => {
+                let it = self.ty_of(inner).ok()?;
+                let from = pointee(self.tds, peel(self.tds, &it))?;
+                let to = pointee(self.tds, peel(self.tds, to))?;
+                if palow_name(self.tds, from)? != palow_name(self.tds, to)? {
+                    return None;
+                }
+                self.body_ptr_pos(inner)
+            }
+            _ => None,
         }
     }
 
@@ -24936,6 +25101,42 @@ fn ptr_elem_size(tds: &Typedefs, ty: &Type) -> Option<u64> {
         return Some(1);
     }
     palow_sizeof(tds, &pt).filter(|n| *n > 0)
+}
+
+/// Whether a specification expression measures a distance between pointers:
+/// `p - q`, or arithmetic and conversions of one. Such a distance is an
+/// element count, and a specification reads it, and everything it is
+/// combined with, as a mathematical integer.
+fn has_ptr_diff(e: &Expr, is_ptr: &dyn Fn(&Expr) -> bool) -> bool {
+    match &strip_vattr(e).val {
+        ExprT::BinOp(BinOp::Sub, l, r) if is_ptr(l) && is_ptr(r) => true,
+        ExprT::BinOp(BinOp::Add | BinOp::Sub | BinOp::Mul, l, r) => {
+            has_ptr_diff(l, is_ptr) || has_ptr_diff(r, is_ptr)
+        }
+        ExprT::UnOp(UnOp::Neg, i) | ExprT::Old(i) | ExprT::Cast(i, _) => has_ptr_diff(i, is_ptr),
+        _ => false,
+    }
+}
+
+/// The integer under the conversion to `ptrdiff_t` the elaborator puts on
+/// a `size_t` or other integer that meets a pointer distance.
+fn ptrdiff_conv<'a>(
+    tds: &Typedefs,
+    e: &'a Expr,
+    ty_of: &dyn Fn(&Expr) -> Option<Rc<Type>>,
+) -> Option<&'a Expr> {
+    let ExprT::Cast(inner, to) = &strip_vattr(e).val else {
+        return None;
+    };
+    if !matches!(tds.resolve(to).val, TypeT::PtrdiffT) {
+        return None;
+    }
+    let it = ty_of(inner)?;
+    matches!(
+        tds.resolve(&it).val,
+        TypeT::Int { .. } | TypeT::SizeT | TypeT::Bool
+    )
+    .then_some(&**inner)
 }
 
 fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String, String> {

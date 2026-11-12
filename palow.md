@@ -7025,3 +7025,22 @@ Limitations:
     `wcslen`, `strcmp`, `memchr` and `memcpy` loops with functional
     specifications, a backward walk and offsets either side of a moved
     pointer; `test/array_pointer_walk_bad` is the refusals.
+
+54. **Positions next to integers.** A position (`p - q` between walked
+    pointers) is an `int`, but the elaborator types it `ptrdiff_t` and
+    converts the `size_t` it meets to `ptrdiff_t`, so `l - _old(l) ==
+    _old(n) - n` came out as an `Int64` conversion of a `SizeT` beside an
+    `int`, and `(l - _old(l)) + n` as signed machine arithmetic refused
+    for want of an overflow obligation. In a contract and in an `_assert`
+    alike, a comparison or `+`/`-`/`*` with a position anywhere inside it
+    is now mathematical, and an integer converted to `ptrdiff_t` beside one
+    is read as the number it is (`has_ptr_diff`, `ptrdiff_conv`). An
+    `_assert` reads a position as `walk_idx` of the pointer's current
+    value, as a contract does, rather than as `ptr_diff` divided by the
+    element size. A `_exists(size_t i, ...)` whose witness is a position --
+    the index where `wcscmp`'s loop stopped -- needs a `SizeT.t` term for
+    the solver to try, which an `int` position is not: `walk_size` is the
+    position as a `SizeT.t` where it is one, and `walk_size_v` puts it next
+    to every `walk_idx` the proof mentions. `test/array_pointer_walk` adds
+    musl's `wmemcmp`, `wcsncmp` and `wcscmp` and a `size_t`-bounded
+    `wcslen` invariant.

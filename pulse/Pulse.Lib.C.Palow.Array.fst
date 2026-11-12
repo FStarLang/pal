@@ -537,6 +537,22 @@ let walk_ok (esize: nat) (a q: ptr) : prop =
 let walk_idx (esize: nat) (a q: ptr) : GTot int =
   if esize > 0 then (addr_of q - addr_of a) / esize else 0
 
+(* The position as a `size_t`, wherever it is one. A contract that says
+   `_exists(size_t i, ...)` of where a walked pointer stopped needs a
+   `SizeT.t` the solver can offer as the witness, and the position itself is
+   only an `int`; mentioning the position puts this term next to it. *)
+let walk_size (esize: nat) (a q: ptr) : GTot SZ.t =
+  let i = walk_idx esize a q in
+  if FStar.IndefiniteDescription.strong_excluded_middle (0 <= i /\ SZ.fits i)
+  then SZ.uint_to_t i
+  else 0sz
+
+let walk_size_v (esize: nat) (a q: ptr)
+  : Lemma (0 <= walk_idx esize a q /\ SZ.fits (walk_idx esize a q) ==>
+           SZ.v (walk_size esize a q) == walk_idx esize a q)
+          [SMTPat (walk_idx esize a q)]
+  = ()
+
 let walk_addr (esize: nat) (a q: ptr) (i: nat)
   : Lemma (requires walk_ok esize a q)
           (ensures  addr_of q + esize * i == addr_of a + esize * (walk_idx esize a q + i))
