@@ -2508,25 +2508,84 @@ fn null_input(tds: &Typedefs, ty: &Type) -> Option<String> {
 /// refinement as a conjunct of its own beside the pointee's `_pts_to`, so an
 /// optional parameter's guard is two guards, and a call site that introduces
 /// or eliminates only the `_pts_to` one would leave the other unmatched (or
-/// matched against the wrong value).
+/// matched against the wrong value). Asked of the same walk `emit_fn_sig`
+/// states the contract from, so the two agree on which pointees those are.
 fn refined_pointee(tds: &Typedefs, ty: &Type) -> bool {
-    fn deep(tds: &Typedefs, ty: &Type, depth: usize) -> bool {
-        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
-            return false;
-        };
-        let name = n.val.to_string();
-        depth < 32
-            && (tds.refined_structs.contains_key(&name)
-                || tds.structs.get(&name).is_some_and(|si| {
-                    si.fields
-                        .iter()
-                        .any(|f| field_refined(tds, &f.ty) || deep(tds, &f.ty, depth + 1))
-                }))
-    }
     match &peel(tds, ty).val {
-        TypeT::Pointer(pt, _) => deep(tds, pt, 0),
+        TypeT::Pointer(pt, _) => {
+            !struct_refines(tds, pt).is_empty() || !field_refines(tds, pt).is_empty()
+        }
         _ => false,
     }
+}
+
+/// The clauses of the `_refine` on a struct declaration, for a value of
+/// that type (empty for any other type).
+fn struct_refines(tds: &Typedefs, ty: &Type) -> Vec<Rc<Expr>> {
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
+        return Vec::new();
+    };
+    tds.refined_structs
+        .get(&*n.val.to_string())
+        .and_then(|r| refinements(tds, r).ok())
+        .map(|(ps, _, _)| ps)
+        .unwrap_or_default()
+}
+
+// A `_refine` written on one *field* of a struct is an invariant of the
+// struct type just as a struct-level one is, and it means the same thing
+// wherever a value of that type is: `this` is the field. The generated
+// ownership cannot carry it -- it is built from representations and has no
+// hook for a clause -- so it is stated in the contract of every function
+// that holds such a struct, at whichever ends the struct itself is stated.
+fn field_refines(tds: &Typedefs, ty: &Type) -> Vec<FieldRefinement> {
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
+        return Vec::new();
+    };
+    let sname = n.val.to_string();
+    let Some(si) = tds.structs.get(&sname) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for f in &si.fields {
+        let Ok((mut ps, _, _)) = field_refinements(tds, &f.ty) else {
+            continue;
+        };
+        // An embedded struct carries its declaration's invariant just
+        // as a parameter of that type does. Do not follow pointers:
+        // storing an address is not ownership of the pointed-to object.
+        let nested = !is_plain(tds, &f.ty)
+            && !is_plain_chain(&f.ty)
+            && matches!(peel(tds, &f.ty).val, TypeT::TypeRef(TypeRefKind::Struct(_)));
+        if nested {
+            if let TypeT::TypeRef(TypeRefKind::Struct(child)) = &peel(tds, &f.ty).val
+                && let Some(r) = tds.refined_structs.get(&*child.val)
+                && let Ok((clauses, _, _)) = refinements(tds, r)
+            {
+                for cl in clauses {
+                    if !ps.iter().any(|p| Rc::ptr_eq(p, &cl)) {
+                        ps.push(cl);
+                    }
+                }
+            }
+        }
+        for cl in ps {
+            out.push(FieldRefinement {
+                parents: Vec::new(),
+                container: sname.clone(),
+                field: f.name.clone(),
+                ty: f.ty.clone(),
+                clause: cl,
+            });
+        }
+        if nested {
+            for mut child in field_refines(tds, &f.ty) {
+                child.parents.insert(0, f.name.clone());
+                out.push(child);
+            }
+        }
+    }
+    out
 }
 
 fn is_nullable(tds: &Typedefs, ty: &Type) -> bool {
@@ -4679,71 +4738,7 @@ fn emit_fn(
     // parameter's own refinements is what makes it reach the contract, and
     // binding `this` to the struct value is what makes it mean the same thing
     // it means in the declaration.
-    let struct_refines = |ty: &Type| -> Vec<Rc<Expr>> {
-        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
-            return Vec::new();
-        };
-        tds.refined_structs
-            .get(&*n.val.to_string())
-            .and_then(|r| refinements(tds, r).ok())
-            .map(|(ps, _, _)| ps)
-            .unwrap_or_default()
-    };
-    // A `_refine` written on one *field* of a struct is an invariant of the
-    // struct type just as a struct-level one is, and it means the same thing
-    // wherever a value of that type is: `this` is the field. The generated
-    // ownership cannot carry it -- it is built from representations and has no
-    // hook for a clause -- so it is stated in the contract of every function
-    // that holds such a struct, at whichever ends the struct itself is stated.
-    fn field_refines(tds: &Typedefs, ty: &Type) -> Vec<FieldRefinement> {
-        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
-            return Vec::new();
-        };
-        let sname = n.val.to_string();
-        let Some(si) = tds.structs.get(&sname) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for f in &si.fields {
-            let Ok((mut ps, _, _)) = field_refinements(tds, &f.ty) else {
-                continue;
-            };
-            // An embedded struct carries its declaration's invariant just
-            // as a parameter of that type does. Do not follow pointers:
-            // storing an address is not ownership of the pointed-to object.
-            let nested = !is_plain(tds, &f.ty)
-                && !is_plain_chain(&f.ty)
-                && matches!(peel(tds, &f.ty).val, TypeT::TypeRef(TypeRefKind::Struct(_)));
-            if nested {
-                if let TypeT::TypeRef(TypeRefKind::Struct(child)) = &peel(tds, &f.ty).val
-                    && let Some(r) = tds.refined_structs.get(&*child.val)
-                    && let Ok((clauses, _, _)) = refinements(tds, r)
-                {
-                    for cl in clauses {
-                        if !ps.iter().any(|p| Rc::ptr_eq(p, &cl)) {
-                            ps.push(cl);
-                        }
-                    }
-                }
-            }
-            for cl in ps {
-                out.push(FieldRefinement {
-                    parents: Vec::new(),
-                    container: sname.clone(),
-                    field: f.name.clone(),
-                    ty: f.ty.clone(),
-                    clause: cl,
-                });
-            }
-            if nested {
-                for mut child in field_refines(tds, &f.ty) {
-                    child.parents.insert(0, f.name.clone());
-                    out.push(child);
-                }
-            }
-        }
-        out
-    }
+    let struct_refines = |ty: &Type| struct_refines(tds, ty);
     // The `_own` predicate a value of this type carries, when its type is a
     // struct that has one.
     // `peel` and not `resolve`: the annotation that makes a struct interesting
