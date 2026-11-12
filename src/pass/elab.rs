@@ -1303,6 +1303,7 @@ impl<'a> Elaborator<'a> {
             is_rec: _,
             is_total: _,
             is_overread: _,
+            adopts_signature: _,
             decreases,
         }: &mut FnDecl,
     ) {

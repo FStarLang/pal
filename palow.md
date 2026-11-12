@@ -7129,3 +7129,54 @@ Limitations:
     `-` wraps (`sub_wrap`) it says only that the position is `_old(n) - n`
     modulo `2^64` and bounds nothing without `n <= _old(n)` beside it, which
     `l - _old(l) + n == _old(n)` implies on its own.
+
+57. **musl gaps: loop conditions, lent suffixes, spec asserts, aliases.**
+    A loop's condition is part of every iteration, so `frame` sees
+    `body; cond` when it collects what the loop writes: musl's
+    `while ((*d++ = *s++))` moves `d` and `s` in the condition alone, and
+    pinning them as unwritten made the invariant unprovable. The invariant
+    is still asserted where Pulse's `while` checks it, before each test of
+    the condition. `array_focus_at` now also returns its bound as a pure
+    fact, which the condition's read needs after the focus is closed.
+
+    An argument for an `_array` parameter that is a walked pointer, or
+    `base + i` of an unwalked array parameter (`lent_owner`), lends the
+    callee the suffix of the owner's array: `array_lend_at` splits
+    `array_pts_to a xs` at the walked pointer `q` into the prefix at `a`
+    and `Seq.slice xs (walk_idx a q) len` at `q`, which is what the
+    callee's `requires` asks for; `array_return_at` joins the prefix and
+    whatever the callee returned as `Seq.append`. The callee's
+    `forall (k: SizeT.t)` facts are about the suffix; `index_append_sizet`
+    rewrites `Seq.index (Seq.append xs ys) i` (`i >= length xs`) to an
+    index of `ys` at a `SizeT` term, so they instantiate at the caller's
+    `a[pos + k]`. Only one argument per array is lent in a call, and its
+    pointee must be the array's element type (`test/array_walk_lend_bad`).
+
+    `_assert` first tries the body-style translation; when that refuses
+    (memory read under a quantifier, `c._length`), `spec_assertion`
+    translates it like a one-off loop invariant through `frame` with an
+    empty body: the arrays it mentions are bound to their current values
+    with `with ... . assert (...)`, walked pointers by their current
+    value, and the assertion is a `pure` fact against those
+    (`test/assert_quantified_array`, from musl's `wcscspn`).
+
+    `__attribute__((__alias__("old")))` on a function of `old`'s type
+    declared in the same file (`aliasTarget` in `cpp/impl.cpp`) is no
+    longer refused. The alias is declared with the signature and contract
+    of `old`'s contract-carrying declaration; when only the alias has a
+    contract, `old` is also declared with it, marked `adopts_signature` so
+    that `merge` gives `old`'s definition that declaration's parameter
+    types (the `_array` annotations its contract relies on) rather than
+    reporting a type mismatch. Two differing contracts meet in `merge` as
+    differing redeclarations of the alias.
+
+    `size_t` `/` and `%` in a contract that cannot lean on the `_requires`
+    now state their non-zero divisor as a guard (`definedness`), as signed
+    arithmetic does, instead of refusing the function; so does
+    `(uintptr_t)w % sizeof(size_t)`, whose step lemma `uintptr_rem_step`
+    (`Pulse.Lib.C.Palow.Word`) is stated over the `SizeT.rem` it becomes.
+
+    Proof cost: the walk facts are arithmetic on addresses, and musl-sized
+    specifications push some queries past the default `--z3rlimit 40`:
+    `wcscpy` with its "rest of `d` unchanged" clause needs about 80 and
+    `wcsncpy` with it about 120. The tests leave that clause out.

@@ -598,6 +598,10 @@ ghost fn array_focus_at (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize
   ensures  pure (array_aligned (SZ.v esize) (SZ.v ealign) (q +! off))
   ensures  pure (SZ.fits (addr_of a + SZ.v esize * Seq.length xs) /\
                  addr_of a + SZ.v esize * Seq.length xs < T.addr_limit)
+  (* The bound is the refinement on `i`, restated as a fact: a loop
+     condition's inferred postcondition is typed without the invariant it was
+     proved from, and the element terms here need it. *)
+  ensures  pure (walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q + SZ.v i < Seq.length xs)
 {
   array_fits t_repr a esize ealign;
   let w : erased nat = walk_idx (SZ.v esize) a q;
@@ -673,6 +677,25 @@ let walk_sub (q: ptr) (n: SZ.t { SZ.v n <= addr_of q })
           [SMTPat (q -! n)]
   = addr_of_sub q n
 
+(* The two facts every step of a loop asks for, stated where the solver
+   meets them rather than rederived from `addr_of` and division each time. *)
+let walk_idx_base (esize: nat) (a: ptr)
+  : Lemma (walk_idx esize a a == 0)
+          [SMTPat (walk_idx esize a a)]
+  = ()
+
+let walk_step (esize: pos) (a q: ptr) (n: SZ.t)
+  : Lemma (requires walk_ok esize a q /\ SZ.v n % esize == 0 /\
+                    addr_of q + SZ.v n < T.addr_limit)
+          (ensures  walk_ok esize a (q +! n) /\
+                    walk_idx esize a (q +! n) == walk_idx esize a q + SZ.v n / esize)
+          [SMTPat (walk_idx esize a (q +! n))]
+  = addr_of_add_nowrap q n;
+    let k = SZ.v n / esize in
+    M.euclidean_division_definition (SZ.v n) esize;
+    M.lemma_div_plus (addr_of q - addr_of a) k esize;
+    M.lemma_mod_plus (addr_of q - addr_of a) k esize
+
 (* A walked pointer is the base plus its byte offset, which is how a contract
    that names a position in the array as `a + i` recognises it. *)
 let walk_is_add (esize: nat) (a q: ptr)
@@ -726,6 +749,80 @@ let walk_is_elem (esize: nat) (a q: ptr)
       addr_of_add_nowrap a (SZ.uint_to_t d);
       ptr_ext (a +! SZ.uint_to_t d) q
     end
+
+(* `a + i` in code is a walk through `a`, at `i`, as long as it does not wrap:
+   which is what passing it to a callee for an array argument asks. *)
+let walk_ok_add (esize: pos) (a: ptr) (off: SZ.t)
+  : Lemma (requires addr_of a + SZ.v off < T.addr_limit /\ SZ.v off % esize == 0)
+          (ensures  walk_ok esize a (a +! off) /\ walk_idx esize a (a +! off) == SZ.v off / esize)
+          [SMTPat (walk_ok esize a (a +! off))]
+  = addr_of_add_nowrap a off
+
+(* ---------------------------------------------------------------------------
+   Lending the rest of an array
+
+   A walked pointer `q`, or `a + i`, handed to a callee whose parameter is an
+   `_array` is the suffix of `a` from `q`'s position: the callee's `_length` is
+   what is left. The caller keeps the prefix, and after the call the two are
+   one array again, whatever the callee left in its part.
+   --------------------------------------------------------------------------- *)
+
+ghost fn array_lend_at (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                       (#p: perm) (#xs: Seq.seq t)
+                       (q: ptr { walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q <= Seq.length xs })
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
+  ensures  array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p
+                        (Seq.slice xs 0 (walk_idx (SZ.v esize) a q))
+  ensures  array_pts_to t_repr (SZ.v esize) (SZ.v ealign) q p
+                        (Seq.slice xs (walk_idx (SZ.v esize) a q) (Seq.length xs))
+  ensures  pure (walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q <= Seq.length xs)
+{
+  array_fits t_repr a esize ealign;
+  let w : erased nat = walk_idx (SZ.v esize) a q;
+  M.lemma_mult_le_left (SZ.v esize) w (Seq.length xs);
+  M.lemma_mult_le_right w 1 (SZ.v esize);
+  SZ.fits_lte (SZ.v esize * w) (addr_of a + SZ.v esize * Seq.length xs);
+  SZ.fits_lte w (SZ.v esize * w);
+  let n = SZ.uint_to_t w;
+  let off = SZ.uint_to_t (SZ.v esize * w);
+  M.euclidean_division_definition (addr_of q - addr_of a) (SZ.v esize);
+  addr_of_add_nowrap a off;
+  ptr_ext (a +! off) q;
+  array_split t_repr a esize ealign n off;
+  rewrite each (a +! off) as q;
+}
+
+ghost fn array_return_at (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                         (q: ptr) (#p: perm) (#xs #ys: Seq.seq t)
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) q p ys
+  requires pure (walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q == Seq.length xs)
+  ensures  array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p (Seq.append xs ys)
+{
+  array_fits t_repr a esize ealign;
+  let w : erased nat = walk_idx (SZ.v esize) a q;
+  array_fits t_repr q esize ealign;
+  M.euclidean_division_definition (addr_of q - addr_of a) (SZ.v esize);
+  SZ.fits_lte (addr_of q - addr_of a) (addr_of q + SZ.v esize * Seq.length ys);
+  let off = SZ.uint_to_t (addr_of q - addr_of a);
+  addr_of_add_nowrap a off;
+  ptr_ext (a +! off) q;
+  rewrite each q as (a +! off);
+  array_join t_repr a esize ealign off;
+}
+
+(* After `array_return_at` the caller's array is `Seq.append` of what it kept
+   and what the callee left, and what it knows about the callee's part was
+   said by the callee, about `p[k]` for a `size_t k`: a quantifier over
+   `SizeT.t` that only a `SizeT.t` term can instantiate. The caller's own
+   `a[o + k]` is at a different index, so this names the one that is. *)
+let index_append_sizet (#t: Type) (xs ys: Seq.seq t) (i: int)
+  : Lemma (requires Seq.length xs <= i /\ i < Seq.length xs + Seq.length ys /\
+                    SZ.fits (i - Seq.length xs))
+          (ensures  Seq.index (Seq.append xs ys) i ==
+                    Seq.index ys (SZ.v (SZ.uint_to_t (i - Seq.length xs))))
+          [SMTPat (Seq.index (Seq.append xs ys) i)]
+  = ()
 
 (* ---------------------------------------------------------------------------
    Storage that is not yet initialised

@@ -1,0 +1,2 @@
+# Expected translation diagnostic substrings
+multiple declarations of twice have differing specifications

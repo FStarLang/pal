@@ -192,6 +192,7 @@ impl Env {
                     is_rec: let_decl.is_rec,
                     is_total: false,
                     is_overread: false,
+                    adopts_signature: false,
                     decreases: None,
                 });
             }

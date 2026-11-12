@@ -794,6 +794,7 @@ impl<'a> Checker<'a> {
             is_rec: _,
             is_total: _,
             is_overread: _,
+            adopts_signature: _,
             decreases,
         }: &FnDecl,
     ) {

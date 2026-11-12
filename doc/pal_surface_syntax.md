@@ -54,7 +54,8 @@ compatibility checking, not for erasing pointer-view definitions.
 Compatibility checks are deliberately conservative: harmless command differences
 or more complex compatible declarators may be rejected. Missing or ambiguous
 compilation commands and failed Clang parses are explicit errors. Selected or
-referenced linker aliases and block-scope static storage are unsupported.
+referenced linker aliases and block-scope static storage are unsupported, except
+a function alias (see *Function aliases*).
 Incompatible named type/Pulse representations are diagnosed, not silently merged.
 
 C references are qualified while Clang still knows their bindings.
@@ -135,7 +136,7 @@ Beyond ownership, the user typically also wants to constrain values. PAL provide
 - `_preserves_value(x)` = `_ensures(x == _old(x))`.
 - `_invariant(p)` / `_ensures(p)` on a loop — see below.
 - `_decreases(p)` — termination measure on a `_rec` function (required there; not a loop annotation).
-- `_assert(p)` — verification assertion inside a function body.
+- `_assert(p)` — verification assertion inside a function body. It may quantify over array contents (`_exists(size_t m, m < c._length && c[m] == 0)`) and read through walked pointers (`*s`); those are read at their current values, as in an `_invariant` (`test/assert_quantified_array`).
 
 Inside any of these predicates the following spec-only constructs are available:
 
@@ -222,6 +223,10 @@ In a contract (an `_invariant` especially), for pointers walked through the same
 In an `_invariant`, `_old(d._length)` and `_old(d)._length` are the length on entry. An array a loop writes keeps its length (a write replaces an element), and PAL says so in the invariant unless the loop calls a function, whose contract would have to.
 
 A function can return a pointer into an array it is passed: `_ensures(return == s + i)` (or `(wchar_t *)(s + i)`) with a `size_t i` is `elem_ptr esize s i`, the pointer `i` elements past `s`. A caller then treats the result as a pointer walked through the array it lent: when exactly one pointer parameter appears as `return == p` or `return == p + e` in the callee's `_ensures`, `z = f(s, ...)` makes `z` a walked pointer of `s`, so `z - s` is a position and `*z` reads `s` there (behind an `if (z)` when the result may be null). `test/array_walk_followups` has musl's `wmemchr`, `wcsnlen`, `wcschr`-like `s + wcslen(s)`, `wmemset`, `wmemcpy` and `strncmp`.
+
+A loop's condition runs before each iteration, so a pointer it advances (`while ((*d++ = *s++))`, musl's `wcscpy`) is written by the loop like one its body advances, and the `_invariant` is what holds before each test of the condition. `test/array_walk_cond` has `wcscpy`.
+
+An argument to an `_array` parameter may point into the middle of an array the caller owns: a walked pointer (`wmemset(d, 0, n)` after `d` was walked) or `base + i` of an `_array` parameter (`wcscpy(dest + wcslen(dest), src)`, `wcslen(s + i)`). The caller lends the callee the suffix from that position, whose `_length` is the array's length minus the position, so the callee's `p[k]` is the caller's `a[pos + k]` and `p._length` is `a._length - pos`; the position must be at most the length, which the contract or `_invariant` must give. After the call the caller has the elements before the position unchanged and the callee's post-state of the suffix behind them. The argument must have the array's element type, and two arguments cannot be lent from one array in a single call. `test/array_walk_lend` has musl's `wcsncpy` and `wcscat`.
 
 #### Word-at-a-time access through a byte array
 
@@ -396,6 +401,10 @@ Notes:
 - `_pal_overread` — in this function, an aligned word read through a byte array may extend past the array's end (trusted; see *Word-at-a-time access through a byte array*).
 - `_memset_zero` — the function is a `memset(p, 0, n)` wrapper, and calls to it are translated as such (`test/memset`).
 - `_pulse_opaque_to_smt` — on a pure global, emit its value `opaque_to_smt`, so that a large initializer is not unfolded by the SMT solver (`test/global_array_tactic`).
+
+## Function aliases
+
+`extern __typeof(old) new __attribute__((__alias__("old")));` (musl's `weak_alias(old, new)`, optionally `__weak__`) makes `new` a second name for the function `old` declared in the same file. Calls to either name are translated. `new` gets `old`'s contract; when only `new` has one (a prepended specification header names the public `stpcpy`, not `__stpcpy`), `old` is verified against it, adopting its parameter annotations such as `_array`. When both have one, they must be the same contract (`test/weak_alias`, `test/weak_alias_bad`). Other linker aliases (`asm` labels, `ifunc`, `weakref`) are refused.
 
 ## Ignoring declarations and admitting functions
 
