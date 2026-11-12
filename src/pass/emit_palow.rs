@@ -1543,7 +1543,8 @@ fn peel<'b>(tds: &'b Typedefs, ty: &'b Type) -> &'b Type {
             | TypeT::RefineUninit(t, _)
             | TypeT::RefineValue(t, ..)
             | TypeT::Plain(t)
-            | TypeT::Nullable(t) => tds.resolve(t),
+            | TypeT::Nullable(t)
+            | TypeT::Overread(t) => tds.resolve(t),
             _ => return ty,
         };
     }
@@ -1566,7 +1567,8 @@ fn describe(ty: &Type) -> String {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => describe(t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => describe(t),
         TypeT::Float { width } => format!("a {}-bit float", width),
         TypeT::SizeT => "size_t".to_string(),
         TypeT::PtrdiffT => "ptrdiff_t".to_string(),
@@ -1703,7 +1705,8 @@ fn strip_annotations(ty: &Type) -> &Type {
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
-        | TypeT::Nullable(t) => strip_annotations(t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => strip_annotations(t),
         _ => ty,
     }
 }
@@ -1716,7 +1719,8 @@ fn is_plain_chain(ty: &Type) -> bool {
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
-        | TypeT::Nullable(t) => is_plain_chain(t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => is_plain_chain(t),
         _ => false,
     }
 }
@@ -1753,7 +1757,8 @@ fn palow_name(tds: &Typedefs, ty: &Type) -> Option<String> {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => palow_name(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => palow_name(tds, t),
         _ => None,
     }
 }
@@ -1793,7 +1798,8 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => fstar_type(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => fstar_type(tds, t),
         _ => None,
     }
 }
@@ -1852,7 +1858,8 @@ fn is_arrayptr(tds: &Typedefs, ty: &Type) -> bool {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => is_arrayptr(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => is_arrayptr(tds, t),
         _ => false,
     }
 }
@@ -1866,7 +1873,8 @@ fn extent(tds: &Typedefs, ty: &Type) -> Option<Extent> {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => extent(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => extent(tds, t),
         _ => None,
     }
 }
@@ -1902,7 +1910,8 @@ fn palow_sizeof(tds: &Typedefs, ty: &Type) -> Option<u64> {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => palow_sizeof(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => palow_sizeof(tds, t),
         _ => None,
     }
 }
@@ -1980,7 +1989,8 @@ fn uninit_below_pointer(tds: &Typedefs, ty: &Type) -> bool {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, _, _, _)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => uninit_below_pointer(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => uninit_below_pointer(tds, t),
         _ => false,
     }
 }
@@ -1999,6 +2009,7 @@ fn always_refines(tds: &Typedefs, ty: &Type) -> Vec<Rc<Expr>> {
         | TypeT::RefineValue(t, _, _, _)
         | TypeT::Plain(t)
         | TypeT::Nullable(t)
+        | TypeT::Overread(t)
         | TypeT::Pointer(t, _) => always_refines(tds, t),
         _ => Vec::new(),
     }
@@ -2041,7 +2052,9 @@ fn collect_refinements(
             b.push((n.clone(), vty.clone(), p.clone()));
             Ok((v, u, b))
         }
-        TypeT::Plain(t) | TypeT::Nullable(t) => collect_refinements(tds, t, stop_at_plain, ptr),
+        TypeT::Plain(t) | TypeT::Nullable(t) | TypeT::Overread(t) => {
+            collect_refinements(tds, t, stop_at_plain, ptr)
+        }
         TypeT::Pointer(t, _) if ptr => collect_refinements(tds, t, stop_at_plain, ptr),
         _ => Ok((Vec::new(), Vec::new(), Vec::new())),
     }
@@ -2069,7 +2082,7 @@ fn refinements_above_plain(tds: &Typedefs, ty: &Type) -> Result<Refinements, Str
             b.push((n.clone(), vty.clone(), p.clone()));
             Ok((v, u, b))
         }
-        TypeT::Nullable(t) => refinements_above_plain(tds, t),
+        TypeT::Nullable(t) | TypeT::Overread(t) => refinements_above_plain(tds, t),
         _ => Ok((Vec::new(), Vec::new(), Vec::new())),
     }
 }
@@ -2316,9 +2329,11 @@ fn allocated_return(tds: &Typedefs, ty: &Type) -> Option<String> {
 fn refined(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Refine(..) | TypeT::RefineAlways(..) | TypeT::RefineUninit(..) => true,
-        TypeT::RefineValue(t, ..) | TypeT::Plain(t) | TypeT::Nullable(t) | TypeT::Pointer(t, _) => {
-            refined(tds, t)
-        }
+        TypeT::RefineValue(t, ..)
+        | TypeT::Plain(t)
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t)
+        | TypeT::Pointer(t, _) => refined(tds, t),
         _ => false,
     }
 }
@@ -2359,6 +2374,7 @@ fn is_void_ptr(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Pointer(to, _) => matches!(tds.resolve(to).val, TypeT::Void),
         TypeT::Nullable(t)
+        | TypeT::Overread(t)
         | TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
@@ -2387,6 +2403,7 @@ fn pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
         TypeT::Pointer(_, PointerKind::Core) => None,
         TypeT::Pointer(to, _) => Some(to),
         TypeT::Nullable(t)
+        | TypeT::Overread(t)
         | TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
@@ -2591,7 +2608,8 @@ fn field_refines(tds: &Typedefs, ty: &Type) -> Vec<FieldRefinement> {
 fn is_nullable(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Nullable(_) => true,
-        TypeT::Refine(t, _)
+        TypeT::Overread(t)
+        | TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..) => is_nullable(tds, t),
@@ -11622,7 +11640,8 @@ fn collect_array_fill_type(tds: &Typedefs, ty: &Type, out: &mut BTreeMap<String,
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, ..)
-        | TypeT::Nullable(inner) => {
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => {
             collect_array_fill_type(tds, inner, out);
         }
         _ => {}
@@ -14169,9 +14188,6 @@ struct Body<'a> {
     /// These may be explicit pure clauses, type refinements, or facts hidden
     /// inside a successfully translated separation-logic precondition.
     requires_ok: bool,
-    /// `_pal_overread`: a word read through a pointer walked through a byte
-    /// array may reach past the array's end. See `word_walk`.
-    overread: bool,
     /// The ownership the contract grants over the parameters' pointees, which
     /// a loop invariant has to restate.
     owned: &'a [OwnedParam],
@@ -17146,6 +17162,30 @@ impl<'a> Body<'a> {
         Some((owner, wpn, w))
     }
 
+    /// Whether the pointer a word access steps from was declared
+    /// `_pal_overread`. Only that variable's reads are trusted to overrun.
+    fn overreads(&self, e: &Expr) -> bool {
+        let Some(v) = self.walk_root(e) else {
+            return false;
+        };
+        let Some(ty) = self.env.local_type(&v) else {
+            return false;
+        };
+        let mut ty: &Type = &ty;
+        loop {
+            ty = match &self.tds.resolve(ty).val {
+                TypeT::Overread(_) => return true,
+                TypeT::Refine(t, _)
+                | TypeT::RefineAlways(t, _)
+                | TypeT::RefineUninit(t, _)
+                | TypeT::RefineValue(t, ..)
+                | TypeT::Plain(t)
+                | TypeT::Nullable(t) => t,
+                _ => return false,
+            };
+        }
+    }
+
     /// The arguments every word operation takes: the element type's byte
     /// view, the array, and the word's address and size.
     fn word_args(&mut self, e: &Expr, owner: &str, w: &str) -> Result<(String, String), String> {
@@ -17192,10 +17232,11 @@ impl<'a> Body<'a> {
 
     /// `*p` where `p` is, or walks through, an array parameter: `p[0]`.
     fn read_elem(&mut self, p: &Expr) -> Result<String, String> {
-        // In a `_pal_overread` function a word read need only start inside
-        // the array; what it returns is known only for the bytes that are.
-        if self.overread
-            && let Some((owner, wpn, w)) = self.word_walk(p)
+        // A word read through a `_pal_overread` pointer need only start
+        // inside the array; what it returns is known only for the bytes that
+        // are.
+        if let Some((owner, wpn, w)) = self.word_walk(p)
+            && self.overreads(p)
         {
             let (args, _) = self.word_args(p, &owner, w)?;
             let t = self.fresh("word");
@@ -25728,7 +25769,7 @@ fn pieces_named(contract: &str) -> HashSet<String> {
 fn is_plain(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Plain(_) => true,
-        TypeT::Nullable(t) | TypeT::RefineValue(t, ..) => is_plain(tds, t),
+        TypeT::Nullable(t) | TypeT::Overread(t) | TypeT::RefineValue(t, ..) => is_plain(tds, t),
         _ => false,
     }
 }
@@ -26923,7 +26964,6 @@ fn emit_body(
         arrays: arrays.clone(),
         olens: sig.olens.clone(),
         requires_ok: sig.req_props,
-        overread: defn.decl.is_overread,
         owned: &sig.owned,
         outs: &sig.outs,
         granted: &sig.granted,

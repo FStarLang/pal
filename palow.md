@@ -7128,12 +7128,16 @@ Limitations:
     array and whose rest may not be -- is undefined in ISO C and cannot be
     proved: there is no `mem_pts_to` for bytes past the array. It is
     *assumed*, in `Pulse.Lib.C.Palow.Overread.fsti` (an interface with no
-    implementation), and only in a function marked `_pal_overread`
-    (`FnDecl.is_overread`; `Body.overread`), where a word read is a call to
-    `array_overread_T`: it needs `pos < length` and alignment and gives
-    `word_bytes_upto` -- the bytes inside the array, nothing about the rest.
-    Elsewhere the read still needs `pos + W <= length`
-    (`test/array_word_overread_bad`).
+    implementation), and only for a word read through a pointer declared
+    `_pal_overread` (`TypeT::Overread`, a wrapper transparent everywhere
+    else; `overreads` checks the declared type of the variable the read
+    steps from), where the read is a call to `array_overread_T`: it needs
+    `pos < length` and alignment and gives `word_bytes_upto` -- the bytes
+    inside the array, nothing about the rest. The marker is on the pointer
+    rather than the function so that the trust covers the one read the
+    hardware argument is about: every other read in the function, word or
+    not, still needs `pos + W <= length` (`test/array_word_overread_bad`
+    marks a sibling pointer and reads through an unmarked one).
 
     Pulse's join of an unannotated `if` loses every fact about a value an
     arm computed, so a word loop inside `if (n && *s != c)` left nothing
@@ -7144,4 +7148,4 @@ Limitations:
     value it has at the `if`, and the clause is stated over them.
     `test/array_word_access` has a `memchr`-like search (alignment prologue,
     word loop in an `if`, byte loop), a word copy, `uint32_t` stores and a
-    `_pal_overread` `strlen`.
+    `strlen` whose word pointer is `_pal_overread`.

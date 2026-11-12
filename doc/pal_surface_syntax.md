@@ -241,7 +241,7 @@ void copy_words(_array unsigned char *d, _array const unsigned char *s, size_t n
 }
 ```
 
-**Trusted over-read.** musl's `strlen` reads aligned words until one holds the terminator, and that word may extend past the end of the string. ISO C leaves this undefined; it is safe on real hardware only because an aligned word never crosses a page. A function marked `_pal_overread` (after the parameter list) accepts that argument as an axiom: in it, a word *read* needs only its first byte inside the array (`pos < length`) and alignment, and what is known of the value is the bytes that are inside the array (`word_bytes_upto`); nothing is said about the others. Writes are unaffected. The axiom is `Pulse.Lib.C.Palow.Overread.fsti`, an interface with no implementation; without the marker the same read must lie inside the array and fails to verify (`test/array_word_overread_bad`). `test/array_word_access` has a `memchr`-like search with an alignment prologue and a word loop, a word copy, `uint32_t` stores, and a `strlen` with `_pal_overread`.
+**Trusted over-read.** musl's `strlen` reads aligned words until one holds the terminator, and that word may extend past the end of the string. ISO C leaves this undefined; it is safe on real hardware only because an aligned word never crosses a page. A word pointer declared `_pal_overread` (`_pal_overread const word *w;`, on a local or a parameter) accepts that argument as an axiom for the reads through it: a word *read* through `w` -- or through `w + i`, `w++` and the like -- needs only its first byte inside the array (`pos < length`) and alignment, and what is known of the value is the bytes that are inside the array (`word_bytes_upto`); nothing is said about the others. Writes are unaffected, and so is every other pointer in the function. The axiom is `Pulse.Lib.C.Palow.Overread.fsti`, an interface with no implementation; through an unmarked pointer the same read must lie inside the array and fails to verify (`test/array_word_overread_bad`). `test/array_word_access` has a `memchr`-like search with an alignment prologue and a word loop, a word copy, `uint32_t` stores, and a `strlen` whose word pointer is `_pal_overread`.
 
 `_ensures(p)` may also be attached to a loop. It states what holds when the loop exits. Without a `break` the loop exits only when the condition is false, and the clause is asserted after the loop. With a `break`, Pulse no longer knows the condition is false on exit, so:
 
@@ -389,7 +389,6 @@ Notes:
 - `_rec` — recursive (must be paired with `_decreases`).
 - `_pal_ignore` — omit a declaration from translation.
 - `_pal_admit` — trust a function's contract.
-- `_pal_overread` — in this function, an aligned word read through a byte array may extend past the array's end (trusted; see *Word-at-a-time access through a byte array*).
 - `_memset_zero` — the function is a `memset(p, 0, n)` wrapper, and calls to it are translated as such (`test/memset`).
 - `_pulse_opaque_to_smt` — on a pure global, emit its value `opaque_to_smt`, so that a large initializer is not unfolded by the SMT solver (`test/global_array_tactic`).
 
