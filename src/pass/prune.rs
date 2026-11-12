@@ -134,7 +134,7 @@ fn scan_type(deps: &mut HashSet<DeclName>, ty: &Type) {
             scan_expr(deps, p);
         }
         TypeT::Plain(ty) => scan_type(deps, ty),
-        TypeT::Nullable(ty) => scan_type(deps, ty),
+        TypeT::Nullable(ty) | TypeT::Overread(ty) => scan_type(deps, ty),
         TypeT::SpecInt | TypeT::SpecNat => {}
     }
 }
@@ -426,7 +426,6 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
             is_pure: _,
             is_rec: _,
             is_total: _,
-            is_overread: _,
             decreases: _,
         }: &FnDecl,
     ) {

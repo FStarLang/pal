@@ -87,14 +87,14 @@ int all_nonzero(uint64_t x)
          x / 281474976710656 % 256 != 0 && x / 72057594037927936 % 256 != 0;
 }
 
-size_t word_strlen(_array const char *s) _pal_overread
+size_t word_strlen(_array const char *s)
   _requires(s._length <= 1000000 && (uintptr_t)s % 8 == 0)
   _requires(_exists(size_t i, i < s._length && s[i] == 0))
   _ensures(return < s._length && s[return] == 0)
   _ensures(_forall(size_t k, k < return ==> s[k] != 0))
 {
   const char *a = s;
-  const word *w;
+  _pal_overread const word *w;
   for (w = (const void *)s; all_nonzero(*w); w++)
     _invariant((uintptr_t)w % 8 == 0)
     _invariant(_forall(size_t k, k < (const char *)w - a && k < a._length ==> a[k] != 0));
