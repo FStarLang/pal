@@ -3554,7 +3554,7 @@ impl<'a> Spec<'a> {
             && !self.pointees.contains_key(&*v.val)
             && let Some(t) = self.global_array_const(v)
         {
-            let i = self.num(i, wi)?;
+            let i = self.index_num(i, wi)?;
             self.guards
                 .borrow_mut()
                 .push(format!("{} < Seq.length {}", i, t));
@@ -3569,7 +3569,7 @@ impl<'a> Spec<'a> {
             };
             let i = match idx {
                 None => pos,
-                Some(i) => format!("({} + {})", pos, self.num(i, wi)?),
+                Some(i) => format!("({} + {})", pos, self.index_num(i, wi)?),
             };
             self.guards
                 .borrow_mut()
@@ -3598,7 +3598,7 @@ impl<'a> Spec<'a> {
         if self.arrays.contains(&*v.val) {
             let i = match idx {
                 None => "0".to_string(),
-                Some(i) => self.num(i, wi)?,
+                Some(i) => self.index_num(i, wi)?,
             };
             self.guards
                 .borrow_mut()
@@ -3845,6 +3845,40 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// The mathematical integer `n` converted to the C integer type `ty`, as
+    /// a number: C reduces it modulo the type's range.
+    fn spec_wrap(&self, ty: &Type, n: String) -> String {
+        let (signed, width) = match peel(self.tds, ty).val {
+            TypeT::Int { signed, width } => (signed, width),
+            TypeT::PtrdiffT => (true, (8 * self.tds.ptr_bytes) as u32),
+            _ => (false, (8 * self.tds.ptr_bytes) as u32),
+        };
+        if let Ok(k) = n.parse::<BigInt>() {
+            return wrap_int(&k, signed, width).to_string();
+        }
+        format!(
+            "(spec_to_{} {} {})",
+            if signed { "signed" } else { "unsigned" },
+            BigInt::from(1u8) << width,
+            n
+        )
+    }
+
+    /// A subscript, as a number. The elaborator converts a mathematical index
+    /// to `size_t` to meet C's subscript; it is a position all the same, and
+    /// one outside the sequence fails `Seq.index`'s typing rather than
+    /// wrapping into it, so the conversion is not reduced (`spec_wrap`).
+    fn index_num(&self, e: &Expr, w: When) -> Result<String, String> {
+        if let ExprT::Cast(inner, to) = &strip_vattr(e).val
+            && matches!(peel(self.tds, to).val, TypeT::SizeT)
+            && let Ok(ity) = self.ty_of(inner)
+            && matches!(self.tds.resolve(&ity).val, TypeT::SpecInt | TypeT::SpecNat)
+        {
+            return self.num(inner, w);
+        }
+        self.num(e, w)
+    }
+
     fn num(&self, e: &Expr, w: When) -> Result<String, String> {
         if let ExprT::Old(inner) = &e.val {
             return self.num(inner, When::Old);
@@ -3889,12 +3923,14 @@ impl<'a> Spec<'a> {
             }
         }
         // A cast from a specification type is the author writing a
-        // mathematical integer where C's grammar wants a machine one, and the
-        // number they meant is the number it already is. Reading it that way
-        // rather than as `SizeT.uint_to_t n` also avoids a typing obligation
-        // the clause has no way to discharge: a guard conjoined at the top of
-        // the clause cannot mention a variable the clause binds itself, which
-        // is exactly where these casts appear.
+        // mathematical integer where C's grammar wants a machine one. It is
+        // still C's conversion, so a number outside the target's range is
+        // reduced into it (`spec_to_unsigned`); inside, which is what the
+        // author nearly always means, it is the number it already is.
+        // Reading it as a number rather than as `SizeT.uint_to_t n` avoids a
+        // typing obligation the clause has no way to discharge: a guard
+        // conjoined at the top of the clause cannot mention a variable the
+        // clause binds itself, which is exactly where these casts appear.
         if let Some(c) = self.cast_bits(e) {
             return self.num(&c, w);
         }
@@ -3906,7 +3942,7 @@ impl<'a> Spec<'a> {
             && let Ok(ity) = self.ty_of(inner)
             && matches!(self.tds.resolve(&ity).val, TypeT::SpecInt | TypeT::SpecNat)
         {
-            return self.num(inner, w);
+            return Ok(self.spec_wrap(&ty, self.num(inner, w)?));
         }
         // Negation is subtraction from zero, so it is undefined on overflow
         // for the same reason and reads mathematically for the same reason.
@@ -4005,7 +4041,7 @@ impl<'a> Spec<'a> {
         let ExprT::Index(base, idx) = &strip_vattr(e).val else {
             return Err(format!("a contract that indexes {}", expr_kind_of(&e.val)));
         };
-        let i = self.num(idx, w)?;
+        let i = self.index_num(idx, w)?;
         let bty = self.ty_of(base)?;
         if matches!(&strip_vattr(base).val, ExprT::Index(..)) {
             let Some((_, width)) = flat_array(self.tds, &bty) else {
@@ -4290,7 +4326,7 @@ impl<'a> Spec<'a> {
                     unreachable!()
                 };
                 let seq = self.own_field(b, &f.val, w)?;
-                let i = self.num(idx, w)?;
+                let i = self.index_num(idx, w)?;
                 self.guards
                     .borrow_mut()
                     .push(format!("{} < Seq.length {}", i, seq));
@@ -23106,7 +23142,7 @@ impl<'a> Body<'a> {
         let outer_prescattered = self.prescattered.clone();
         let mark = self.slots.len();
         let r = (|| -> Result<(), String> {
-            for s in body.iter() {
+            for s in fold_exits(body).iter() {
                 if matches!(s.val, StmtT::Goto(_)) {
                     self.rest(std::slice::from_ref(s))?;
                     break;
@@ -24865,8 +24901,13 @@ impl<'a> Body<'a> {
         let outer_tail_branch = std::mem::replace(&mut self.tail_branch, false);
         let outer_diverged = std::mem::replace(&mut self.diverged, false);
 
+        let folded = if self.in_loop {
+            fold_exits(stmts)
+        } else {
+            stmts.clone()
+        };
         let result = (|| -> Result<bool, String> {
-            for s in stmts.iter() {
+            for s in folded.iter() {
                 if self.diverged {
                     break;
                 }
@@ -25175,22 +25216,22 @@ fn int_literal(tds: &Typedefs, n: &BigInt, ty: &Type) -> Result<String, String> 
     match &peel(tds, ty).val {
         TypeT::Int { signed, width } => {
             let suffix = int_suffix(*signed, *width)?;
-            if *n < BigInt::ZERO {
-                if !*signed {
-                    // C converts a negative constant to an unsigned type by
-                    // reducing it modulo the width -- `(uint32_t)-1` is
-                    // `4294967295` -- and F* has no negative unsigned literal
-                    // to write it with, so the reduction is done here.
-                    let m = BigInt::from(1u8) << *width;
-                    let r = ((n % &m) + &m) % &m;
-                    return Ok(format!("{}{}", r, suffix));
-                }
+            // C converts a constant to an integer type by reducing it modulo
+            // the width -- `(uint32_t)-1` is `4294967295`, `(uint8_t)300` is
+            // `44` -- and F* has no out-of-range literal to write it with, so
+            // the reduction is done here. For a signed target the result is
+            // implementation-defined, and every target PAL knows wraps.
+            let n = wrap_int(n, *signed, *width);
+            if n < BigInt::ZERO {
                 Ok(format!("({}{})", n, suffix))
             } else {
                 Ok(format!("{}{}", n, suffix))
             }
         }
-        TypeT::SizeT => Ok(format!("{}sz", n)),
+        TypeT::SizeT => Ok(format!(
+            "{}sz",
+            wrap_int(n, false, (8 * tds.ptr_bytes) as u32)
+        )),
         // `true` and `false` are macros for the integer literals 1 and 0, so
         // they reach the IR as literals at type `_Bool`.
         TypeT::Bool => Ok(if *n == BigInt::ZERO { "false" } else { "true" }.to_string()),
@@ -25476,6 +25517,15 @@ fn bitnot(tds: &Typedefs, ty: &Type, a: &str) -> Option<String> {
     let lit = int_literal(tds, &all, ty).ok()?;
     let m = format!("FStar.{}Int{}", if signed { "" } else { "U" }, width);
     Some(format!("({}.sub {} {})", m, lit, a))
+}
+
+/// `n` reduced into the range of a `width`-bit integer type, as C's
+/// conversion to an unsigned type does and as a signed one does on every
+/// target PAL knows.
+fn wrap_int(n: &BigInt, signed: bool, width: u32) -> BigInt {
+    let m = BigInt::from(1u8) << width;
+    let r = ((n % &m) + &m) % &m;
+    if signed && r >= (&m >> 1) { r - m } else { r }
 }
 
 fn int_suffix(signed: bool, width: u32) -> Result<&'static str, String> {
@@ -25831,7 +25881,9 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
         _ => return Err(format!("an operator on {}", describe(t))),
     };
     match op {
-        BinOp::Eq => return Ok("=".to_string()),
+        // The module's own `eq`, like `lt` below, so that every comparison
+        // reaches the solver as one on `v` of its operands.
+        BinOp::Eq => return Ok(format!("`{}.eq`", m)),
         // GNU `a ?: b`. The operand is already bound to a name by the time
         // this is applied, so the `if` below it duplicates a value and not a
         // computation -- which is the whole content of "evaluated once".
@@ -27547,6 +27599,83 @@ fn may_exit(stmts: &Stmts) -> bool {
         StmtT::GotoBlock { body, .. } => may_exit(body),
         _ => false,
     })
+}
+
+/// Whether a C block always leaves the enclosing block: by a `return`, a
+/// jump, or a `break` or `continue` of the loop it is in.
+fn exits(stmts: &Stmts) -> bool {
+    stmts.iter().any(|s| match &s.val {
+        StmtT::Return(_) | StmtT::Goto(_) | StmtT::Break | StmtT::Continue => true,
+        StmtT::If {
+            then_branch,
+            else_branch,
+            ..
+        } => exits(then_branch) && exits(else_branch),
+        _ => false,
+    })
+}
+
+/// A loop body's statements with each `if` one of whose arms always leaves
+/// given the rest of the block as its other arm: `if (c) { return x; } rest`
+/// becomes `if (c) { return x; } else { rest }`. That is what C means, and
+/// it is what keeps `c`'s outcome in hand in `rest` -- a Pulse `if` forgets
+/// its condition at the join, and nothing joins here. Not done when the arm
+/// that would take the rest declares a name of its own, which the rest could
+/// then see, when the `if` has an `_ensures` (the author's join), or when
+/// the rest has a label to jump to.
+fn fold_exits(stmts: &[Rc<Stmt>]) -> Stmts {
+    let declares = |b: &Stmts| {
+        b.iter().any(|s| {
+            matches!(
+                s.val,
+                StmtT::Decl(..) | StmtT::Let(..) | StmtT::DeclStackArray { .. }
+            )
+        })
+    };
+    for (i, s) in stmts.iter().enumerate() {
+        let StmtT::If {
+            cond,
+            then_branch,
+            else_branch,
+            ensures,
+        } = &s.val
+        else {
+            continue;
+        };
+        let rest = &stmts[i + 1..];
+        if rest.is_empty()
+            || !ensures.is_empty()
+            || rest
+                .iter()
+                .any(|r| matches!(r.val, StmtT::Label { .. } | StmtT::GotoBlock { .. }))
+        {
+            continue;
+        }
+        let (t, e) = (exits(then_branch), exits(else_branch));
+        let (then_branch, else_branch) = if t && !e && !declares(else_branch) {
+            let mut b = (**else_branch).clone();
+            b.extend(rest.iter().cloned());
+            (then_branch.clone(), Rc::new(b))
+        } else if e && !t && !declares(then_branch) {
+            let mut b = (**then_branch).clone();
+            b.extend(rest.iter().cloned());
+            (Rc::new(b), else_branch.clone())
+        } else {
+            continue;
+        };
+        let mut out: Stmts = stmts[..i].to_vec();
+        out.push(
+            StmtT::If {
+                cond: cond.clone(),
+                then_branch,
+                else_branch,
+                ensures: ensures.clone(),
+            }
+            .with_loc(s.loc.clone()),
+        );
+        return out;
+    }
+    stmts.to_vec()
 }
 
 /// Whether a C block always leaves the function. Statements after a `return`

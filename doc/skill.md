@@ -396,6 +396,10 @@ Key facts:
   `pos + W <= length` and alignment (`(uintptr_t)w % 8 == 0`). A `strlen`-style
   aligned read past the end needs the word pointer declared with the trusted
   `_pal_overread` (`_pal_overread const word *w;`, `test/array_word_access`).
+- **`void *` byte buffers** (`memset`, `memcpy`): `_array void *dest` is an
+  array of `unsigned char`; read it in contracts as `((unsigned char *)dest)[k]`
+  (`test/array_void_bytes`).
+- **Casts in contracts wrap** like C: `(size_t)-1` is `SIZE_MAX`, not `-1`.
 - **`_ensures` on a loop is a pure prop** about the exit. A loop without a
   `break` exits only when `cond` is false; Pulse knows `¬cond` there, and PAL
   asserts the `_ensures` right after the loop.

@@ -226,6 +226,17 @@ ghost fn uint32_t_reveal_uninit (a: ptr)
    --------------------------------------------------------------------------- *)
 
 let ptr_sizeof : n:SZ.t{SZ.v n == T.ptr_bytes} = if T.ptr_64 then 8sz else 4sz
+
+(* A contract's cast of a mathematical integer to a C integer type with `m`
+   values: C's conversion, which reduces it modulo `m` -- for a signed type
+   that is implementation-defined, and every target PAL knows wraps. Inside
+   the range, which is where an author nearly always is, it is the number
+   itself, and the test says so without any modular arithmetic. *)
+unfold let spec_to_unsigned (m: pos) (n: int) : int =
+  if 0 <= n && n < m then n else n % m
+
+unfold let spec_to_signed (m: pos) (n: int) : int =
+  if - (m / 2) <= n && n < m / 2 then n else (n + m / 2) % m - m / 2
 let ptr_alignof : n:SZ.t{SZ.v n == T.ptr_bytes} = ptr_sizeof
 let ptr_ctype : ET.ctype = ET.TScalar ET.SPtr
 

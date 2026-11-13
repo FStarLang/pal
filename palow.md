@@ -7263,3 +7263,35 @@ Limitations:
     while the array is split for an access or a call (`pending_close`), and
     `p--` is left as it was (`-!` has its own precondition)
     (`test/array_walk_step`).
+
+60. **Contract casts wrap; early exits keep their condition; `void` byte
+    arrays.**
+    - *Contract casts.* A cast from `_specint` to a C integer type in a
+      contract was read as the number itself, so `(size_t)-1` was `-1` and
+      `_assert((size_t)-1 < 1)` verified. Such a cast now reduces the number
+      into the target's range, as C's conversion does: a literal is folded
+      (`int_literal` also wraps a literal of the target type, so
+      `(uint8_t)300` is `44uy`), anything else is
+      `spec_to_unsigned 2^w n`/`spec_to_signed 2^w n`
+      (`Pulse.Lib.C.Palow.Scalar`), which unfold to `n` when it is already in
+      range. A subscript is the exception: the elaborator's conversion of a
+      `_specint` index to `size_t` is a position, and one outside the
+      sequence fails `Seq.index`'s typing rather than wrapping
+      (`index_num`). The conversion from a pointer difference to `ptrdiff_t`
+      stays mathematical, as before (`test/spec_cast_wrap`).
+    - *Early exits.* Pulse joins the two branches of an `if` and forgets its
+      condition, so after `if (c) { return x; }` in a loop body the rest of
+      the body did not know `!c`. When exactly one branch of an `if` always
+      leaves (return/break/continue/goto), the rest of the enclosing block
+      is moved into the other branch (`fold_exits`), in loop bodies and in
+      the blocks of an `if` inside one; the function's top level already did
+      this for `return`. It is not done when the receiving branch declares
+      names the rest could see, when the `if` has an `_ensures`, or when the
+      rest has labels (`test/if_exit_rest`).
+    - *Equality.* `==` on machine integers is `Int32.eq`/`SizeT.eq`/...,
+      like the other comparisons, rather than `=`.
+    - *`void` arrays.* `_array void *p` is an array of `unsigned char`
+      (`array_elem`); a contract's `((unsigned char *)p)[k]` -- a cast of an
+      array to a pointer to its own element type, under a subscript -- is
+      `p[k]`, and a `void *` compared with an array is compared as a
+      pointer (`test/array_void_bytes`).

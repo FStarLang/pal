@@ -222,6 +222,20 @@ pub enum TypeT {
     Error,
 }
 
+/// The element type of an `_array`/`_arrayptr` pointer to `elem`. A `void *`
+/// array (`memset`'s `dest`) is an array of bytes, `unsigned char` being the
+/// type C lets any object's representation be read and written at.
+pub fn array_elem(elem: &Rc<Type>) -> Rc<Type> {
+    match elem.val {
+        TypeT::Void => TypeT::Int {
+            signed: false,
+            width: 8,
+        }
+        .with_loc(elem.loc.clone()),
+        _ => elem.clone(),
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum TypeRefKind {
     Typedef(Rc<Ident>),

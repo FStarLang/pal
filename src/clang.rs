@@ -840,7 +840,7 @@ fn mk_type_overread(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
 fn mk_type_array(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
     match &ty.val {
         TypeT::Pointer(elem, PointerKind::Unknown) => {
-            TypeT::Pointer(elem.clone(), PointerKind::Array).with_loc(loc)
+            TypeT::Pointer(array_elem(elem), PointerKind::Array).with_loc(loc)
         }
         _ => {
             eprintln!("warning: _array on non-pointer type: {}", ty);
@@ -851,7 +851,7 @@ fn mk_type_array(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
 fn mk_type_arrayptr(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
     match &ty.val {
         TypeT::Pointer(elem, PointerKind::Unknown) => {
-            TypeT::Pointer(elem.clone(), PointerKind::ArrayPtr).with_loc(loc)
+            TypeT::Pointer(array_elem(elem), PointerKind::ArrayPtr).with_loc(loc)
         }
         _ => {
             eprintln!("warning: _arrayptr on non-pointer type: {}", ty);

@@ -97,6 +97,19 @@ impl PrettyIR for InferError {
                 "cannot index into",
                 RcDoc::line(),
                 ty.to_doc(),
+                if matches!(ty.val, TypeT::Pointer(..)) {
+                    docs![
+                        &RcAllocator,
+                        ",",
+                        RcDoc::line(),
+                        "a pointer not declared to point into an array",
+                        RcDoc::line(),
+                        "(declare the pointer it comes from `_array` or `_arrayptr`)",
+                    ]
+                    .into_doc()
+                } else {
+                    RcDoc::nil()
+                },
             ],
         })
         .group()

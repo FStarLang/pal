@@ -1564,7 +1564,11 @@ fn let_signature_parser<
                 let ty = if let Some(ptr_kind) = ptr_kind_opt {
                     match &ty.val {
                         TypeT::Pointer(inner, _) => {
-                            TypeT::Pointer(inner.clone(), ptr_kind).with_loc(ty.loc.clone())
+                            let inner = match ptr_kind {
+                                PointerKind::Array | PointerKind::ArrayPtr => array_elem(inner),
+                                _ => inner.clone(),
+                            };
+                            TypeT::Pointer(inner, ptr_kind).with_loc(ty.loc.clone())
                         }
                         _ => ty,
                     }
