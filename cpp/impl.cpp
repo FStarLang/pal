@@ -1700,6 +1700,16 @@ public:
                   }
                 }
               }
+              // A byte array: `char *d = malloc(n)`. The count is in bytes,
+              // which for an element of size 1 is the number of elements, so
+              // there is no `sizeof` factor to find.
+              auto pointeeQt = ic->getType()->getPointeeType();
+              if (!pointeeQt.isNull() && pointeeQt->isCharType()) {
+                auto allocTy = trQualType(pointeeQt.getUnqualifiedType(),
+                                          ic->getSourceRange());
+                return mk_malloc_array(std::move(loc), std::move(allocTy),
+                                       trRValue(arg));
+              }
             }
             // Detect calloc(n, sizeof(T)) and calloc(1, n * sizeof(T))
             if (callee->getName() == "calloc" && call->getNumArgs() == 2) {

@@ -127,6 +127,8 @@ fn func_f (var_x: ptr) (#val_x: erased T)
 
 `_nullable` and `_allocated` also apply to the return value: `_allocated _nullable T *f(...)` is the shape of an allocator.
 
+`_allocated _nullable _array T *f(...)` returns a fresh heap array: under `return != 0` the `_ensures` can name its contents and length (`return[k]`, `return._length`), and every cell must have been written before it is returned. A `char`-sized `malloc(n)` (no `sizeof` factor) allocates an array of `n` elements, and `memcpy(d, s, n)` from a `T` array of the same byte-sized type fills the first `n` cells of such a fresh block; its value is `d`, so `return memcpy(d, s, n);` works (`test/alloc_array_return`). A caller cannot yet take over such a returned array.
+
 The body may dereference a `_nullable` parameter only where a null test on it has settled that it is not null: in the matching arm of `if (p)`, `if (p != NULL)` or `if (!p) return ...;`, of `p ? ... : ...`, or on the right of `p && ...` / `p == NULL || ...`. The translation opens the guard there (`elim_unless_null`) and closes it again where the arm ends. A contract still cannot mention `*p`, and a `_refine` behind the guard keeps the body from opening it.
 
 Beyond ownership, the user typically also wants to constrain values. PAL provides the following annotations for adding extra contract clauses:

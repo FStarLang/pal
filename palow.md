@@ -7524,3 +7524,18 @@ Limitations:
     so `d[k - (d - _old(d))]` is the current element `k` of the array
     `d` was walked through, and musl's `__stpcpy` byte loop states what it
     has copied with it (`test/array_walk_relative`).
+81. **Fresh heap arrays as return values.** `_allocated _nullable _array
+    T *` on a return was rejected; the contract now returns
+    `unless_null ret (exists* val_return n_return. array_pts_to ...
+    val_return ** freeable ret n_return ** pure (n_return == esize *
+    len val_return))`, with `return[k]` / `return._length` read off
+    `val_return` under the guard. In the body a `char`-sized `malloc(n)`
+    is an `n`-element array block (as `malloc(n * sizeof(T))` already
+    was), and `memcpy(d, s, n)` into such an unfilled block is the byte
+    copy `array_copy_maybe` (machine `memcpy` between the `option` view of
+    `d` and the source's representation), whose value is `d` itself,
+    unbound, so `return memcpy(d, ...)` hands back the block. At the
+    return `array_somes` moves the block to the plain view, which needs
+    every cell written (musl's `strdup`/`strndup`; `test/alloc_array_return`,
+    `test/alloc_array_return_bad`). Callers cannot take over a returned
+    array yet, and `wmemcpy` into a block (`wcsdup`) is not handled.

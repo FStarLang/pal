@@ -2372,6 +2372,8 @@ struct RetBlock {
     /// pointer left as `PTR_HOLE`. The caller names it to get past its own
     /// nullness test; a non-nullable return has nothing to get past.
     guarded: Option<String>,
+    /// Whether the block is an array (`_allocated _nullable _array T *`).
+    array: bool,
 }
 
 /// The Palow type name of what an `_allocated` return type points at, when the
@@ -6128,6 +6130,8 @@ fn emit_fn(
     // keep.
     let mut ret_guard: Option<(String, String, Vec<String>)> = None;
     let mut ret_block: Option<RetBlock> = None;
+    // Whether that block is an array, which a caller cannot take over yet.
+    let mut ret_array = false;
     // Ownership the author wrote on the return type in their own Pulse, which
     // `_allocated` is only the commonest case of. A constructor that hands back
     // a validated object says so with a `_refine` or a `_refine_value` on the
@@ -6187,6 +6191,7 @@ fn emit_fn(
                 pn: String::new(),
                 raw: true,
                 guarded: None,
+                array: false,
             });
         } else if let Some(freeable) = alloc {
             let pt = pointee(tds, &decl.ret_type).unwrap();
@@ -6231,6 +6236,33 @@ fn emit_fn(
                     );
                     ret_guard = Some((pn, binders, inner));
                 }
+                // An array the callee allocated: what the caller gets is the
+                // sequence the block holds and the right to free it, and the
+                // size the right is for is the sequence's, since nothing else
+                // records how many elements the allocation asked for. Only
+                // `_nullable`: the allocators that hand back arrays are
+                // `malloc`'s, and `malloc` may fail.
+                (Some(pn), Some(vty), Some(Extent::Array))
+                    if is_nullable(tds, &decl.ret_type) && palow_sizeof(tds, pt).is_some() =>
+                {
+                    let esize = palow_sizeof(tds, pt).unwrap();
+                    let binders = format!("(val_return: Seq.seq {}) (n_return: SizeT.t)", vty);
+                    let inner = vec![
+                        format!(
+                            "array_pts_to {pn}_repr {esize} (SizeT.v {pn}_alignof) {PTR_HOLE} \
+                             1.0R val_return"
+                        ),
+                        format!("freeable {} n_return", PTR_HOLE),
+                        format!(
+                            "pure (SizeT.v n_return == {} * Seq.length val_return)",
+                            esize
+                        ),
+                    ];
+                    pointees.insert("return".to_string(), (None, Some("val_return".to_string())));
+                    arrays.insert("return".to_string());
+                    ret_array = true;
+                    ret_guard = Some((pn, binders, inner));
+                }
                 (Some(pn), Some(vty), Some(Extent::One)) => {
                     fresh.push((
                         "val_return".to_string(),
@@ -6261,6 +6293,7 @@ fn emit_fn(
                         pn,
                         raw: false,
                         guarded: None,
+                        array: false,
                     });
                     refines_struct.extend(
                         struct_refines(pt)
@@ -7178,6 +7211,7 @@ fn emit_fn(
                 pn,
                 raw: false,
                 guarded: Some(guard),
+                array: ret_array,
             });
         }
     }
@@ -7310,6 +7344,7 @@ fn emit_fn(
             pn: String::new(),
             raw: true,
             guarded: None,
+            array: false,
         });
     }
 
@@ -14645,6 +14680,13 @@ struct Body<'a> {
     post_valid: &'a HashSet<String>,
     /// Whether the return's ownership is spliced; see `FnSurface`.
     ret_spliced: bool,
+    /// Whether the function hands its caller an `_allocated _nullable
+    /// _array` block, which leaves in the initialised view.
+    ret_array: bool,
+    /// Set by `call` when the call was a `memcpy` into a heap block, whose
+    /// value is the destination pointer itself: binding it to a fresh name
+    /// would hide from Pulse that a `return memcpy(d, ...)` returns `d`.
+    copied_call: bool,
     /// The labels in scope, innermost last, each with the statements that run
     /// when control reaches it. A `goto` is translated by translating its
     /// label's continuation there and then: Pulse has no jump, and every path
@@ -20439,7 +20481,12 @@ impl<'a> Body<'a> {
                 let outer_close = std::mem::take(&mut self.pending_close);
                 let outer_own = std::mem::take(&mut self.own_open);
                 let call = self.call(name, args)?;
-                self.lines.push(format!("let {} = {};", t, call));
+                let t = if std::mem::take(&mut self.copied_call) {
+                    call
+                } else {
+                    self.lines.push(format!("let {} = {};", t, call));
+                    t
+                };
                 if self
                     .callees
                     .get(&*name.val.to_string())
@@ -20717,6 +20764,59 @@ impl<'a> Body<'a> {
 
     /// The F* application for a call to an already-emitted function. Every
     /// argument is translated first, since translating one may emit reads.
+    /// `memcpy(d, s, n)` into a heap array that has not been filled yet --
+    /// `d = malloc(n); memcpy(d, s, n);`, the body of every `strdup`. A
+    /// callee's `_array` parameter wants an initialised array, which fresh
+    /// storage is not, so the call cannot go through `memcpy`'s contract.
+    /// `memcpy` is a reserved name whose meaning C fixes, as `malloc`'s is,
+    /// and that meaning is a byte copy: `array_copy_maybe` performs it with
+    /// the machine `memcpy` and leaves the copied cells holding the source's
+    /// values. Only byte-sized elements of the same type, so that the byte
+    /// count is the element count; anything else takes the ordinary path.
+    fn copy_into_block(&mut self, name: &Ident, args: &Exprs) -> Result<Option<String>, String> {
+        if *name.val != *"memcpy" || args.len() != 3 {
+            return Ok(None);
+        }
+        let ExprT::Var(d) = &strip_casts(&args[0]).val else {
+            return Ok(None);
+        };
+        let d = self.array_alias(&d.val.to_string());
+        if !self.blocks.iter().any(|b| {
+            b.var == d && b.checked && !b.freed && b.array.as_ref().is_some_and(|a| !a.filled)
+        }) {
+            return Ok(None);
+        }
+        let dst = self.array_place(strip_casts(&args[0]))?;
+        let src = self.array_place(strip_casts(&args[1]))?;
+        if dst.esize != "1sz"
+            || src.esize != "1sz"
+            || dst.pn != src.pn
+            || src.maybe
+            || dst.walk.is_some()
+            || src.walk.is_some()
+            || dst.base != 0
+            || src.base != 0
+            || !dst.close_read.is_empty()
+            || !src.close_read.is_empty()
+        {
+            return Err(
+                "a `memcpy` into an unfilled heap array from anything but an array of the \
+                 same byte-sized type"
+                    .to_string(),
+            );
+        }
+        let n = self.rvalue(&args[2])?;
+        self.lines.push(format!(
+            "array_copy_maybe {pn}_repr {} {} 1sz {pn}_alignof ({n}) ({n});",
+            dst.addr,
+            src.addr,
+            pn = dst.pn,
+            n = n
+        ));
+        self.copied_call = true;
+        Ok(Some(dst.addr))
+    }
+
     fn call(&mut self, name: &Ident, args: &Exprs) -> Result<String, String> {
         let c = self
             .callees
@@ -20726,6 +20826,9 @@ impl<'a> Body<'a> {
             && self.self_rec.as_deref() != Some(&*name.val.to_string())
         {
             return Err(format!("`{}`, which is recursive", name.val));
+        }
+        if let Some(v) = self.copy_into_block(name, args)? {
+            return Ok(v);
         }
         self.uses.insert(name.val.to_string());
         // Divergence is contagious: calling a function that may not terminate
@@ -21945,6 +22048,13 @@ impl<'a> Body<'a> {
         let Some(rb) = self.allocating_call(init) else {
             return Ok(());
         };
+        if rb.array {
+            return Err(
+                "a call returning an `_allocated` array, which a caller cannot take \
+                        over yet"
+                    .to_string(),
+            );
+        }
         if self.in_branch && !self.tail_branch {
             return Err("a call returning a block inside a branch".to_string());
         }
@@ -24648,6 +24758,9 @@ impl<'a> Body<'a> {
                     let void = callee.is_some_and(|c| c.void);
                     let noreturn = callee.is_some_and(|c| c.noreturn);
                     let call = self.call(name, args)?;
+                    if std::mem::take(&mut self.copied_call) {
+                        return Ok(());
+                    }
                     if void {
                         self.lines.push(format!("{};", call));
                     } else {
@@ -25748,6 +25861,24 @@ impl<'a> Body<'a> {
                         a.pn, a.addr, a.esize, a.pn
                     )
                 });
+            }
+        }
+        // A heap array handed back to the caller leaves as a value, like an
+        // `_out` array: `array_somes` asks that every cell was written.
+        if mark == 0 && self.ret_array {
+            for b in &self.blocks {
+                if let Some(a) = &b.array
+                    && b.checked
+                    && !b.freed
+                    && !a.filled
+                {
+                    self.lines.push(format!(
+                        "array_somes {pn}_repr {} {} {pn}_alignof;",
+                        b.tmp,
+                        a.esize,
+                        pn = b.pn
+                    ));
+                }
             }
         }
         for i in (mark..self.slots.len()).rev() {
@@ -28237,6 +28368,8 @@ fn emit_body(
         witness_results: HashSet::new(),
         post_valid: &sig.post_valid,
         ret_spliced: sig.ret_spliced,
+        ret_array: sig.ret_block.as_ref().is_some_and(|r| r.array),
+        copied_call: false,
         gotos: Vec::new(),
         in_loop: false,
         pending_close: Vec::new(),
