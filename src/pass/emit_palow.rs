@@ -14949,6 +14949,17 @@ impl<'a> Body<'a> {
     /// the ownership does read is not followed, since the ownership then
     /// really is about something else.
     fn own_before_write(&mut self, lhs: &Expr) -> Option<(String, String, String)> {
+        let (sn, at, w) = self.own_target(lhs)?;
+        self.lines.push(format!(
+            "with {}. assert ({}_pts_to {} _ {});",
+            w, sn, at, w
+        ));
+        Some((sn, at, w))
+    }
+
+    /// The struct, address and fresh value name `own_before_write` needs for
+    /// a write to `lhs`, or `None` where there is nothing to follow.
+    fn own_target(&mut self, lhs: &Expr) -> Option<(String, String, String)> {
         let ExprT::Member(base, f) = &strip_vattr(lhs).val else {
             return None;
         };
@@ -14983,10 +14994,6 @@ impl<'a> Body<'a> {
         }
         let sn = format!("struct_{}", n.val);
         let w = self.fresh("own_value");
-        self.lines.push(format!(
-            "with {}. assert ({}_pts_to {} _ {});",
-            w, sn, at, w
-        ));
         Some((sn, at, w))
     }
 
@@ -19569,6 +19576,38 @@ impl<'a> Body<'a> {
                 values.insert(i, self.arg_value(a)?);
             }
         }
+        // A callee handed `&p->f` may write `f`, and where `p`'s deep
+        // ownership does not read `f` that ownership is then keyed to the
+        // value before the call -- the same as after a direct write to the
+        // field. The value is named before the field is lent and the
+        // ownership follows once it is given back.
+        let mut follows: Vec<(String, String, String)> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let writes = outs.get(i) == Some(&true)
+                || !(consts.get(i) == Some(&true)
+                    || arr_args.get(i) == Some(&true)
+                    || arrayptr_args.get(i) == Some(&true)
+                    || plain_ptrs.get(i) == Some(&true)
+                    || consumes.get(i) == Some(&true));
+            if !writes {
+                continue;
+            }
+            let ExprT::Ref(inner) = &strip_casts(a).val else {
+                continue;
+            };
+            if !matches!(strip_vattr(inner).val, ExprT::Member(..)) {
+                continue;
+            }
+            if let Some((sn, at, w)) = self.own_target(inner)
+                && !follows.iter().any(|f| f.1 == at)
+            {
+                self.lines.push(format!(
+                    "with {}. assert ({}_pts_to {} _ {});",
+                    w, sn, at, w
+                ));
+                follows.push((sn, at, w));
+            }
+        }
         let field_close = self.pending_close.len();
         let opened = self.field_args(args, &outs, &consts, |i| {
             !(arr_args.get(i) == Some(&true)
@@ -19787,6 +19826,10 @@ impl<'a> Body<'a> {
         }
         if args.is_empty() {
             out += " ()";
+        }
+        for (sn, at, w) in follows {
+            self.pending_close
+                .push(format!("{}_own_follow {} {};", sn, at, w));
         }
         if let Some(w) = witness {
             let n = ghost_args.len();
