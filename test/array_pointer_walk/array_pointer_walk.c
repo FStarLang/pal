@@ -180,3 +180,15 @@ size_t count_wide(_array const unsigned char *s, size_t n)
 	}
 	return c;
 }
+
+/* A conversion that can change a distance is the converted value: at 256,
+   `(uint8_t)(p - a)` is 0, the same as `(uint8_t)i`. */
+void narrowed_distance(_array const uint8_t *a, size_t n)
+	_requires(a._length == n && n == 300)
+{
+	const uint8_t *p = a;
+	size_t i = 0;
+	while (i < 300)
+		_invariant(i <= 300 && p - a == (_specint)i && (uint8_t)(p - a) == (uint8_t)i)
+	{ p++; i++; }
+}
