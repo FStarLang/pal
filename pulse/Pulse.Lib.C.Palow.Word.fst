@@ -888,3 +888,63 @@ let word_bytes_upto_at (#t: Type0) (ev: t -> nat) (xs: Seq.seq t) (i: nat) (w: n
           [SMTPat (word_bytes_upto ev xs i w x); SMTPat (Seq.index xs k)]
   = reveal_word_bytes_upto ev xs i w x;
     assert (ev (Seq.index xs (i + (k - i))) == word_byte w x (k - i))
+
+(* ---------------------------------------------------------------------------
+   `char` arrays as `unsigned char` arrays
+   --------------------------------------------------------------------------- *)
+
+(* A `char` (`signed char`) and the `unsigned char` it converts to are the
+   same byte, so an array of one is an array of the other: this is what lets
+   a `char *` be passed where a `void *` array -- an array of `unsigned char`
+   -- is wanted (`memchr(s, c, n)`), and taken back afterwards. *)
+let int8_as_uint8_repr (x: I8.t) (b: bytes)
+  : Lemma (requires int8_t_repr x b)
+          (ensures  uint8_t_repr (FStar.Int.Cast.int8_to_uint8 x) b)
+  = assert_norm (pow2 8 == 256);
+    assert_norm (pow2 7 == 128)
+
+let uint8_as_int8_repr (x: U8.t) (b: bytes)
+  : Lemma (requires uint8_t_repr x b)
+          (ensures  int8_t_repr (FStar.Int.Cast.uint8_to_int8 x) b)
+  = assert_norm (pow2 8 == 256);
+    assert_norm (pow2 7 == 128)
+
+let int8_uint8_inverse (_: unit)
+  : Lemma ((forall (x: I8.t). FStar.Int.Cast.uint8_to_int8 (FStar.Int.Cast.int8_to_uint8 x) == x) /\
+           (forall (x: U8.t). FStar.Int.Cast.int8_to_uint8 (FStar.Int.Cast.uint8_to_int8 x) == x))
+  = assert_norm (pow2 8 == 256);
+    assert_norm (pow2 7 == 128);
+    let aux1 (x: I8.t)
+      : Lemma (FStar.Int.Cast.uint8_to_int8 (FStar.Int.Cast.int8_to_uint8 x) == x)
+      = I8.v_inj (FStar.Int.Cast.uint8_to_int8 (FStar.Int.Cast.int8_to_uint8 x)) x in
+    let aux2 (x: U8.t)
+      : Lemma (FStar.Int.Cast.int8_to_uint8 (FStar.Int.Cast.uint8_to_int8 x) == x)
+      = U8.v_inj (FStar.Int.Cast.int8_to_uint8 (FStar.Int.Cast.uint8_to_int8 x)) x in
+    FStar.Classical.forall_intro aux1;
+    FStar.Classical.forall_intro aux2
+
+let seq_int8_uint8_back (xs: Seq.seq I8.t)
+  : Lemma (seq_map FStar.Int.Cast.uint8_to_int8 (seq_map FStar.Int.Cast.int8_to_uint8 xs) == xs)
+          [SMTPat (seq_map FStar.Int.Cast.uint8_to_int8 (seq_map FStar.Int.Cast.int8_to_uint8 xs))]
+  = int8_uint8_inverse ();
+    seq_map_inverse FStar.Int.Cast.int8_to_uint8 FStar.Int.Cast.uint8_to_int8 xs
+
+ghost fn array_int8_as_uint8 (a: ptr) (#p: perm) (#xs: Seq.seq I8.t)
+  requires array_pts_to int8_t_repr 1 (SZ.v int8_t_alignof) a p xs
+  ensures  array_pts_to uint8_t_repr 1 (SZ.v uint8_t_alignof) a p
+             (seq_map FStar.Int.Cast.int8_to_uint8 xs)
+{
+  FStar.Classical.forall_intro_2 (fun x -> FStar.Classical.move_requires (int8_as_uint8_repr x));
+  array_retype int8_t_repr uint8_t_repr FStar.Int.Cast.int8_to_uint8 a 1sz int8_t_alignof;
+  rewrite each (SZ.v int8_t_alignof) as (SZ.v uint8_t_alignof);
+}
+
+ghost fn array_uint8_as_int8 (a: ptr) (#p: perm) (#ys: Seq.seq U8.t)
+  requires array_pts_to uint8_t_repr 1 (SZ.v uint8_t_alignof) a p ys
+  ensures  array_pts_to int8_t_repr 1 (SZ.v int8_t_alignof) a p
+             (seq_map FStar.Int.Cast.uint8_to_int8 ys)
+{
+  FStar.Classical.forall_intro_2 (fun x -> FStar.Classical.move_requires (uint8_as_int8_repr x));
+  array_retype uint8_t_repr int8_t_repr FStar.Int.Cast.uint8_to_int8 a 1sz uint8_t_alignof;
+  rewrite each (SZ.v uint8_t_alignof) as (SZ.v int8_t_alignof);
+}

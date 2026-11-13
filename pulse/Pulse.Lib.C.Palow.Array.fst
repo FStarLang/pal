@@ -742,6 +742,43 @@ ghost fn array_unfocus_read_here (#t: Type0) (t_repr: t -> bytes -> prop) (a: pt
   array_unfocus_read_at t_repr a esize ealign q #p #xs i off;
 }
 
+(* An array read as another element type of the same size: the sequence
+   with every element converted by `f`, which must map an element to the
+   value its bytes read as at the new type. Nothing changes in memory; the
+   ownership is merely restated. A `char` array passed for a `void *` one
+   (`memchr(s, ...)`) is the case this exists for. *)
+let seq_map (#t #u: Type) (f: t -> u) (xs: Seq.seq t) : Seq.seq u =
+  Seq.init (Seq.length xs) (fun i -> f (Seq.index xs i))
+
+let seq_map_length (#t #u: Type) (f: t -> u) (xs: Seq.seq t)
+  : Lemma (Seq.length (seq_map f xs) == Seq.length xs)
+          [SMTPat (Seq.length (seq_map f xs))]
+  = ()
+
+let seq_map_index (#t #u: Type) (f: t -> u) (xs: Seq.seq t) (i: nat { i < Seq.length xs })
+  : Lemma (Seq.index (seq_map f xs) i == f (Seq.index xs i))
+          [SMTPat (Seq.index (seq_map f xs) i)]
+  = ()
+
+(* Converting there and back is the identity, so a caller that lent an
+   array at another type gets its own sequence back when the callee left
+   it alone. *)
+let seq_map_inverse (#t #u: Type) (f: t -> u) (g: u -> t) (xs: Seq.seq t)
+  : Lemma (requires forall (x: t). g (f x) == x)
+          (ensures  seq_map g (seq_map f xs) == xs)
+  = Seq.lemma_eq_intro (seq_map g (seq_map f xs)) xs
+
+ghost fn array_retype (#t #u: Type0) (t_repr: t -> bytes -> prop) (u_repr: u -> bytes -> prop)
+                      (f: t -> u) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                      (#p: perm) (#xs: Seq.seq t)
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
+  requires pure (forall (x: t) (b: bytes). t_repr x b ==> u_repr (f x) b)
+  ensures  array_pts_to u_repr (SZ.v esize) (SZ.v ealign) a p (seq_map f xs)
+{
+  unfold array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs;
+  fold array_pts_to u_repr (SZ.v esize) (SZ.v ealign) a p (seq_map f xs);
+}
+
 (* A step back keeps the provenance and moves the address. `addr_of_sub` says
    so, but is triggered on an `addr_of` that a `walk_ok` on `q -! n` only
    mentions after unfolding; this is the same fact triggered on the step. *)

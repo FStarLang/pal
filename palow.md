@@ -7358,3 +7358,48 @@ Limitations:
     `Seq.index xs (walk_idx e a q + 0)`; `array_focus_here`,
     `array_unfocus_here` and `array_unfocus_read_here` state the `i == 0`
     case with `walk_idx e a q`, the term a contract writes.
+65. **`char` arrays as bytes.** An `_array void *` parameter is an array of
+    `uint8_t`, so passing a `char` array (`int8_t`) to it failed with
+    `seq Int8.t <: seq UInt8.t` (musl's `strrchr` calling `__memrchr`).
+    `array_retype` (`Pulse.Lib.C.Palow.Array`) turns an
+    `array_pts_to t_repr ... xs` into an `array_pts_to u_repr ...
+    (seq_map f xs)` whenever every `t_repr x b` is `u_repr (f x) b`;
+    `array_int8_as_uint8` and `array_uint8_as_int8`
+    (`Pulse.Lib.C.Palow.Word`) are its instances for `int8_to_uint8` and
+    its inverse, which keep the byte. `call` brackets the call with the two
+    (the second after the callee's post-state is rejoined), and the
+    callee's sequence is `seq_map int8_to_uint8` of the caller's, so its
+    `((unsigned char *)p)[k]` is the caller's `(unsigned char)s[k]` and a
+    byte it writes comes back as the `char` with that representation. A
+    pointer the callee returns into the array is a walked pointer of the
+    `char` array (`strnlen` calling `memchr`). Wider element types are
+    refused for now (`test/array_char_as_bytes`,
+    `test/array_wide_as_bytes`).
+66. **`_specint` subscripts carry their guard.** Item 60 dropped the offset
+    from `a[k]` on the array's base, and with it the `0 <= walk_idx + k`
+    guard, leaving `Seq.index xs k` with `k: int`, which needs a `nat`; an
+    invariant `_forall(_specint k, d - a <= k && k < a._length ==> ...)`
+    no longer typechecked. A subscript that may be negative (`_specint`,
+    `ptrdiff_t`, a signed type) is guarded by `0 <= k /\ k < Seq.length xs`
+    again (`test/spec_index_guard`).
+67. **Unsigned contract arithmetic is a number.** In musl's `wcsncat` the
+    postcondition `_exists(size_t m, ... _forall(size_t k, ... d[m + k]
+    ...))` timed out. `m + k` was the machine integer `m `add_wrap` k`
+    (`SizeT.add` where `size_t` does not wrap). Z3 picks `SizeT.v k`-style
+    triggers for the unannotated quantifiers, and every instance made
+    another `size_t` term, `add_wrap m k`, whose typing and equation axioms
+    gave another `SizeT.v` to trigger on: tens of thousands of instances
+    per hypothesis. `Spec::num` now reads unsigned `+`, `-`, `*` as the
+    mathematical result reduced modulo the type's range,
+    `spec_to_unsigned m (v a + v b)`, the form item 59 gives casts. A
+    partial operator adds its definedness guard instead and is the plain
+    sum. Either way the term is an integer and creates nothing to trigger
+    on, and the value is unchanged (`test/spec_unsigned_index`).
+    That alone does not make `wcsncat` verify. Its final `_assert`, the
+    `_ensures` verbatim, seemed to verify while the identical postcondition
+    failed, but Pulse discharges `assert (pure p)` obligations after the
+    statements that follow, so the failing return hid it: with the return
+    admitted the `_assert` times out the same way. The goal is an
+    `exists`/`forall` alternation proved from seven others of that shape,
+    each a refinement hypothesis whose `iff` encoding Z3 keeps instantiating
+    on every `size_t` term in scope.
