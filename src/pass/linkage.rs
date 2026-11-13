@@ -241,6 +241,7 @@ fn normalize_type(
         | TypeT::FlexArray(t)
         | TypeT::Plain(t)
         | TypeT::Nullable(t)
+        | TypeT::Overread(t)
         | TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _) => {
@@ -554,7 +555,8 @@ impl Renamer<'_> {
             | TypeT::FixedArray(t, _)
             | TypeT::FlexArray(t)
             | TypeT::Plain(t)
-            | TypeT::Nullable(t) => self.ty(t, bound),
+            | TypeT::Nullable(t)
+            | TypeT::Overread(t) => self.ty(t, bound),
             TypeT::FnPtr { args, ret } => {
                 for a in args {
                     self.ty(a, bound);

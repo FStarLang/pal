@@ -394,8 +394,8 @@ Key facts:
   through a walked pointer into a byte array reads/writes `W` elements as one
   little-endian integer (`word_byte W x j == x / pow2 (8*j) % 256`). State
   `pos + W <= length` and alignment (`(uintptr_t)w % 8 == 0`). A `strlen`-style
-  aligned read past the end needs the trusted `_pal_overread` function marker
-  (`test/array_word_access`).
+  aligned read past the end needs the word pointer declared with the trusted
+  `_pal_overread` (`_pal_overread const word *w;`, `test/array_word_access`).
 - **`void *` byte buffers** (`memset`, `memcpy`): `_array void *dest` is an
   array of `unsigned char`; read it in contracts as `((unsigned char *)dest)[k]`
   (`test/array_void_bytes`).
