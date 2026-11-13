@@ -7149,3 +7149,44 @@ Limitations:
     `test/array_word_access` has a `memchr`-like search (alignment prologue,
     word loop in an `if`, byte loop), a word copy, `uint32_t` stores and a
     `strlen` whose word pointer is `_pal_overread`.
+
+57. **Walk follow-ups from musl.** A contract's `s + i` with a computed
+    `size_t i` and elements wider than a byte is `elem_ptr esize s i`
+    (`Pulse.Lib.C.Palow.Array`), a total ghost pointer: `s +! (esize * i)`
+    when that neither overflows `size_t` nor wraps the address space, else
+    `s` itself. Its pattern lemmas make it a walk (`elem_ptr_walk`: `walk_ok`
+    always, address and `walk_idx == i` in range) and make every walked
+    pointer one (`walk_is_elem`), which is the witness for
+    `_exists(size_t i, return == s + i ...)`. `walk_map` follows a call whose
+    callee's `_ensures` names exactly one pointer parameter as
+    `return == p [+ e]` (`returned_arg`), so `z = wmemchr(s, ...)` is a
+    walked pointer of `s`; `*z` focuses `s` at `z` and has to prove it from
+    the callee's postcondition, which nothing here trusts.
+
+    A loop invariant now keeps `Seq.length inv_val_d == Seq.length val_d`
+    for every owned array, when the loop makes no call (a callee's contract
+    might not preserve the length), and `_old(d._length)` /
+    `_old(d)._length` in an invariant are the entry length (`olds`) rather
+    than this iteration's. A cast of position arithmetic to `_specint`, as
+    the elaborator puts on `d - ret + n + 1`, is read mathematically like
+    the position itself.
+
+    musl's `strncmp` walks `const unsigned char *l = (void *)_l` through a
+    `char` array. A read through a walked pointer whose pointee is the
+    element type at the other signedness reads the element and converts it
+    (`walk_sign_view`, `Body.sign_view`); a write is still refused. The
+    elaborator lets a contract subtract or compare pointers to integer
+    types of one width and different signedness (`l - _l`), reading one side
+    at the other's type. Contract casts accept integer type specifiers in
+    any order (`long unsigned int`, `char unsigned`; `int_specifiers` in
+    `hauntedc.rs`). `test/array_walk_followups` has `wmemchr`, `wcsnlen`, a
+    read through a returned pointer, `s + wcslen(s)`, `wmemset`, `wmemcpy`
+    and `strncmp`; `test/array_walk_followups_bad` the refused write and a
+    callee that may return either of two arrays.
+
+    musl's `while (n--)` and `if (!n--)` decrement a zero `size_t`, which
+    PAL's checked arithmetic refuses; the tests test before decrementing.
+    A contract's `size_t` `-` wraps (item 53), so an invariant
+    `l - _old(l) == _old(n) - n` says only that the position is
+    `_old(n) - n` modulo `2^64` and bounds nothing without `n <= _old(n)`
+    beside it; `l - _old(l) + n == _old(n)` implies that on its own.

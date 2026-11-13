@@ -686,6 +686,47 @@ let walk_is_add (esize: nat) (a q: ptr)
       ptr_ext (a +! d) q
     end
 
+(* `a + i` in a contract, for an array of `esize`-byte elements and a
+   computed `i`: the pointer `i` elements past `a`. Total, so that a contract
+   can name it without first proving the offset fits; where it does not, the
+   value is `a` itself and nothing can be concluded about it. *)
+let elem_ptr (esize: nat) (a: ptr) (i: SZ.t) : GTot ptr =
+  if FStar.IndefiniteDescription.strong_excluded_middle
+       (SZ.fits (esize * SZ.v i) /\ addr_of a + esize * SZ.v i < T.addr_limit)
+  then a +! SZ.uint_to_t (esize * SZ.v i)
+  else a
+
+(* A pointer a callee returned as `a + i` is a walk through `a`, at `i`. *)
+let elem_ptr_walk (esize: pos) (a: ptr) (i: SZ.t)
+  : Lemma (walk_ok esize a (elem_ptr esize a i) /\
+           ((SZ.fits (esize * SZ.v i) /\ addr_of a + esize * SZ.v i < T.addr_limit) ==>
+            (addr_of (elem_ptr esize a i) == addr_of a + esize * SZ.v i /\
+             walk_idx esize a (elem_ptr esize a i) == SZ.v i)))
+          [SMTPat (elem_ptr esize a i)]
+  = if FStar.IndefiniteDescription.strong_excluded_middle
+       (SZ.fits (esize * SZ.v i) /\ addr_of a + esize * SZ.v i < T.addr_limit)
+    then begin
+      addr_of_add_nowrap a (SZ.uint_to_t (esize * SZ.v i));
+      M.cancel_mul_mod (SZ.v i) esize;
+      M.cancel_mul_div (SZ.v i) esize
+    end
+
+(* And a walked pointer is `a + i` at its position, which is the witness a
+   contract's `_exists(size_t i, return == a + i ...)` needs. *)
+let walk_is_elem (esize: nat) (a q: ptr)
+  : Lemma (requires walk_ok esize a q)
+          (ensures  SZ.fits (addr_of q - addr_of a) ==>
+                    q == elem_ptr esize a (walk_size esize a q))
+          [SMTPat (walk_ok esize a q)]
+  = if SZ.fits (addr_of q - addr_of a) then begin
+      let d = addr_of q - addr_of a in
+      M.euclidean_division_definition d esize;
+      SZ.fits_lte (d / esize) d;
+      addr_bound q;
+      addr_of_add_nowrap a (SZ.uint_to_t d);
+      ptr_ext (a +! SZ.uint_to_t d) q
+    end
+
 (* ---------------------------------------------------------------------------
    Storage that is not yet initialised
 

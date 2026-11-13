@@ -379,7 +379,10 @@ Key facts:
   `_invariant(s - _old(s) < _old(s)._length)`; in a contract `p - q` is an
   element count, and `p[k]` / `p._length` are relative to where `p` points
   (`test/array_pointer_walk`, and *Loop invariants* in
-  `doc/pal_surface_syntax.md`).
+  `doc/pal_surface_syntax.md`). A callee whose `_ensures` says
+  `return == s + i` returns a walked pointer of the caller's `s`
+  (`test/array_walk_followups`); a `const unsigned char *` walking a `char`
+  array reads elements converted.
 - **Word-at-a-time access** (`w = (const void *)s; *w`, `*(uint32_t *)(s + 4) = v`)
   through a walked pointer into a byte array reads/writes `W` elements as one
   little-endian integer (`word_byte W x j == x / pow2 (8*j) % 256`). State

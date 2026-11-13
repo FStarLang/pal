@@ -3293,7 +3293,12 @@ impl<'a> Spec<'a> {
                 None => Err(format!("`{}._length` in a contract", v.val)),
             },
             Some((pre, post)) => {
+                // Inside a loop invariant the binders are this iteration's;
+                // `_old` is the function's entry, which `olds` names.
                 let chosen = match w {
+                    When::Old if self.olds.contains_key(&*v.val) => {
+                        &Some(self.olds[&*v.val].clone())
+                    }
                     When::Post => post,
                     When::Pre | When::Old => pre,
                 };
@@ -4062,6 +4067,13 @@ impl<'a> Spec<'a> {
             format!("{}sz", k * n)
         } else if n == 1 {
             self.value(i, w)?
+        } else if sym == "+!" && matches!(peel(self.tds, &*self.ty_of(i)?).val, TypeT::SizeT) {
+            return Ok(Some(format!(
+                "(elem_ptr {} {} {})",
+                n,
+                self.value(p, w)?,
+                self.value(i, w)?
+            )));
         } else {
             return Err("pointer arithmetic by a computed index in a contract".to_string());
         };
@@ -4094,6 +4106,9 @@ impl<'a> Spec<'a> {
                         }
                         if let Some(d) = self.ptr_diff(inner, w) {
                             return d;
+                        }
+                        if self.has_ptr_diff(inner) {
+                            return self.num(inner, w);
                         }
                         let ity = self.ty_of(inner)?;
                         match self.int_module(&ity) {
@@ -14325,6 +14340,9 @@ struct Body<'a> {
     /// its arms may write. Every other slot keeps the value it holds at the
     /// `if`, bound by a `with` just before it.
     join_written: Option<HashSet<String>>,
+    /// While reading through a walked pointer whose pointee is the element
+    /// type at the other signedness (`walk_sign_view`).
+    sign_view: bool,
     /// Functions already known to be divergent. Calling one makes this body
     /// divergent too, which is why the whole set is reached by a fixpoint
     /// rather than in one pass.
@@ -17255,6 +17273,33 @@ impl<'a> Body<'a> {
         Ok(t)
     }
 
+    /// A pointer walked through an array of integers at the other signedness
+    /// of its element type, as `const unsigned char *l = (void *)_l` walks a
+    /// `char` array: the element type and the pointee. A read through it is
+    /// the element read and converted, which on a two's-complement target is
+    /// the stored bits at the new type (C11 6.5p7).
+    fn walk_sign_view(&self, p: &Expr) -> Option<(Rc<Type>, Rc<Type>)> {
+        let v = self.walk_root(p)?;
+        let owner = self.walk_owner(&v)?.ok()?;
+        let ot = self.env.local_type(&owner)?;
+        let oel = pointee(self.tds, peel(self.tds, &ot))?.clone();
+        let pt = self.ty_of(p).ok()?;
+        let pel = pointee(self.tds, peel(self.tds, &pt))?.clone();
+        match (&self.tds.resolve(&oel).val, &self.tds.resolve(&pel).val) {
+            (
+                TypeT::Int {
+                    width: a,
+                    signed: x,
+                },
+                TypeT::Int {
+                    width: b,
+                    signed: y,
+                },
+            ) if a == b && x != y => Some((oel.into(), pel.into())),
+            _ => None,
+        }
+    }
+
     /// That `q` points into array parameter `owner`, at an element boundary.
     fn walk_ok(&self, owner: &str, q: &str) -> String {
         let a = &self.arrays[owner];
@@ -17275,7 +17320,9 @@ impl<'a> Body<'a> {
         let ty = self.ty_of(e)?;
         let elem = pointee(self.tds, peel(self.tds, &ty))
             .ok_or_else(|| "a dereference of a walked non-pointer".to_string())?;
-        if palow_name(self.tds, elem).as_deref() != Some(&*ap.pn) {
+        if palow_name(self.tds, elem).as_deref() != Some(&*ap.pn)
+            && !(self.sign_view && self.walk_sign_view(e).is_some())
+        {
             return Err(format!(
                 "a dereference of a pointer walked through `{}` at {}, which is not its element type",
                 owner,
@@ -19164,6 +19211,17 @@ impl<'a> Body<'a> {
                     if self.arrays.contains_key(&*v.val.to_string())
                         || self.walk_owner(&v.val).is_some()
                     {
+                        if let Some((oel, pel)) = self.walk_sign_view(inner) {
+                            self.sign_view = true;
+                            let t = self.read_elem(inner);
+                            self.sign_view = false;
+                            return convert(
+                                peel(self.tds, &oel),
+                                peel(self.tds, &pel),
+                                &t?,
+                                self.tds.ptr_bytes,
+                            );
+                        }
                         return self.read_elem(inner);
                     }
                 }
@@ -22511,6 +22569,15 @@ impl<'a> Body<'a> {
             owns.push(format!("{}{}", o.pre, b));
             if let Some(r) = &o.elem_refine {
                 owns.push(format!("pure (seq_forall {} {})", r, b));
+            }
+            // A write through the model replaces an element and never the
+            // length, so an array a loop only writes to keeps the length it
+            // had on entry. A call could hand back a sequence of any length
+            // its contract allows, so a loop that makes one says this itself.
+            if self.arrays.contains_key(&o.base)
+                && body_touches.as_ref().is_some_and(|t| t.calls.is_empty())
+            {
+                owns.push(format!("pure (Seq.length {} == Seq.length {})", b, o.entry));
             }
             // `_old` is the function's entry state, not this iteration's, so
             // it gets the signature's ghost binder rather than the invariant's.
@@ -26057,6 +26124,65 @@ fn array_alias_map(tds: &Typedefs, body: &Stmts) -> HashMap<String, String> {
     out
 }
 
+/// The argument a function returns a pointer into, by its contract: the one
+/// pointer parameter `p` that every `return == p` or `return == p + e` in its
+/// `_ensures` names, up to casts. Such a call's result is a pointer walked
+/// through that argument, and whether it really is one is what the callee's
+/// postcondition has to prove at each access.
+fn returned_arg(env: &Env, g: &Ident) -> Option<usize> {
+    fn find(e: &Expr, params: &[Option<String>], out: &mut Vec<usize>) {
+        fn base(e: &Expr) -> Option<&str> {
+            match &strip_vattr(e).val {
+                ExprT::Var(v) => Some(&v.val),
+                ExprT::Cast(x, _) => base(x),
+                ExprT::BinOp(BinOp::Add, l, r) => base(l).or_else(|| base(r)),
+                _ => None,
+            }
+        }
+        match &strip_vattr(e).val {
+            ExprT::BinOp(BinOp::Eq, l, r) => {
+                for (a, b) in [(l, r), (r, l)] {
+                    if matches!(&strip_vattr(a).val, ExprT::Var(v) if &*v.val == "return")
+                        && let Some(n) = base(b)
+                        && let Some(k) = params.iter().position(|p| p.as_deref() == Some(n))
+                    {
+                        out.push(k);
+                    }
+                }
+            }
+            ExprT::BinOp(_, l, r) => {
+                find(l, params, out);
+                find(r, params, out);
+            }
+            ExprT::UnOp(_, x)
+            | ExprT::Cast(x, _)
+            | ExprT::Forall(_, _, x)
+            | ExprT::Exists(_, _, x) => find(x, params, out),
+            ExprT::Cond(a, b, c) => {
+                find(a, params, out);
+                find(b, params, out);
+                find(c, params, out);
+            }
+            _ => {}
+        }
+    }
+    let decl = env.lookup_fn(g)?;
+    let params: Vec<Option<String>> = decl
+        .args
+        .iter()
+        .map(|a| a.name.as_ref().map(|n| n.val.to_string()))
+        .collect();
+    let mut out = Vec::new();
+    for e in decl.ensures.iter() {
+        find(e, &params, &mut out);
+    }
+    out.dedup();
+    match out[..] {
+        [k] => Some(k),
+        _ => None,
+    }
+}
+
 /// The array parameter each pointer the body walks is a pointer into.
 ///
 /// `for (; *s; s++)` moves `s` rather than indexing it, so the ownership the
@@ -26075,7 +26201,11 @@ fn array_alias_map(tds: &Typedefs, body: &Stmts) -> HashMap<String, String> {
 /// Nothing here is trusted. The access focuses the array at the pointer with
 /// a precondition that says the pointer really is in it, and that is what F*
 /// checks; this only decides which array to ask.
-fn walk_map(body: &Stmts, arrays: &HashSet<String>) -> HashMap<String, Result<String, String>> {
+fn walk_map(
+    body: &Stmts,
+    arrays: &HashSet<String>,
+    returned: &dyn Fn(&Ident) -> Option<usize>,
+) -> HashMap<String, Result<String, String>> {
     #[derive(Default)]
     struct Facts {
         srcs: HashMap<String, Vec<String>>,
@@ -26083,31 +26213,40 @@ fn walk_map(body: &Stmts, arrays: &HashSet<String>) -> HashMap<String, Result<St
         unknown: HashSet<String>,
     }
     // The names a value comes from, or `None` when it comes from something
-    // that is not a pointer this can follow.
-    fn sources(e: &Expr) -> Option<(Vec<String>, bool)> {
+    // that is not a pointer this can follow. A call whose contract says it
+    // returns a pointer into one of its arguments (`returned_arg`) comes from
+    // that argument.
+    fn sources(
+        e: &Expr,
+        returned: &dyn Fn(&Ident) -> Option<usize>,
+    ) -> Option<(Vec<String>, bool)> {
         match &strip_vattr(e).val {
             ExprT::Var(v) => Some((vec![v.val.to_string()], false)),
-            ExprT::Cast(x, _) => sources(x),
-            ExprT::BinOp(BinOp::Add, l, r) => sources(l)
+            ExprT::Cast(x, _) => sources(x, returned),
+            ExprT::BinOp(BinOp::Add, l, r) => sources(l, returned)
                 .filter(|_| !matches!(strip_vattr(l).val, ExprT::IntLit(..)))
-                .or_else(|| sources(r))
+                .or_else(|| sources(r, returned))
                 .map(|(s, _)| (s, true)),
-            ExprT::BinOp(BinOp::Sub, l, _) => sources(l).map(|(s, _)| (s, true)),
+            ExprT::BinOp(BinOp::Sub, l, _) => sources(l, returned).map(|(s, _)| (s, true)),
             ExprT::Cond(_, a, b) => {
-                let (mut x, s1) = sources(a)?;
-                let (y, s2) = sources(b)?;
+                let (mut x, s1) = sources(a, returned)?;
+                let (y, s2) = sources(b, returned)?;
                 x.extend(y);
                 Some((x, s1 || s2))
             }
             ExprT::PreIncr(x) | ExprT::PostIncr(x) | ExprT::PreDecr(x) | ExprT::PostDecr(x) => {
-                sources(x).map(|(s, _)| (s, true))
+                sources(x, returned).map(|(s, _)| (s, true))
             }
-            ExprT::AssignExpr(_, r) => sources(r),
+            ExprT::AssignExpr(_, r) => sources(r, returned),
+            ExprT::FnCall(g, args) => {
+                let k = returned(g)?;
+                sources(args.get(k)?, returned).map(|(s, _)| (s, true))
+            }
             _ => None,
         }
     }
-    fn assign(f: &mut Facts, x: String, rhs: &Expr) {
-        match sources(rhs) {
+    fn assign(f: &mut Facts, x: String, rhs: &Expr, returned: &dyn Fn(&Ident) -> Option<usize>) {
+        match sources(rhs, returned) {
             Some((s, stepped)) => {
                 if stepped || s.iter().any(|n| *n == x) {
                     f.stepped.insert(x.clone());
@@ -26119,63 +26258,63 @@ fn walk_map(body: &Stmts, arrays: &HashSet<String>) -> HashMap<String, Result<St
             }
         }
     }
-    fn expr(f: &mut Facts, e: &Expr) {
+    fn expr(f: &mut Facts, e: &Expr, r0: &dyn Fn(&Ident) -> Option<usize>) {
         match &e.val {
             ExprT::AssignExpr(l, r) => {
                 if let ExprT::Var(v) = &strip_vattr(l).val {
-                    assign(f, v.val.to_string(), r);
+                    assign(f, v.val.to_string(), r, r0);
                 }
-                expr(f, l);
-                expr(f, r);
+                expr(f, l, r0);
+                expr(f, r, r0);
             }
             ExprT::PreIncr(x) | ExprT::PostIncr(x) | ExprT::PreDecr(x) | ExprT::PostDecr(x) => {
                 if let ExprT::Var(v) = &strip_vattr(x).val {
                     f.stepped.insert(v.val.to_string());
                 }
-                expr(f, x);
+                expr(f, x, r0);
             }
             ExprT::Ref(x) => {
                 if let Some(n) = lvalue_name(strip_vattr(x)) {
                     f.unknown.insert(n);
                 }
-                expr(f, x);
+                expr(f, x, r0);
             }
             ExprT::FnCall(_, args) | ExprT::FnPtrCall(_, args) => {
                 for a in args.iter() {
-                    expr(f, a);
+                    expr(f, a, r0);
                 }
             }
             ExprT::Deref(x)
             | ExprT::Member(x, _)
             | ExprT::VAttr(_, x)
             | ExprT::UnOp(_, x)
-            | ExprT::Cast(x, _) => expr(f, x),
+            | ExprT::Cast(x, _) => expr(f, x, r0),
             ExprT::Index(x, y) | ExprT::BinOp(_, x, y) => {
-                expr(f, x);
-                expr(f, y);
+                expr(f, x, r0);
+                expr(f, y, r0);
             }
             ExprT::Cond(a, b, c) => {
-                expr(f, a);
-                expr(f, b);
-                expr(f, c);
+                expr(f, a, r0);
+                expr(f, b, r0);
+                expr(f, c, r0);
             }
             _ => {}
         }
     }
-    fn stmts(f: &mut Facts, ss: &Stmts) {
+    fn stmts(f: &mut Facts, ss: &Stmts, r0: &dyn Fn(&Ident) -> Option<usize>) {
         for s in ss.iter() {
             match &s.val {
-                StmtT::Call(e) | StmtT::Return(Some(e)) => expr(f, e),
+                StmtT::Call(e) | StmtT::Return(Some(e)) => expr(f, e, r0),
                 StmtT::Let(x, _, e) => {
-                    assign(f, x.val.to_string(), e);
-                    expr(f, e);
+                    assign(f, x.val.to_string(), e, r0);
+                    expr(f, e, r0);
                 }
                 StmtT::Assign(l, r) => {
                     if let ExprT::Var(v) = &strip_vattr(l).val {
-                        assign(f, v.val.to_string(), r);
+                        assign(f, v.val.to_string(), r, r0);
                     }
-                    expr(f, l);
-                    expr(f, r);
+                    expr(f, l, r0);
+                    expr(f, r, r0);
                 }
                 StmtT::If {
                     cond,
@@ -26183,9 +26322,9 @@ fn walk_map(body: &Stmts, arrays: &HashSet<String>) -> HashMap<String, Result<St
                     else_branch,
                     ..
                 } => {
-                    expr(f, cond);
-                    stmts(f, then_branch);
-                    stmts(f, else_branch);
+                    expr(f, cond, r0);
+                    stmts(f, then_branch, r0);
+                    stmts(f, else_branch, r0);
                 }
                 StmtT::Match {
                     scrutinee,
@@ -26193,17 +26332,17 @@ fn walk_map(body: &Stmts, arrays: &HashSet<String>) -> HashMap<String, Result<St
                     default_branch,
                     ..
                 } => {
-                    expr(f, scrutinee);
+                    expr(f, scrutinee, r0);
                     for b in branches.iter() {
-                        stmts(f, &b.body);
+                        stmts(f, &b.body, r0);
                     }
-                    stmts(f, default_branch);
+                    stmts(f, default_branch, r0);
                 }
                 StmtT::While { cond, body, .. } => {
-                    expr(f, cond);
-                    stmts(f, body);
+                    expr(f, cond, r0);
+                    stmts(f, body, r0);
                 }
-                StmtT::GotoBlock { body, .. } => stmts(f, body),
+                StmtT::GotoBlock { body, .. } => stmts(f, body, r0),
                 // A ghost statement can say anything about a pointer it names.
                 StmtT::GhostStmt(c) => {
                     let mut out = HashSet::new();
@@ -26215,7 +26354,7 @@ fn walk_map(body: &Stmts, arrays: &HashSet<String>) -> HashMap<String, Result<St
         }
     }
     let mut f = Facts::default();
-    stmts(&mut f, body);
+    stmts(&mut f, body, returned);
     // Owners by fixpoint: an array parameter owns itself, and a name owns
     // whatever its sources own. A source that is neither an array parameter
     // nor assigned here holds a value from outside, which is unknown.
@@ -26858,7 +26997,7 @@ fn emit_body(
             .iter()
             .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
             .collect();
-        walk_map(&defn.body, &names)
+        walk_map(&defn.body, &names, &|g| returned_arg(&env, g))
             .into_values()
             .filter_map(|o| o.ok())
             .collect()
@@ -26921,6 +27060,9 @@ fn emit_body(
         );
     }
 
+    let walks = walk_map(&defn.body, &arrays.keys().cloned().collect(), &|g| {
+        returned_arg(&env, g)
+    });
     let mut b = Body {
         tds,
         env,
@@ -27003,6 +27145,7 @@ fn emit_body(
         break_flag: None,
         frame_slots: Vec::new(),
         join_written: None,
+        sign_view: false,
         divergent_fns,
         blocks: Vec::new(),
         stored_aliases: {
@@ -27018,7 +27161,7 @@ fn emit_body(
         byte_bases: byte_base_map(&defn.body),
         fp_from_call: call_bound_map(&defn.body),
         array_aliases: array_alias_map(tds, &defn.body),
-        walks: walk_map(&defn.body, &arrays.keys().cloned().collect()),
+        walks,
         active: HashMap::new(),
         union_values: HashMap::new(),
         // Only where the contract survived: a dropped `_requires` is not a

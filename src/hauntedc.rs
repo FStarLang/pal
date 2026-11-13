@@ -417,6 +417,44 @@ fn mk_binop(binop: BinOp, lhs: Expr, rhs: Expr, loc: Rc<SourceInfo>) -> Expr {
 
 type Extra<'tokens, 'src> = extra::Err<Rich<'tokens, Token<'src>, SimpleSpan>>;
 
+/// The integer type a list of C type specifiers names, whatever their order.
+fn int_specifiers(words: &[&str], tw: &TargetIntWidths) -> Result<TypeT, &'static str> {
+    let count = |w: &str| words.iter().filter(|x| **x == w).count();
+    let (signed, unsigned, short, long, int, char) = (
+        count("signed"),
+        count("unsigned"),
+        count("short"),
+        count("long"),
+        count("int"),
+        count("char"),
+    );
+    if signed + unsigned > 1
+        || short > 1
+        || long > 2
+        || int > 1
+        || char > 1
+        || (short > 0 && long > 0)
+        || (char > 0 && (short + long + int) > 0)
+    {
+        return Err("invalid combination of type specifiers");
+    }
+    let width = if char > 0 {
+        tw.char_width
+    } else if short > 0 {
+        tw.short_width
+    } else if long == 2 {
+        tw.long_long_width
+    } else if long == 1 {
+        tw.long_width
+    } else {
+        tw.int_width
+    };
+    Ok(TypeT::Int {
+        signed: unsigned == 0,
+        width,
+    })
+}
+
 fn type_parser<
     'tokens,
     'src: 'tokens,
@@ -426,58 +464,24 @@ fn type_parser<
     sift: &'src SIFT,
     target_widths: &'src TargetIntWidths,
 ) -> impl Parser<'tokens, I, Rc<crate::ir::Type>, Extra<'tokens, 'src>> + Clone {
-    let signedness = select! {
-        Token::Ident("signed") => true,
-        Token::Ident("unsigned") => false,
-    }
-    .padded_by(ws());
-
-    let size_modifier = select! {
-        Token::Ident("short") => 0u8,
-        Token::Ident("long") => 1u8,
-    }
-    .padded_by(ws())
-    .then(
-        select! { Token::Ident("long") => () }
-            .padded_by(ws())
-            .or_not(),
-    )
-    .map(|(m, extra_long)| match (m, extra_long) {
-        (0, _) => 0u8,
-        (1, None) => 1u8,
-        (1, Some(())) => 2u8,
-        _ => unreachable!(),
-    });
-
-    let int_or_char = select! {
-        Token::Ident("int") => false,
-        Token::Ident("char") => true,
+    // C integer type specifiers, in any order: `long unsigned int` and
+    // `char unsigned` are as good as `unsigned long` and `unsigned char`.
+    let int_word = select! {
+        Token::Ident("signed") => "signed",
+        Token::Ident("unsigned") => "unsigned",
+        Token::Ident("short") => "short",
+        Token::Ident("long") => "long",
+        Token::Ident("int") => "int",
+        Token::Ident("char") => "char",
     }
     .padded_by(ws());
 
     let tw = *target_widths;
-    let integer_type = signedness
-        .or_not()
-        .then(size_modifier.or_not())
-        .then(int_or_char.or_not())
-        .try_map(move |((sign_opt, size_opt), base_opt), span| {
-            if sign_opt.is_none() && size_opt.is_none() && base_opt.is_none() {
-                return Err(Rich::custom(span, "expected type specifier"));
-            }
-            let signed = sign_opt.unwrap_or(true);
-            let is_char = base_opt == Some(true);
-            let width = if is_char {
-                tw.char_width
-            } else {
-                match size_opt {
-                    Some(0) => tw.short_width,
-                    Some(1) => tw.long_width,
-                    Some(2) => tw.long_long_width,
-                    None | Some(_) => tw.int_width,
-                }
-            };
-            Ok(TypeT::Int { signed, width })
-        });
+    let integer_type = int_word
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<&str>>()
+        .try_map(move |words, span| int_specifiers(&words, &tw).map_err(|m| Rich::custom(span, m)));
 
     let ident = select! { Token::Ident(ident) => ident }
         .map_with(|ident, e| Rc::<str>::from(ident).with_loc(sift.resolve_source_info(&e.span())))
@@ -561,58 +565,25 @@ fn expr_parser<
 
         // let expression = assignment_expression;
 
-        // Parse C integer type specifiers: [signed|unsigned] [short|long|long long] [int|char]
-        let signedness = select! {
-            Token::Ident("signed") => true,
-            Token::Ident("unsigned") => false,
-        }
-        .padded_by(ws());
-
-        let size_modifier = select! {
-            Token::Ident("short") => 0u8,
-            Token::Ident("long") => 1u8,
-        }
-        .padded_by(ws())
-        .then(
-            select! { Token::Ident("long") => () }
-                .padded_by(ws())
-                .or_not(),
-        )
-        .map(|(m, extra_long)| match (m, extra_long) {
-            (0, _) => 0u8,        // short
-            (1, None) => 1u8,     // long
-            (1, Some(())) => 2u8, // long long
-            _ => unreachable!(),
-        });
-
-        let int_or_char = select! {
-            Token::Ident("int") => false,
-            Token::Ident("char") => true,
+        // C integer type specifiers, in any order: `long unsigned int` and
+        // `char unsigned` are as good as `unsigned long` and `unsigned char`.
+        let int_word = select! {
+            Token::Ident("signed") => "signed",
+            Token::Ident("unsigned") => "unsigned",
+            Token::Ident("short") => "short",
+            Token::Ident("long") => "long",
+            Token::Ident("int") => "int",
+            Token::Ident("char") => "char",
         }
         .padded_by(ws());
 
         let tw = *target_widths;
-        let integer_type = signedness
-            .or_not()
-            .then(size_modifier.or_not())
-            .then(int_or_char.or_not())
-            .try_map(move |((sign_opt, size_opt), base_opt), span| {
-                if sign_opt.is_none() && size_opt.is_none() && base_opt.is_none() {
-                    return Err(Rich::custom(span, "expected type specifier"));
-                }
-                let signed = sign_opt.unwrap_or(true);
-                let is_char = base_opt == Some(true);
-                let width = if is_char {
-                    tw.char_width
-                } else {
-                    match size_opt {
-                        Some(0) => tw.short_width,
-                        Some(1) => tw.long_width,
-                        Some(2) => tw.long_long_width,
-                        None | Some(_) => tw.int_width,
-                    }
-                };
-                Ok(TypeT::Int { signed, width })
+        let integer_type = int_word
+            .repeated()
+            .at_least(1)
+            .collect::<Vec<&str>>()
+            .try_map(move |words, span| {
+                int_specifiers(&words, &tw).map_err(|m| Rich::custom(span, m))
             });
 
         let ident = select! { Token::Ident(ident) => ident }
