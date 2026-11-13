@@ -202,6 +202,15 @@ let elem_bytes_suffix (esize: nat) (b: bytes) (n: nat) (i: nat)
   = M.distributivity_add_right esize n i;
     Seq.slice_slice b (esize * n) (len b) (esize * i) (esize * i + esize)
 
+(* An array field's length as a literal, from what `array_reveal_o` states
+   (`l == esize * s`, with `s` the element count). The step is linear, yet
+   inside a large structure's carving the solver can time out on it; proved
+   here, in an empty context, the call site only matches the hypotheses. *)
+let array_len_lit (l: nat) (s: nat) (esize: nat) (n: nat) (lit: nat)
+  : Lemma (requires l == esize * s /\ s == n /\ lit == esize * n)
+          (ensures  l == lit)
+  = ()
+
 (* ---------------------------------------------------------------------------
    Splitting and joining the representation
    --------------------------------------------------------------------------- *)

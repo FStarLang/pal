@@ -10333,10 +10333,17 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                     at = at(f.offset),
                     repr = repr_of(f, &val, &v)
                 );
-                // An array's representation states its length itself; a
-                // scalar's or a struct's is a lemma.
-                if !matches!(f.shape, FieldShape::Array { .. }) {
-                    r += &format!("  {}_repr_len {} {};\n", pn, val, v);
+                // A scalar's or a struct's length is a lemma. An array's is
+                // stated by `array_reveal_o` as a product, made a literal by
+                // `array_len_lit` outside this (large) proof context.
+                match &f.shape {
+                    FieldShape::Array { esize, len, .. } => {
+                        r += &format!(
+                            "  array_len_lit (len {}) (Seq.length {}) {} {} {};\n",
+                            v, val, esize, len, f.size
+                        );
+                    }
+                    _ => r += &format!("  {}_repr_len {} {};\n", pn, val, v),
                 }
                 // Keep numeric lengths in scope before joining: recovering
                 // them through nested representations can overwhelm SMT.
