@@ -727,6 +727,9 @@ public:
       }
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/true);
+        if (hasAnnotation(f, "pal-owning"))
+          builder.set_owning(ctx.mk_ident(toStr(fieldNameStr(f)),
+                                          getRange(f->getSourceRange())));
       }
       recordTypeLayout(kLayoutUnion, toStringRef(ident_name(ident)),
                        typeForDecl(*astCtx, decl));
