@@ -190,6 +190,9 @@ impl PrettyIR for TypeT {
             TypeT::Nullable(ty) => RcDoc::text("_nullable")
                 .append(RcDoc::line())
                 .append(ty.to_doc()),
+            TypeT::Overread(ty) => RcDoc::text("_pal_overread")
+                .append(RcDoc::line())
+                .append(ty.to_doc()),
             TypeT::Unknown => RcDoc::text("?unknown"),
             TypeT::Error => RcDoc::text("???"),
         }
@@ -710,13 +713,7 @@ impl PrettyIR for FnDecl {
         } else {
             RcDoc::nil()
         };
-        let overread_prefix = if self.is_overread {
-            RcDoc::text("_pal_overread").append(RcDoc::line())
-        } else {
-            RcDoc::nil()
-        };
-        overread_prefix
-            .append(total_prefix)
+        total_prefix
             .append(pure_prefix)
             .append(self.ret_type.to_doc())
             .append(RcDoc::line())

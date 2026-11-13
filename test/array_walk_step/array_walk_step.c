@@ -33,12 +33,12 @@ void zero_even(_array uint64_t *d, size_t n)
 
 /* `p = p + k`: a step by a computed count. */
 uint32_t every(_array const uint32_t *s, size_t k, size_t n)
-	_requires(0 < k && k * n < s._length && s._length <= 1000000)
-	_ensures(return == s[k * n])
+	_requires(0 < k && (_specint)k * n < s._length && s._length <= 1000000)
+	_ensures(return == s[(_specint)k * n])
 {
 	const uint32_t *p = s;
 	for (size_t i = 0; i < n; i++)
-		_invariant(i <= n && p - s == k * i)
+		_invariant(i <= n && p - s == (_specint)k * i)
 		p = p + k;
 	return *p;
 }

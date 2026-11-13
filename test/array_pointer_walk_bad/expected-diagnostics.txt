@@ -1,3 +1,4 @@
 # Expected translation diagnostic substrings
 a dereference of `p`, a pointer moved through more than one array (`a`, `b`)
 a dereference of `p`, a pointer moved through an array but also given a value that does not come from one
+a conversion of a pointer distance that can change its value
