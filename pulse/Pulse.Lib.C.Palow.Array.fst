@@ -758,6 +758,46 @@ let walk_ok_add (esize: pos) (a: ptr) (off: SZ.t)
           [SMTPat (walk_ok esize a (a +! off))]
   = addr_of_add_nowrap a off
 
+(* A step of `k` elements forward that stays within `len` elements of the
+   base, whose range does not reach `addr_limit`, is a walk to the next
+   position. `walk_step` says the same given that the new address does not
+   wrap, which is a product of the position and the element size; this does
+   the multiplication once, here, rather than in every loop that steps. *)
+let walk_next (esize: nat) (a q: ptr) (len: nat) (k: nat) (n: SZ.t)
+  : Lemma (requires addr_of a + esize * len < T.addr_limit /\ walk_ok esize a q /\
+                    SZ.v n == esize * k /\ walk_idx esize a q + k <= len)
+          (ensures  walk_ok esize a (q +! n) /\
+                    walk_idx esize a (q +! n) == walk_idx esize a q + k)
+  = walk_addr esize a q k;
+    M.lemma_mult_le_left esize (walk_idx esize a q + k) len;
+    M.cancel_mul_mod k esize;
+    M.cancel_mul_div k esize;
+    walk_step esize a q n
+
+let walk_next_post (esize: nat) (a q: ptr) (len: nat) (k: nat) (n: SZ.t) : prop =
+  walk_ok esize a q /\ SZ.v n == esize * k /\ walk_idx esize a q + k <= len ==>
+  walk_ok esize a (q +! n) /\ walk_idx esize a (q +! n) == walk_idx esize a q + k
+
+let walk_next_if (esize: nat) (a q: ptr) (len: nat) (k: nat) (n: SZ.t)
+  : Lemma (requires addr_of a + esize * len < T.addr_limit)
+          (ensures  walk_next_post esize a q len k n)
+  = FStar.Classical.move_requires (walk_next esize a q len k) n
+
+(* `p++` or `p += k` on a pointer walked through `a`. The bound comes from the
+   ownership of `a`; the step is a fact only where it stays in the array,
+   which is where C defines it, so the conclusion is conditional and calling
+   this never adds an obligation. *)
+ghost fn array_walk_next (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                        (q: ptr) (k: SZ.t) (n: SZ.t) (#p: perm) (#xs: Seq.seq t)
+  preserves array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
+  ensures   pure (walk_next_post (SZ.v esize) a q (Seq.length xs) (SZ.v k) n)
+{
+  array_fits t_repr a esize ealign;
+  assert pure (addr_of a + SZ.v esize * Seq.length xs < T.addr_limit);
+  walk_next_if (SZ.v esize) a q (Seq.length xs) (SZ.v k) n;
+  assert pure (walk_next_post (SZ.v esize) a q (Seq.length xs) (SZ.v k) n);
+}
+
 (* ---------------------------------------------------------------------------
    Lending the rest of an array
 

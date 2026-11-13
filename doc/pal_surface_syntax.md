@@ -209,7 +209,7 @@ size_t wcslen(_array const wchar_t *s)
 }
 ```
 
-A reassigned array parameter, or a local pointer, is *walked* when every value it is given comes from one `_array` parameter: a copy of it or of another walked pointer, `p ± n`, `p++`/`p--`/`++p`/`--p`, `p += n`, `c ? p : q`. `*p`, `p[i]`, `*p++` and `*(p + i)` on it read and write the owning array at wherever `p` points now. PAL adds to every loop invariant that each walked pointer is inside that array's allocation at an element boundary (`walk_ok`); that it is *in bounds* is for the `_invariant` to say. A pointer given values from two arrays, or from an array and anything else, is refused at the access.
+A reassigned array parameter, or a local pointer, is *walked* when every value it is given comes from one `_array` parameter: a copy of it or of another walked pointer, `p ± n`, `p++`/`p--`/`++p`/`--p`, `p += n`, `c ? p : q`. `*p`, `p[i]`, `*p++` and `*(p + i)` on it read and write the owning array at wherever `p` points now. PAL adds to every loop invariant that each walked pointer is inside that array's allocation at an element boundary (`walk_ok`); that it is *in bounds* is for the `_invariant` to say. A pointer given values from two arrays, or from an array and anything else, is refused at the access. Stepping a walked pointer forward (`p++`, `p += n`, `p + n`) needs only that the new position is at most the array's length; PAL proves it stays a `walk_ok` pointer one step further from the array's ownership (`array_walk_next`), without nonlinear arithmetic.
 
 In a loop `_invariant` or an `_assert` -- not a function's `_requires`/`_ensures`, where there are no walked pointers and `p - q` is refused -- for pointers walked through the same array:
 

@@ -14397,6 +14397,13 @@ struct Body<'a> {
     live_arms: Vec<(Rc<Expr>, String)>,
 }
 
+/// How far a walked pointer steps: a constant number of its elements, or
+/// the `size_t` term an index evaluated to.
+enum Step {
+    Const(u64),
+    Index(String),
+}
+
 /// What a subscript through an array parameter needs: the element's Palow type
 /// name, and its size as a `size_t` literal.
 #[derive(Clone)]
@@ -17363,6 +17370,48 @@ impl<'a> Body<'a> {
         Ok(Some(owner))
     }
 
+    /// A step forward of the walked pointer `x`, from `old`, by `count`
+    /// elements of `pelem` bytes each (`off` is the byte offset as emitted):
+    /// where it stays within the array, it is a walk to that position. Stated
+    /// from the array's ownership (`array_walk_next`) rather than left to the
+    /// solver, which would have to multiply the position by the element size
+    /// to see that the new address does not wrap. Skipped while the array is
+    /// split for an access or a call, which would have to be closed first.
+    fn walk_next(&mut self, x: &Expr, old: &str, pelem: u64, count: Step, off: &str) {
+        let ExprT::Var(v) = &strip_vattr(x).val else {
+            return;
+        };
+        let Some(Ok(owner)) = self.walk_owner(&v.val) else {
+            return;
+        };
+        let ap = &self.arrays[&owner];
+        let Some(esize) = ap
+            .esize
+            .strip_suffix("sz")
+            .and_then(|d| d.parse::<u64>().ok())
+        else {
+            return;
+        };
+        if esize == 0 {
+            return;
+        }
+        // The step in elements of the array, which may be narrower than the
+        // pointer's own (a word walking a byte array).
+        let k = match count {
+            Step::Const(c) if (pelem * c) % esize == 0 => format!("{}sz", pelem * c / esize),
+            Step::Index(i) if pelem == esize => i,
+            _ => return,
+        };
+        let used = format!(" {} ", ap.addr);
+        if self.pending_close.iter().any(|l| l.contains(&used)) {
+            return;
+        }
+        self.lines.push(format!(
+            "array_walk_next {}_repr {} {} {}_alignof {} {} {};",
+            ap.pn, ap.addr, ap.esize, ap.pn, old, k, off
+        ));
+    }
+
     /// That `q` points into array parameter `owner`, at an element boundary.
     fn walk_ok(&self, owner: &str, q: &str) -> String {
         let a = &self.arrays[owner];
@@ -18954,6 +19003,24 @@ impl<'a> Body<'a> {
         })
     }
 
+    /// `p + e` on a walked pointer `p` whose value is `a`, `off` being the
+    /// byte offset `byte_offset` made of `e`: see `walk_next`. The index is
+    /// taken from `off` rather than evaluated again.
+    fn walk_step(&mut self, p: &Expr, a: &str, n: u64, e: &Expr, off: &str) {
+        let count = match const_index(&strip_vattr(e).val) {
+            Some(c) => Step::Const(c),
+            None if n == 1 => Step::Index(off.to_string()),
+            None => match off
+                .strip_prefix(&format!("({}sz `SizeT.mul` ", n))
+                .and_then(|i| i.strip_suffix(')'))
+            {
+                Some(i) => Step::Index(i.to_string()),
+                None => return,
+            },
+        };
+        self.walk_next(p, a, n, count, off);
+    }
+
     /// A pointer read purely for its address: compared, subtracted or offset.
     fn ptr_val(&mut self, e: &Expr) -> Result<String, String> {
         let ty = self.ty_of(strip_casts(e))?;
@@ -18999,6 +19066,7 @@ impl<'a> Body<'a> {
             (BinOp::Add, Some(n), None) => {
                 let a = self.ptr_val(l)?;
                 let off = self.byte_offset(n, r)?;
+                self.walk_step(l, &a, n, r, &off);
                 Ok(Some(format!("({} +! {})", a, off)))
             }
             // `n + p` is `p + n`; C says so, and neither side has an effect
@@ -19006,6 +19074,7 @@ impl<'a> Body<'a> {
             (BinOp::Add, None, Some(n)) => {
                 let b = self.ptr_val(r)?;
                 let off = self.byte_offset(n, l)?;
+                self.walk_step(r, &b, n, l, &off);
                 Ok(Some(format!("({} +! {})", b, off)))
             }
             (BinOp::Sub, Some(n), None) => {
@@ -19746,6 +19815,10 @@ impl<'a> Body<'a> {
                         BinOp::Add => format!("({} +! {}sz)", old, esize),
                         _ => format!("({} -! {}sz)", old, esize),
                     };
+                    if op == BinOp::Add {
+                        let off = format!("{}sz", esize);
+                        self.walk_next(x, &old, esize, Step::Const(1), &off);
+                    }
                     self.store(x, "ptr", &new)?;
                     return Ok(if post { old } else { new });
                 }
