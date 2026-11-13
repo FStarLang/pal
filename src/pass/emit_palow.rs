@@ -4647,6 +4647,28 @@ fn is_slprop_clause(tds: &Typedefs, e: &Rc<Expr>) -> bool {
     is_own_refine(tds, e)
 }
 
+/// Whether a clause states ownership in any of its `&&` conjuncts: an `if`'s
+/// `_ensures` usually says what stays live alongside what is owned, and the
+/// ownership conjunct makes it the author's statement of the join all the
+/// same.
+fn states_ownership(tds: &Typedefs, e: &Expr) -> bool {
+    refine_states_own(tds, e)
+}
+
+/// A clause as its `&&` conjuncts if any of them states ownership, and
+/// whole otherwise.
+fn own_conjuncts(tds: &Typedefs, e: &Rc<Expr>) -> Exprs {
+    let (mut own, mut props) = (Vec::new(), Vec::new());
+    split_refine(tds, e, &mut own, &mut props);
+    if own.is_empty() {
+        return vec![e.clone()];
+    }
+    own.into_iter()
+        .chain(props)
+        .map(|x| Rc::new(x.clone()))
+        .collect()
+}
+
 /// Build the Pulse declaration for one C function, or explain why we cannot.
 fn emit_fn(
     tds: &Typedefs,
@@ -21823,9 +21845,12 @@ impl<'a> Body<'a> {
         // the generated frame would otherwise claim as well, and two claims to
         // one object is not a frame. So whatever such a clause names is left
         // out of the generated half and taken from the author's words instead.
+        // A clause whose `&&` conjuncts include ownership is taken apart, so
+        // `_live(x) && slprop` says the same as the two clauses written
+        // separately.
         let (own_clauses, prop_clauses): (Exprs, Exprs) = clause
             .iter()
-            .cloned()
+            .flat_map(|e| own_conjuncts(self.tds, e))
             .partition(|e| is_slprop_clause(self.tds, e));
         let mut stated: HashSet<String> = HashSet::new();
         for e in own_clauses.iter() {
@@ -23386,7 +23411,7 @@ impl<'a> Body<'a> {
                 // function pointer weakened from two different callees is the
                 // case that matters -- and then only the author's own words
                 // name the shape they have in common.
-                let states_own = ensures.iter().any(|e| is_slprop_clause(self.tds, e));
+                let states_own = ensures.iter().any(|e| states_ownership(self.tds, e));
                 let mut fps: Vec<(String, String)> = Vec::new();
                 let nt = self.null_test(cond);
                 let pt = if nt.is_none() {
