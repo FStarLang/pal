@@ -1198,12 +1198,22 @@ impl<'a> Elaborator<'a> {
             // conversion to the array's own element type is a pointer into
             // the same array, so it keeps the array's kind, as a copy of a
             // typed array parameter does.
+            // The same holds at the other signedness of the element type
+            // (`const char *src = _src;`, `(const unsigned char *)(void *)l0`):
+            // C lets an object be accessed through that type (C11 6.5p7),
+            // and the access is the stored bits read at the new type.
             if let ExprT::Cast(inner, to) = &v.val
                 && let TypeT::Pointer(pt, PointerKind::Unknown | PointerKind::Ref) = &to.val
+                && let inner = strip_ptr_casts(inner)
                 && let Ok(i_ty) = env.infer_expr(inner)
                 && let TypeT::Pointer(ipt, ik @ (PointerKind::Array | PointerKind::ArrayPtr)) =
                     &env.vtype_whnf(i_ty).val
-                && env.vtype_eq(pt.clone().into(), ipt.clone().into())
+                && (env.vtype_eq(pt.clone().into(), ipt.clone().into())
+                    || matches!(
+                        (&env.vtype_whnf(pt.clone().into()).val, &env.vtype_whnf(ipt.clone().into()).val),
+                        (TypeT::Int { width: a, signed: x }, TypeT::Int { width: b, signed: y })
+                            if a == b && x != y
+                    ))
             {
                 let ik = ik.clone();
                 let s = Rc::make_mut(&mut stmts[j]);
@@ -1671,4 +1681,13 @@ fn int32_type(loc: &Rc<SourceInfo>) -> Rc<Type> {
     }
     .with_loc(loc.clone())
     .into()
+}
+
+/// A pointer expression with its pointer-to-pointer conversions removed:
+/// `(const void *)l0` is `l0` as far as which object it points into goes.
+fn strip_ptr_casts(e: &Expr) -> &Expr {
+    match &e.val {
+        ExprT::Cast(inner, to) if matches!(to.val, TypeT::Pointer(..)) => strip_ptr_casts(inner),
+        _ => e,
+    }
 }

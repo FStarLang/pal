@@ -3988,6 +3988,16 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// The signedness and width of a machine integer type.
+    fn int_range(&self, ty: &Type) -> Option<(bool, u32)> {
+        match self.tds.resolve(ty).val {
+            TypeT::Int { signed, width } => Some((signed, width)),
+            TypeT::SizeT => Some((false, 8 * self.tds.ptr_bytes as u32)),
+            TypeT::PtrdiffT => Some((true, 8 * self.tds.ptr_bytes as u32)),
+            _ => None,
+        }
+    }
+
     fn spec_wrap(&self, ty: &Type, n: String) -> String {
         let (signed, width) = match peel(self.tds, ty).val {
             TypeT::Int { signed, width } => (signed, width),
@@ -4124,6 +4134,20 @@ impl<'a> Spec<'a> {
         // clause binds itself, which is exactly where these casts appear.
         if let Some(c) = self.cast_bits(e) {
             return self.num(&c, w);
+        }
+        // A conversion between machine integer types is the number when the
+        // target holds every value of the source, and C's reduction of it
+        // otherwise: `(size_t)n` of an `ssize_t` is `spec_to_unsigned`
+        // rather than a machine conversion whose typing needs the value to
+        // be a valid `size_t` already.
+        if let ExprT::Cast(inner, to) = &strip_vattr(e).val
+            && let Some((ts, tw)) = self.int_range(to)
+            && let Ok(ity) = self.ty_of(inner)
+            && let Some((ss, sw)) = self.int_range(&ity)
+        {
+            let n = self.num(inner, w)?;
+            let fits = if ss == ts { tw >= sw } else { !ss && tw > sw };
+            return Ok(if fits { n } else { self.spec_wrap(to, n) });
         }
         if let ExprT::Cast(inner, _) = &strip_vattr(e).val
             && matches!(
@@ -17560,6 +17584,47 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// An element access -- `*p` or `p[i]` -- through a pointer that views
+    /// an array of integers at the other signedness of its element type: a
+    /// walked pointer (`walk_sign_view`), or a local that is another name for
+    /// the array (`const unsigned char *l = (const void *)l0;`). The element
+    /// type and the type the access is at. The access focuses the array at
+    /// its own type and converts what it reads or writes, which is the same
+    /// byte at the other type (`int8_as_uint8_repr`).
+    fn place_sign_view(&self, e: &Expr) -> Option<(Rc<Type>, Rc<Type>)> {
+        let p = match &strip_vattr(e).val {
+            ExprT::Deref(p) | ExprT::Index(p, _) => p,
+            _ => return None,
+        };
+        if let Some(v) = self.walk_sign_view(p) {
+            return Some(v);
+        }
+        let ExprT::Var(v) = &strip_vattr(p).val else {
+            return None;
+        };
+        if !self.is_array_alias(&v.val) {
+            return None;
+        }
+        let owner = self.array_alias(&v.val);
+        let ot = self.env.local_type(&owner)?;
+        let oel = pointee(self.tds, peel(self.tds, &ot))?.clone();
+        let pt = self.ty_of(p).ok()?;
+        let pel = pointee(self.tds, peel(self.tds, &pt))?.clone();
+        match (&self.tds.resolve(&oel).val, &self.tds.resolve(&pel).val) {
+            (
+                TypeT::Int {
+                    width: a,
+                    signed: x,
+                },
+                TypeT::Int {
+                    width: b,
+                    signed: y,
+                },
+            ) if a == b && x != y => Some((oel.into(), pel.into())),
+            _ => None,
+        }
+    }
+
     /// The array an argument for an `_array` parameter is the rest of: a
     /// pointer walked through it, or the array plus an offset. The array
     /// itself is passed whole, and is not one of these.
@@ -18577,6 +18642,38 @@ impl<'a> Body<'a> {
             }
             _ => None,
         }
+    }
+
+    /// An assertion in statement position -- an `_assert`, or a label's
+    /// `_ensures` checked at a `goto` -- read off the current state where it
+    /// can be, and as a contract over the frame where it needs binders (a
+    /// quantifier over memory, `_length`, `_old(p[k])`).
+    fn stmt_assertion(&mut self, e: &Rc<Expr>) -> Result<String, String> {
+        let mark = self.lines.len();
+        let p = match self.assertion(e) {
+            Ok(p) => p,
+            // An `_old` of a parameter a local shadows is refused
+            // either way; one the frame can read (`_old(d[k])`)
+            // falls back to the contract reading below.
+            Err(why)
+                if why.starts_with("`_old`") && {
+                    let shadowed: HashSet<String> = self
+                        .params
+                        .iter()
+                        .filter(|p| !self.old_params.contains(*p))
+                        .cloned()
+                        .collect();
+                    old_mentions(e, &shadowed, false)
+                } =>
+            {
+                return Err(why);
+            }
+            Err(why) => {
+                self.lines.truncate(mark);
+                self.spec_assertion(e).map_err(|_| why)?
+            }
+        };
+        Ok(p)
     }
 
     /// A statement assertion may mix ownership and pure propositions. Keep
@@ -19608,6 +19705,20 @@ impl<'a> Body<'a> {
                     Err(format!("`{}` is not in scope", v.val))
                 }
             }
+            ExprT::Deref(_) | ExprT::Index(..)
+                if !self.sign_view
+                    && let Some((oel, pel)) = self.place_sign_view(e) =>
+            {
+                self.sign_view = true;
+                let t = self.rvalue(e);
+                self.sign_view = false;
+                convert(
+                    peel(self.tds, &oel),
+                    peel(self.tds, &pel),
+                    &t?,
+                    self.tds.ptr_bytes,
+                )
+            }
             ExprT::Deref(inner) => {
                 if let ExprT::Var(v) = &inner.val {
                     if self.out_params.iter().any(|n| *n == *v.val) {
@@ -19618,17 +19729,6 @@ impl<'a> Body<'a> {
                     if self.arrays.contains_key(&*v.val.to_string())
                         || self.walk_owner(&v.val).is_some()
                     {
-                        if let Some((oel, pel)) = self.walk_sign_view(inner) {
-                            self.sign_view = true;
-                            let t = self.read_elem(inner);
-                            self.sign_view = false;
-                            return convert(
-                                peel(self.tds, &oel),
-                                peel(self.tds, &pel),
-                                &t?,
-                                self.tds.ptr_bytes,
-                            );
-                        }
                         return self.read_elem(inner);
                     }
                 }
@@ -22616,6 +22716,22 @@ impl<'a> Body<'a> {
         if let Some(p) = self.unalias(lhs) {
             return self.store(&p, pn, value);
         }
+        if !self.sign_view
+            && let Some((oel, pel)) = self.place_sign_view(lhs)
+        {
+            let v = convert(
+                peel(self.tds, &pel),
+                peel(self.tds, &oel),
+                value,
+                self.tds.ptr_bytes,
+            )?;
+            let opn = palow_name(self.tds, &oel)
+                .ok_or_else(|| format!("a store of {}", describe(&oel)))?;
+            self.sign_view = true;
+            let r = self.store(lhs, &opn, &v);
+            self.sign_view = false;
+            return r;
+        }
         // Whatever was known about the code pointers here is stale now; the
         // caller re-establishes it if the store was a decay.
         self.clear_fn_notes(lhs);
@@ -23470,10 +23586,27 @@ impl<'a> Body<'a> {
         let outer_prescattered = self.prescattered.clone();
         let mark = self.slots.len();
         let r = (|| -> Result<(), String> {
-            for s in fold_exits(body).iter() {
+            let folded = fold_exits(body);
+            // Where the body ends in an `if` one arm of which leaves, the
+            // start of its lines and whether `then` is the arm that falls
+            // through to the closing brace.
+            let mut tail_if = None;
+            for (k, s) in folded.iter().enumerate() {
                 if matches!(s.val, StmtT::Goto(_)) {
                     self.rest(std::slice::from_ref(s))?;
                     break;
+                }
+                if k + 1 == folded.len()
+                    && let StmtT::If {
+                        then_branch,
+                        else_branch,
+                        ensures,
+                        ..
+                    } = &s.val
+                    && ensures.is_empty()
+                    && exits(then_branch) != exits(else_branch)
+                {
+                    tail_if = Some((self.lines.len(), !exits(then_branch)));
                 }
                 self.env.push_stmt(s);
                 self.stmt(s)?;
@@ -23482,8 +23615,24 @@ impl<'a> Body<'a> {
             // invariant has to hold at the closing brace without it: Pulse
             // would otherwise be asked to carry a local across an edge where C
             // says its lifetime has ended.
+            let released = self.lines.len();
             self.release_from(mark);
             self.forget_loop_storage()?;
+            // The arm that leaves has released all of this already, so it
+            // goes at the end of the other arm. The `if` is then the body's
+            // last statement, which Pulse checks arm by arm against the
+            // invariant, instead of joining the arms first and forgetting
+            // what the arm that falls through knew (`if (!c) return 0;`
+            // followed by an `if` that writes a local).
+            if let Some((start, then_falls)) = tail_if
+                && released < self.lines.len()
+                && self.lines[..released].last().map(String::as_str) == Some("};")
+                && let Some(mid) = (start..released).rfind(|&j| self.lines[j] == "} else {")
+            {
+                let cleanup = self.lines.split_off(released);
+                let at = if then_falls { mid } else { released - 1 };
+                self.lines.splice(at..at, cleanup.iter().map(|l| indent(l)));
+            }
             for &i in &self.loop_storage {
                 self.slots[i].init = false;
                 self.slots[i].holds_fn.clear();
@@ -24207,30 +24356,7 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Assert(e) => {
-                let mark = self.lines.len();
-                let p = match self.assertion(e) {
-                    Ok(p) => p,
-                    // An `_old` of a parameter a local shadows is refused
-                    // either way; one the frame can read (`_old(d[k])`)
-                    // falls back to the contract reading below.
-                    Err(why)
-                        if why.starts_with("`_old`") && {
-                            let shadowed: HashSet<String> = self
-                                .params
-                                .iter()
-                                .filter(|p| !self.old_params.contains(*p))
-                                .cloned()
-                                .collect();
-                            old_mentions(e, &shadowed, false)
-                        } =>
-                    {
-                        return Err(why);
-                    }
-                    Err(why) => {
-                        self.lines.truncate(mark);
-                        self.spec_assertion(e).map_err(|_| why)?
-                    }
-                };
+                let p = self.stmt_assertion(e)?;
                 self.lines.push(format!("assert ({});", p));
                 if is_false_lit(e) {
                     // The assertion is still proved, never assumed. No state
@@ -25142,7 +25268,7 @@ impl<'a> Body<'a> {
                     // for, including the initialized ownership `_live` asks
                     // for rather than merely the existence of a slot.
                     for e in ensures.iter() {
-                        let p = self.assertion(e)?;
+                        let p = self.stmt_assertion(e)?;
                         self.lines.push(format!("assert ({});", p));
                     }
                     // Labels inside the one being jumped to are out of scope

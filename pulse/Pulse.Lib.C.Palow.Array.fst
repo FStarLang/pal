@@ -586,6 +586,10 @@ ghost fn array_offset_fits_at (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) 
                               (q: ptr) (#p: perm) (#xs: Seq.seq t) (i: SZ.t { walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q + SZ.v i < Seq.length xs })
   preserves array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
   ensures   pure (SZ.fits (SZ.v esize * SZ.v i))
+  (* The bound again, as a fact: the access that follows needs exactly it,
+     and in a context full of quantified invariants re-deriving it can time
+     out where finding it as a hypothesis does not. *)
+  ensures   pure (walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q + SZ.v i < Seq.length xs)
 {
   array_fits t_repr a esize ealign;
   let w : erased nat = walk_idx (SZ.v esize) a q;

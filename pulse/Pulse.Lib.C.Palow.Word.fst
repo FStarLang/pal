@@ -897,6 +897,23 @@ let word_bytes_upto_at (#t: Type0) (ev: t -> nat) (xs: Seq.seq t) (i: nat) (w: n
    same byte, so an array of one is an array of the other: this is what lets
    a `char *` be passed where a `void *` array -- an array of `unsigned char`
    -- is wanted (`memchr(s, c, n)`), and taken back afterwards. *)
+(* The two conversions as arithmetic. `FStar.Int.Cast` states them with
+   `pow2 8`, which the solver does not unfold that far; a byte read through
+   a pointer at the other signedness is one of these, and a contract over
+   the array's own elements has to meet it. *)
+let int8_to_uint8_value (x: I8.t)
+  : Lemma (U8.v (FStar.Int.Cast.int8_to_uint8 x) ==
+           (if I8.v x < 0 then I8.v x + 256 else I8.v x))
+          [SMTPat (FStar.Int.Cast.int8_to_uint8 x)]
+  = assert_norm (pow2 8 == 256)
+
+let uint8_to_int8_value (x: U8.t)
+  : Lemma (I8.v (FStar.Int.Cast.uint8_to_int8 x) ==
+           (if U8.v x >= 128 then U8.v x - 256 else U8.v x))
+          [SMTPat (FStar.Int.Cast.uint8_to_int8 x)]
+  = assert_norm (pow2 8 == 256);
+    assert_norm (pow2 7 == 128)
+
 let int8_as_uint8_repr (x: I8.t) (b: bytes)
   : Lemma (requires int8_t_repr x b)
           (ensures  uint8_t_repr (FStar.Int.Cast.int8_to_uint8 x) b)

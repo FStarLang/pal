@@ -7426,3 +7426,57 @@ Limitations:
     integer cast on the amount is dropped under that guard. A `_specint`
     on the left of a shift has no width and is rejected
     (`test/spec_bitwise`).
+70. **Sign-changing views of local aliases.** A local initialised from an
+    `_array` at the other signedness of its byte element
+    (`const char *src = _src;` on an `_array void *`, musl's `swab`;
+    `const unsigned char *l = (const void *)l0;` on a `char` array,
+    musl's `strverscmp`) was refused with "cannot subscript". The
+    elaborator now sees through pointer casts when it records a local as
+    another name for an array (`strip_ptr_casts`), and an element access
+    through such a local (`place_sign_view`) focuses the array at its own
+    element type and converts: a read is `int8_to_uint8`/`uint8_to_int8` of
+    the element, a write stores the converted value, which is the same
+    byte (`int8_to_uint8_value`, `uint8_to_int8_value` in
+    `Pulse.Lib.C.Palow.Word`). The same conversion makes a write through a
+    walked pointer at the other signedness work, which item 56's
+    `test/array_walk_followups_bad` refused; that case moved to
+    `test/sign_view_alias`.
+71. **Contract casts between machine integers.** `(size_t)n` of an
+    `ssize_t` in a contract was the machine conversion
+    `sizet_of_int64 n`, whose typing needs `n` to be a valid `size_t`
+    already, so `n <= 0 || (size_t)n <= len` did not typecheck. A cast
+    between C integer types is now the source's number when the target
+    holds all its values, and `spec_to_unsigned`/`spec_to_signed` of it
+    (item 59) otherwise.
+72. **The offset bound as a fact.** `array_offset_fits_at` also ensures
+    the bound it requires, `walk_ok a q /\ walk_idx a q + i < length`.
+    The `array_focus_at` that follows needs exactly that as a refinement,
+    and in a loop with quantified invariants (musl's `swab`) re-deriving it
+    for the second call timed out where finding it as a hypothesis does
+    not.
+73. **A loop body ending in an exiting `if` releases on the other arm.**
+    With item 61 the rest of a loop body after `if (c) return ...;` is the
+    `if`'s else arm, but the body's cleanup (releasing its locals) still
+    came after the `if`, so Pulse joined the arms first. Its join forgets
+    the falling-through arm's pure facts (`c == false`) when that arm has
+    a nested `if` of its own (musl's `strverscmp`:
+    `if (!c) return 0; if (...) dp = i+1;`), and the invariant then failed.
+    When the body's last statement is an `if` without `_ensures` exactly one
+    of whose arms exits, the cleanup now goes at the end of the other arm,
+    so the `if` is the body's tail and each arm is checked against the
+    invariant without a join (`test/sign_view_alias`).
+74. **Empty `asm` statements.** `__asm__ __volatile__ ("" : : "r"(d) :
+    "memory")` (musl's `explicit_bzero`) executes no instruction; it only
+    keeps the compiler from dropping the stores before it. An `asm`
+    statement with an empty template, no outputs and no `goto` labels is
+    translated as its input expressions, evaluated for their side
+    effects; clobbers are irrelevant to the model. Any other `asm` is still
+    refused (`test/asm_barrier`, `test/asm_reject`).
+75. **A label's `_ensures` is an assertion like `_assert`.** At each
+    `goto` (and at the fall-through into the label) the label's
+    `_ensures` was translated by the plain statement-assertion path, which
+    loads every object it mentions, so `_length`, quantifiers over array
+    contents, `_old(p)[k]` and `_old(p[k])` were refused. It now goes
+    through the same path as `_assert` (`stmt_assertion`), falling back to
+    reading the clause as a contract over the current frame
+    (`test/label_array_ensures`, modelled on musl's `strlcpy`).
