@@ -14217,6 +14217,68 @@ fn has_break(body: &Stmts) -> bool {
     body.iter().any(|s| in_stmt(s))
 }
 
+/// Whether a branch always leaves the iteration, by a `break` or a `continue`.
+fn jumps(stmts: &Stmts) -> bool {
+    match stmts.last().map(|s| &s.val) {
+        Some(StmtT::Break) | Some(StmtT::Continue) => true,
+        Some(StmtT::If {
+            then_branch,
+            else_branch,
+            ..
+        }) => jumps(then_branch) && jumps(else_branch),
+        _ => false,
+    }
+}
+
+/// A loop body's guard clauses, `if (c) { ... break; } rest`, with `rest`
+/// moved into the `else`: the statements after such an `if` run only when
+/// `c` is false, and Pulse knows that only inside the branch. The join after
+/// an `if` keeps its resources but not its path condition, so without this
+/// `rest` could not use `!c`. A `return` is already lowered this way (see
+/// `rest`); nested loops get their own pass when they are emitted.
+fn nest_jump_guards(body: &Stmts) -> Stmts {
+    let mut out: Stmts = Vec::new();
+    for (i, s) in body.iter().enumerate() {
+        match &s.val {
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => {
+                let then_n = nest_jump_guards(then_branch);
+                let rest = &body[i + 1..];
+                let guard = else_branch.is_empty()
+                    && ensures.is_empty()
+                    && jumps(then_branch)
+                    && !rest.is_empty()
+                    && !rest
+                        .iter()
+                        .any(|r| matches!(r.val, StmtT::Label { .. } | StmtT::Goto(_)));
+                let else_n = if guard {
+                    nest_jump_guards(&rest.to_vec())
+                } else {
+                    nest_jump_guards(else_branch)
+                };
+                out.push(Rc::new(Stmt {
+                    val: StmtT::If {
+                        cond: cond.clone(),
+                        then_branch: Rc::new(then_n),
+                        else_branch: Rc::new(else_n),
+                        ensures: ensures.clone(),
+                    },
+                    loc: s.loc.clone(),
+                }));
+                if guard {
+                    return out;
+                }
+            }
+            _ => out.push(s.clone()),
+        }
+    }
+    out
+}
+
 /// Whether this statement list contains a loop of its own.
 fn has_loop(body: &Stmts) -> bool {
     fn in_stmt(s: &Stmt) -> bool {
@@ -22061,6 +22123,8 @@ impl<'a> Body<'a> {
         ensures: &Exprs,
         body: &Stmts,
     ) -> Result<(), String> {
+        let nested = nest_jump_guards(body);
+        let body = &nested;
         let breaks = has_break(body);
 
         // A loop's `_requires` is the part of its invariant a `break` does not
