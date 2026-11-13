@@ -7403,3 +7403,26 @@ Limitations:
     `exists`/`forall` alternation proved from seven others of that shape,
     each a refinement hypothesis whose `iff` encoding Z3 keeps instantiating
     on every `size_t` term in scope.
+68. **Joins PAL supplies for an `if`.** Pulse's own join after an `if`
+    whose arm moves a walked pointer (musl `memchr`: a word loop inside
+    the arm) abstracts the pointer's value and keeps no fact about it, so
+    the next loop's invariant failed on the arm that did not move it. An
+    `if` without `_ensures` that writes locals and is directly followed by a
+    loop with pure invariants now takes those invariants as its `_ensures`
+    (the pure join), which is exactly what the loop needs on
+    entry (`loop_entry_joins`, `test/if_loop_join`). And when an arm has a
+    loop and the `if` is followed only by straight-line code ending in
+    `return` (musl `wmemmove`, a copy loop in each arm), Pulse could not
+    eliminate the `match cond with true -> exists* ... | false -> exists*
+    ...` it built for the join; that tail is now copied into both arms, as
+    `rest` already did for arms that return (`copyable_tail`,
+    `test/if_loops_tail`).
+69. **Bitwise operators in contracts.** `&`, `|`, `^`, `~`, `<<`, `>>` on
+    unsigned operands are `FStar.UInt.logand #w` etc. over the operands'
+    numbers (`~x` is `2^w - 1 - x`, as in the body), `w` the operand's
+    width (pointer width for `size_t`), so body
+    facts about machine words relate to them by the machine operations'
+    specifications. A shift's amount is guarded `0 <= s /\ s < w`; an
+    integer cast on the amount is dropped under that guard. A `_specint`
+    on the left of a shift has no width and is rejected
+    (`test/spec_bitwise`).
