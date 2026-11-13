@@ -7492,3 +7492,14 @@ Limitations:
     of the offending subexpression where one is known, and the expression's
     text; `weakenings` reads that location back so the error points into the
     prototype (`test/spec_dropped_at`).
+77. **Local arrays in contracts.** `bs[0]` for a local array
+    `size_t bs[4]` in an `_invariant`, `_assert` or `if`/label `_ensures`
+    was "`*bs` in a contract": the frame bound the array's contents
+    (`inv_bs`) as a local value, but only global arrays were registered as
+    pointees. `frame()` now registers a local array as a pointee bound to
+    that sequence, so `bs[i]` is `Seq.index inv_bs i` under the usual index
+    guard. An array declared without an initializer is held in the
+    `option` view until it is handed off whole, and is entered in `maybes`:
+    reading a cell is `Some?.v` and claims `Some?`, as for an `_out` array
+    being filled (`test/local_array_spec`, `test/local_array_spec_bad`;
+    musl's `strspn`/`strcspn` byte sets).

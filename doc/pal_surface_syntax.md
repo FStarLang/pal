@@ -194,6 +194,7 @@ Inside `_invariant`:
 
 - Parameters and locals are in scope by name; there is no `this`. `_old(x)` is the value at function entry.
 - `_live(x)` is accepted but unnecessary (the frame is generated).
+- A local array (`size_t bs[4] = { 0 };`, or one cleared by `memset(bs, 0, sizeof bs)`) is named by its current contents, as an `_array` parameter is: `bs[i]` reads element `i`, with `i < 4` a well-formedness guard. The same holds in an `_assert`, an `if`'s `_ensures` and a label's `_ensures`. For an array declared without an initializer, reading `bs[i]` also claims that element has been written (`test/local_array_spec`, `test/local_array_spec_bad`).
 - Ownership PAL does not generate — a helper predicate, part of an array named through an `_arrayptr` — goes in an slprop clause: `_invariant(_inline_pulse(Helpers.claim $(lo) $`arr))`. `` $`name `` there is quantified by the invariant (see `test/arrayptrs`).
 
 #### Pointers walked through an array

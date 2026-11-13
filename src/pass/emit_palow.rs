@@ -23248,11 +23248,26 @@ impl<'a> Body<'a> {
             .map(|n| (n.clone(), format!("var_{}", n)))
             .collect();
         let mut arrays: HashSet<String> = self.arrays.keys().cloned().collect();
+        let mut maybes: HashSet<String> = HashSet::new();
         for s in &self.slots {
             if s.global && s.array.is_some() {
                 let b = format!("inv_{}", s.name);
                 pointees.insert(s.name.clone(), (Some(b.clone()), Some(b)));
                 arrays.insert(s.name.clone());
+            } else if s.array.is_some()
+                && let Some(b) = locals.get(&s.name)
+            {
+                // A local array is its contents, as an array parameter is:
+                // `bs[i]` in an invariant reads the sequence the frame
+                // binds for the array's current value.
+                // One declared without an initializer is held in the
+                // `option` view until it is handed off whole, and a clause
+                // reading a cell of it claims the cell was written.
+                pointees.insert(s.name.clone(), (Some(b.clone()), Some(b.clone())));
+                arrays.insert(s.name.clone());
+                if s.array.as_ref().is_some_and(|a| a.1) {
+                    maybes.insert(s.name.clone());
+                }
             }
         }
         for o in self.owned {
@@ -23325,7 +23340,6 @@ impl<'a> Body<'a> {
         // binds is the `option` view: a cell the loop has not written yet
         // holds `None`, and a clause that reads a cell claims it is written.
         // The length is the caller's, and does not change.
-        let mut maybes: HashSet<String> = HashSet::new();
         let mut out_arrays: Vec<(String, ArrayParam)> = self
             .arrays
             .iter()
