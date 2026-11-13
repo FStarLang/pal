@@ -5326,7 +5326,12 @@ fn emit_fn(
                 .unions
                 .get(&*n.val.to_string())
                 .filter(|ui| ui.own.is_some())
-                .map(|_| (format!("union_{}", n.val), format!("union_{}_own_spec", n.val)));
+                .map(|_| {
+                    (
+                        format!("union_{}", n.val),
+                        format!("union_{}_own_spec", n.val),
+                    )
+                });
         }
         let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
             return None;
@@ -15644,8 +15649,10 @@ impl<'a> Body<'a> {
         }
         let un = format!("union_{}", uname);
         let w = self.fresh("own_value");
-        self.lines
-            .push(format!("with {}. assert ({}_pts_to {} _ {});", w, un, at, w));
+        self.lines.push(format!(
+            "with {}. assert ({}_pts_to {} _ {});",
+            w, un, at, w
+        ));
         Some((un, at, w))
     }
 

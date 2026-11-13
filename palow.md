@@ -1596,8 +1596,11 @@ A contract on a `union req *` states `union_req_own` next to
   (`overlay_union_own_clobber_bad`).
 
 At most one member may be `_owning`, and it has to be a struct whose `_own`
-is not empty; otherwise the union is skipped with the reason.
-Tests: `overlay_union_own`, `overlay_union_own_clobber_bad`.
+is not empty; otherwise the union is skipped with the reason. `_owning`
+anywhere else (a struct field, a member of a union that is not `_overlay`)
+is reported rather than ignored.
+Tests: `overlay_union_own`, `overlay_union_own_clobber_bad`,
+`overlay_union_owning_reject`.
 
 Limitations:
 
