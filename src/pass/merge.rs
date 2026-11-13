@@ -196,7 +196,8 @@ fn rename_type_in_place(ty: &mut Type, renames: &HashMap<Rc<str>, Rc<Ident>>) {
         | TypeT::FixedArray(inner, _)
         | TypeT::FlexArray(inner)
         | TypeT::Plain(inner)
-        | TypeT::Nullable(inner) => rename_type_in_place(Rc::make_mut(inner), renames),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => rename_type_in_place(Rc::make_mut(inner), renames),
         TypeT::Refine(inner, pred)
         | TypeT::RefineAlways(inner, pred)
         | TypeT::RefineUninit(inner, pred) => {
@@ -630,7 +631,8 @@ fn is_plain_ptr(ty: &Type) -> bool {
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, _, _, _)
-        | TypeT::Nullable(inner) => is_plain_ptr(inner),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => is_plain_ptr(inner),
         _ => false,
     }
 }
@@ -646,7 +648,8 @@ fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, _, _, _)
-        | TypeT::Nullable(inner) => collect_type_refs(inner, out),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => collect_type_refs(inner, out),
         TypeT::TypeRef(k) => {
             let key = match k {
                 TypeRefKind::Typedef(n) => (TYPEDEF_NS, n.val.clone()),
@@ -670,7 +673,8 @@ fn collect_value_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, _, _, _)
-        | TypeT::Nullable(inner) => collect_value_type_refs(inner, out),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => collect_value_type_refs(inner, out),
         TypeT::TypeRef(_) => collect_type_refs(ty, out),
         _ => {}
     }

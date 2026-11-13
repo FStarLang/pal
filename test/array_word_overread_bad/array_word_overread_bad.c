@@ -2,8 +2,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* The fast strlen without `_pal_overread`: the word read must lie inside the
-   array, which the loop cannot show for the word holding the terminator. */
+/* The fast strlen reading through a pointer not marked `_pal_overread`: the
+   word read must lie inside the array, which the loop cannot show for the word
+   holding the terminator. The marker on `v` covers reads through `v` only. */
 typedef uint64_t __attribute__((__may_alias__)) word;
 
 int all_nonzero(uint64_t x)
@@ -25,6 +26,7 @@ size_t word_strlen(_array const char *s)
   _ensures(_forall(size_t k, k < return ==> s[k] != 0))
 {
   const char *a = s;
+  _pal_overread const word *v = (const void *)s;
   const word *w;
   for (w = (const void *)s; all_nonzero(*w); w++)
     _invariant((uintptr_t)w % 8 == 0)
