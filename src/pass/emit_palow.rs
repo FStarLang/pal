@@ -19910,6 +19910,33 @@ impl<'a> Body<'a> {
                     .is_ok_and(|t| matches!(peel(self.tds, &t).val, TypeT::FixedArray(..)))
             {
                 let fo = self.union_member(base, f, out)?;
+                // A struct arm of an overlay union lent to a `const` parameter
+                // is lent for reading only, so the union comes back with the
+                // very bytes it had -- padding included -- and not merely
+                // with an arm that reads the same.
+                let read_lend = !out
+                    && consts.get(i) == Some(&true)
+                    && self.overlay_of(base).is_some()
+                    && matches!(
+                        &peel(self.tds, &*self.field_ty(base, f)?).val,
+                        TypeT::TypeRef(TypeRefKind::Struct(_))
+                    );
+                if read_lend {
+                    let un = self.union_of(base).unwrap_or_default();
+                    let read = |s: &String, op: &str| {
+                        let plain = format!("{}_{}_{} {};", un, op, f.val, fo.at);
+                        match *s == plain {
+                            true => format!("{}_{}_read_{} {};", un, op, f.val, fo.at),
+                            false => s.clone(),
+                        }
+                    };
+                    self.lines
+                        .extend(fo.open_read.iter().map(|s| read(s, "focus")));
+                    self.pending_close
+                        .extend(fo.close_read.iter().map(|s| read(s, "unfocus")));
+                    opened.insert(i, fo.at);
+                    continue;
+                }
                 self.lines.extend(match out {
                     true => fo.open_write.iter().cloned(),
                     false => fo.open_read.iter().cloned(),
