@@ -145,7 +145,7 @@ Inside any of these predicates the following spec-only constructs are available:
 - `x._length` — length of an `_array`'s sequence (`Seq.length val_x`).
 - `_live(x)` — the storage of `x` exists. For a local in a loop invariant, or a parameter, the generated frame already says so, and `_live` translates to `True`; for a mutable global it is the global's points-to (see below).
 - `_specint` — arbitrary-precision integer (ghost arithmetic); `(_specint) e` turns a machine integer into a mathematical one, so overflow bounds can be stated.
-- A cast to a C integer type in a contract is C's conversion: `(size_t)-1` is `SIZE_MAX` and `(uint8_t)(x + 1)` is reduced modulo 256 (`spec_to_unsigned`/`spec_to_signed` in `Pulse.Lib.C.Palow.Scalar`); a value already in range is unchanged. A subscript `a[k]` with a `_specint` `k` is the position `k` itself, which must be within the array (`test/spec_cast_wrap`).
+- A cast to a C integer type in a contract is C's conversion: `(size_t)-1` is `SIZE_MAX`, `(size_t)n` of an `ssize_t` is `n` reduced modulo `2^64` and `(uint8_t)(x + 1)` is reduced modulo 256 (`spec_to_unsigned`/`spec_to_signed` in `Pulse.Lib.C.Palow.Scalar`); a value already in range is unchanged. A subscript `a[k]` with a `_specint` `k` is the position `k` itself, which must be within the array (`test/spec_cast_wrap`).
 - Contract arithmetic applies C's integer promotions and usual arithmetic conversions: with `unsigned char a, b`, `a - b` is the `int` difference (possibly negative), not a byte subtraction modulo 256, and `-a` is the negated `int` (`test/spec_int_promotion`).
 - Unsigned arithmetic in a contract (`m + k` on `size_t`) is the mathematical result reduced modulo the type's range, written over the operands' numbers (`spec_to_unsigned`), not a new machine integer; where the operator is partial (a checked `size_t` `+`), its definedness condition joins the clause's guards and the sum is the plain number: `d[m + k]` under `_forall(size_t k, ...)` gives the solver no `size_t` term built from `k` to instantiate the quantifier on again (`test/spec_unsigned_index`).
 - Bitwise operators `&`, `|`, `^`, `~`, `<<` and `>>` on unsigned operands in a contract are `FStar.UInt.logand`/`logor`/`logxor`/`shift_left`/`shift_right` at the operand's width (64 for `size_t`), and `~x` is `2^w - 1 - x`, all over the operands' numbers: `((set[b / 64] >> (b % 64)) & 1) != 0` reads a bit of a word. A shift amount must be below the width, which joins the clause's guards like an array index; a `_specint` on the left of a shift is rejected (`test/spec_bitwise`).
@@ -226,13 +226,15 @@ In a contract (an `_invariant` especially), for pointers walked through the same
 - A walked pointer the loop does not move (`a` above) keeps its value; a `const` array's contents are its entry contents.
 - A local that copies an array parameter before the parameter moves and is never reassigned (`wchar_t *a = d;`) is the array's base for the whole body, and `a[k]` is the same term as the contract's `d[k]`: a quantified `_assert` or `_invariant` through `a` matches an `_ensures` that says it about `d` (`test/array_walk_base`).
 
-`*(unsigned char *)p` on an array of `char` is the element converted to `unsigned char`, and so is `*l` where `const unsigned char *l = (void *)_l` walks a `char` array (musl's `strncmp`); writes through such a pointer are refused. In a contract `l - _l` between the two signednesses is a position difference too. A subscript is a `size_t`, so read behind a walked pointer with `*(p - 1)`, not `p[-1]`. `test/array_pointer_walk` has `wcslen`, `strcmp`, `memchr`, `memcpy` and a backward walk.
+`*(unsigned char *)p` on an array of `char` is the element converted to `unsigned char`, and so is `*l` where `const unsigned char *l = (void *)_l` walks a `char` array (musl's `strncmp`); a write through such a pointer stores the byte with the written value's representation. In a contract `l - _l` between the two signednesses is a position difference too. A subscript is a `size_t`, so read behind a walked pointer with `*(p - 1)`, not `p[-1]`. `test/array_pointer_walk` has `wcslen`, `strcmp`, `memchr`, `memcpy` and a backward walk.
 
 In an `_invariant`, `_old(d._length)` and `_old(d)._length` are the length on entry. An array a loop writes keeps its length (a write replaces an element), and PAL says so in the invariant unless the loop calls a function, whose contract would have to.
 
 A function can return a pointer into an array it is passed: `_ensures(return == s + i)` (or `(wchar_t *)(s + i)`) with a `size_t i` is `elem_ptr esize s i`, the pointer `i` elements past `s`. A caller then treats the result as a pointer walked through the array it lent: when exactly one pointer parameter appears as `return == p` or `return == p + e` in the callee's `_ensures`, `z = f(s, ...)` makes `z` a walked pointer of `s`, so `z - s` is a position and `*z` reads `s` there (behind an `if (z)` when the result may be null). `test/array_walk_followups` has musl's `wmemchr`, `wcsnlen`, `wcschr`-like `s + wcslen(s)`, `wmemset`, `wmemcpy` and `strncmp`.
 
 A `void *` parameter declared `_array` (or `_arrayptr`) is an array of `unsigned char`, the type through which C lets any object be read and written: musl's `void *memset(_array void *dest, int c, size_t n)` walks it through `unsigned char *s = dest;`. A contract reads it as `((unsigned char *)dest)[k]` (C does not subscript a `void *`), and `return == dest` compares the `void *` result with it. A caller passes an `_array` of `unsigned char` (`test/array_void_bytes`), or of `char`/`signed char`, which the callee sees as its bytes: the callee's `((unsigned char *)p)[k]` is the caller's `(unsigned char)s[k]`, a byte the callee writes is the `char` with that representation, and a pointer it returns into the array (`return == (void *)((unsigned char *)p + i)`) is a walked pointer of the caller's `char` array (musl's `strrchr` calling `__memrchr`, `strnlen` calling `memchr`; `test/array_char_as_bytes`). Arrays of wider elements (`int`, `wchar_t`) have no byte view yet and are refused. A local initialised from such a parameter (`const unsigned char *s = m;`) is the array itself, so `s[n]` and `s + n` work as for a typed array (musl's `memrchr`, `test/spec_int_promotion`).
+
+A local that is another name for a byte array at the other signedness -- `const char *src = _src;` with `_array void *_src` (musl's `swab`), or `const unsigned char *l = (const void *)l0;` with `_array const char *l0` (musl's `strverscmp`) -- can be subscripted, walked and written like the array: a read is the element converted to the local's type, and a write stores the byte with the written value's representation (`test/sign_view_alias`).
 
 Inside a loop body, an `if` one of whose branches always leaves (`return`, `break`, `continue`, `goto`) is followed by the rest of the block only on its other branch, so the code after it knows the condition: `if (!*s || *s == c) return s; ...` (musl's `strchrnul`) continues with `*s != 0 && *s != c` (`test/if_exit_rest`).
 
@@ -302,6 +304,10 @@ if (n && *p != c)
 The contents of a mutable array the arms may write are bound afresh, so restate what is needed about them.
 
 PAL supplies two joins of its own. An `if` without `_ensures` whose arms write locals and that is directly followed by a loop with pure `_invariant`s gets those invariants as its join, since they are what the loop needs on entry (`test/if_loop_join`). An `if` without `_ensures` with a loop in an arm, followed by nothing but straight-line code ending in `return` (musl's `wmemmove`), has that tail copied into both arms, so there is no join at all (`test/if_loops_tail`).
+
+### Labels
+
+A label may carry `_ensures` clauses, which hold whenever control reaches it, by a `goto` or by falling through: `finish: _ensures(...)`. PAL checks them at every path into the label, so they accept the same language as `_assert`: array contents of parameters and of locals that alias them, `_length`, quantifiers over memory, `_old(p)[k]` and `_old(p[k])` (`test/label_array_ensures`, after musl's `strlcpy`).
 
 ### Refinements for data types
 
@@ -434,6 +440,8 @@ int platform_identity(int x) _ensures(return == x) {
     return x;
 }
 ```
+
+An `asm` statement with an empty template, no output operands and no `goto` labels, such as the compiler barrier `__asm__ __volatile__ ("" : : "r"(d) : "memory")` in musl's `explicit_bzero`, executes nothing; PAL translates it as its input expressions, for their side effects. Any other `asm` statement is unsupported (`test/asm_barrier`).
 
 Contracts on an earlier prototype are retained. `_pal_admit` applies only to
 functions; `_pal_ignore` takes precedence if both markers are present.
