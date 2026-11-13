@@ -142,7 +142,7 @@ Inside any of these predicates the following spec-only constructs are available:
 
 - `_old(x)` — value of `x` at function entry.
 - `*p`, `p->f`, `a[i]` — the value behind a pointer, read off the contract's existential (`val_p`, `(val_p).fld_f`, `Seq.index val_a i`); no read is performed.
-- `x._length` — length of an `_array`'s sequence (`Seq.length val_x`).
+- `x._length` — length of an `_array`'s sequence (`Seq.length val_x`). It is a `_specint`, so arithmetic on it is mathematical: `j < s._length - m` states `m + j < s._length` without `size_t` wraparound (`test/spec_length_sub`).
 - `_live(x)` — the storage of `x` exists. For a local in a loop invariant, or a parameter, the generated frame already says so, and `_live` translates to `True`; for a mutable global it is the global's points-to (see below).
 - `_specint` — arbitrary-precision integer (ghost arithmetic); `(_specint) e` turns a machine integer into a mathematical one, so overflow bounds can be stated.
 - A cast to a C integer type in a contract is C's conversion: `(size_t)-1` is `SIZE_MAX`, `(size_t)n` of an `ssize_t` is `n` reduced modulo `2^64` and `(uint8_t)(x + 1)` is reduced modulo 256 (`spec_to_unsigned`/`spec_to_signed` in `Pulse.Lib.C.Palow.Scalar`); a value already in range is unchanged. A subscript `a[k]` with a `_specint` `k` is the position `k` itself, which must be within the array (`test/spec_cast_wrap`).

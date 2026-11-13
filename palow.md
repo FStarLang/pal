@@ -7480,3 +7480,15 @@ Limitations:
     through the same path as `_assert` (`stmt_assertion`), falling back to
     reading the clause as a contract over the current frame
     (`test/label_array_ensures`, modelled on musl's `strlcpy`).
+76. **`_length` in contract arithmetic; dropped clauses say where.**
+    `1 <= s._length - k` was dropped as "this expression in a contract"
+    (issue #449): `_length` is a `_specint`, and specification arithmetic
+    translates its operands with `value`, which only knew `_length` under a
+    `(_specint)` cast. `value` now reads `_length` itself, so the
+    difference is the mathematical one (`test/spec_length_sub`,
+    `test/spec_length_sub_bad`). The diagnostic for a dropped contract was
+    reported at the function definition and named only the kind of
+    expression. A clause's error now carries the location of the clause, or
+    of the offending subexpression where one is known, and the expression's
+    text; `weakenings` reads that location back so the error points into the
+    prototype (`test/spec_dropped_at`).

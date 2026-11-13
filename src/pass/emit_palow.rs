@@ -1620,7 +1620,7 @@ pub struct PalowModule {
 /// contract is assumed` is a declaration with no body in the first place, and
 /// `is not an F* definition` is a `_let` the model passes through; neither
 /// weakens anything.
-pub fn weakenings(module: &PalowModule) -> Vec<String> {
+pub fn weakenings(module: &PalowModule) -> Vec<(String, Option<Location>)> {
     let mut out = Vec::new();
     for line in module.code.lines() {
         let t = line.trim_start();
@@ -1642,14 +1642,77 @@ pub fn weakenings(module: &PalowModule) -> Vec<String> {
         } else {
             continue;
         };
-        out.push(
-            said.trim_end()
-                .trim_end_matches("*)")
-                .trim_end()
-                .to_string(),
-        );
+        let said = said.trim_end().trim_end_matches("*)").trim_end();
+        out.push(split_loc_tag(said));
     }
     out
+}
+
+/// The marker a contract error carries to say where in the source the
+/// offending clause is: the diagnostic for a dropped contract is otherwise
+/// reported at the function, which may be far from the prototype that holds
+/// the contract.
+const LOC_TAG: &str = " @at ";
+
+fn loc_tag(e: &Expr) -> String {
+    let l = e.loc.location();
+    format!(
+        "{}{}:{}:{}:{}:{}",
+        LOC_TAG,
+        l.range.start.line,
+        l.range.start.character,
+        l.range.end.line,
+        l.range.end.character,
+        l.file_name
+    )
+}
+
+/// `why`, tagged with where `e` is unless something inside already tagged it.
+fn with_loc_tag(why: String, e: &Expr) -> String {
+    if why.contains(LOC_TAG) {
+        why
+    } else {
+        format!("{}{}", why, loc_tag(e))
+    }
+}
+
+/// The offending expression as the source has it, after an error message
+/// that would otherwise only say what kind of expression it is.
+fn shown_at(e: &Expr) -> String {
+    let text = e.val.to_string();
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!(": `{}`{}", text, loc_tag(e))
+}
+
+fn split_loc_tag(said: &str) -> (String, Option<Location>) {
+    let Some((msg, tag)) = said.rsplit_once(LOC_TAG) else {
+        return (said.to_string(), None);
+    };
+    let mut parts = tag.splitn(5, ':');
+    let mut num = || parts.next().and_then(|n| n.parse::<u32>().ok());
+    let (Some(sl), Some(sc), Some(el), Some(ec)) = (num(), num(), num(), num()) else {
+        return (said.to_string(), None);
+    };
+    let Some(file) = parts.next() else {
+        return (said.to_string(), None);
+    };
+    let range = Range {
+        start: Position {
+            line: sl,
+            character: sc,
+        },
+        end: Position {
+            line: el,
+            character: ec,
+        },
+    };
+    (
+        msg.to_string(),
+        Some(Location {
+            file_name: file.into(),
+            range,
+        }),
+    )
 }
 
 /// The C declaration a generated module stands for.
@@ -3191,7 +3254,7 @@ impl<'a> Spec<'a> {
                 if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
                     Ok(format!("({} == true)", self.value(e, w)?))
                 } else {
-                    Err(format!("{} in a contract", expr_kind(e)))
+                    Err(format!("{} in a contract{}", expr_kind(e), shown_at(e)))
                 }
             }
         }
@@ -4332,6 +4395,11 @@ impl<'a> Spec<'a> {
     }
 
     fn value(&self, e: &Expr, w: When) -> Result<String, String> {
+        // `_length` is a `_specint`, so it may be an operand of specification
+        // arithmetic (`s._length - k`) as well as of a comparison.
+        if let Some(l) = self.length_of(e, w) {
+            return l;
+        }
         match &e.val {
             ExprT::Old(inner) => self.value(inner, When::Old),
             ExprT::Cast(..) if let Some(c) = self.cast_bits(e) => self.value(&c, w),
@@ -4920,7 +4988,7 @@ impl<'a> Spec<'a> {
                 }
                 Ok(format!("({{ {} }})", record_fields(vals, false)))
             }
-            _ => Err(format!("{} in a contract", expr_kind(e))),
+            _ => Err(format!("{} in a contract{}", expr_kind(e), shown_at(e))),
         }
     }
 }
@@ -6216,7 +6284,7 @@ fn emit_fn(
         es.iter()
             .map(|e| {
                 spec.guards.borrow_mut().clear();
-                let p = spec.prop(e, w)?;
+                let p = spec.prop(e, w).map_err(|why| with_loc_tag(why, e))?;
                 let guards = spec.guards.borrow();
                 Ok(if guards.is_empty() {
                     p
