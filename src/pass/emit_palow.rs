@@ -3558,13 +3558,19 @@ impl<'a> Spec<'a> {
             return None;
         }
         let (signed, width) = self.bits_ty(e)?;
+        let ptr_width = 8 * self.tds.ptr_bytes as u32;
         // C's integer promotion: nothing narrower than `int` is operated on.
-        let (signed, width) = if width < 32 {
-            (true, 32)
+        let ty = if width < 32 {
+            TypeT::Int {
+                signed: true,
+                width: 32,
+            }
+        } else if width == ptr_width && !signed && self.bits_size_t(e) {
+            TypeT::SizeT
         } else {
-            (signed, width)
-        };
-        let ty = TypeT::Int { signed, width }.with_loc(e.loc.clone());
+            TypeT::Int { signed, width }
+        }
+        .with_loc(e.loc.clone());
         self.lower_bits(e, &ty)
     }
 
@@ -3576,6 +3582,7 @@ impl<'a> Spec<'a> {
                 let t = self.ty_of(inner).ok()?;
                 match peel(self.tds, &t).val {
                     TypeT::Int { signed, width } => Some((signed, width)),
+                    TypeT::SizeT => Some((false, 8 * self.tds.ptr_bytes as u32)),
                     _ => None,
                 }
             }
@@ -3594,11 +3601,32 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// Whether a `size_t` operand is what gives a lifted bitwise expression
+    /// its width, so it is computed at `size_t` rather than at the unsigned
+    /// integer type of the same width.
+    fn bits_size_t(&self, e: &Expr) -> bool {
+        match &strip_vattr(e).val {
+            ExprT::Cast(inner, to)
+                if matches!(self.tds.resolve(to).val, TypeT::SpecInt | TypeT::SpecNat) =>
+            {
+                self.ty_of(inner)
+                    .is_ok_and(|t| matches!(peel(self.tds, &t).val, TypeT::SizeT))
+            }
+            ExprT::UnOp(UnOp::BitNot, x) => self.bits_size_t(x),
+            ExprT::BinOp(BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, l, r) => {
+                self.bits_size_t(l) || self.bits_size_t(r)
+            }
+            _ => false,
+        }
+    }
+
     fn lower_bits(&self, e: &Expr, ty: &Rc<Type>) -> Option<Rc<Expr>> {
         let loc = e.loc.clone();
         let lit = |n: BigInt| -> Option<Rc<Expr>> {
-            let TypeT::Int { signed, width } = ty.val else {
-                return None;
+            let (signed, width) = match ty.val {
+                TypeT::Int { signed, width } => (signed, width),
+                TypeT::SizeT => (false, 8 * self.tds.ptr_bytes as u32),
+                _ => return None,
             };
             let m = BigInt::from(1) << width;
             let n = if signed {
@@ -3727,6 +3755,108 @@ impl<'a> Spec<'a> {
 
     /// The mathematical integer `n` converted to the C integer type `ty`, as
     /// a number: C reduces it modulo the type's range.
+    /// A bitwise operator or shift on an unsigned operand, as the number it
+    /// computes: `FStar.UInt`'s operation at the type's width applied to the
+    /// operands' values. That is the vocabulary F*'s machine-integer
+    /// specifications are stated in (`UInt64.v (logand a b) == UInt.logand
+    /// (v a) (v b)`), so a body's fact about the same bits relates to it by a
+    /// lemma about `FStar.UInt`, and it is the same for `size_t`, which has no
+    /// machine operator of its own here. A shift by the width or more is
+    /// undefined in C, so the amount being in range is a definedness guard,
+    /// like a subscript's bounds. `None` for anything else.
+    fn unsigned_bits(&self, e: &Expr, ty: &Type, w: When) -> Option<Result<String, String>> {
+        let width = match self.tds.resolve(ty).val {
+            TypeT::Int {
+                signed: false,
+                width,
+            } => width,
+            TypeT::SizeT => 8 * self.tds.ptr_bytes as u32,
+            _ => return None,
+        };
+        let go = || -> Result<String, String> {
+            match &strip_vattr(e).val {
+                // The complement is `2^w - 1 - x`, the term the body's `~`
+                // is too (`bitnot`), which arithmetic can use directly.
+                ExprT::UnOp(UnOp::BitNot, x) => Ok(format!(
+                    "({} - {})",
+                    (BigInt::from(1) << width) - 1,
+                    self.num(x, w)?
+                )),
+                ExprT::BinOp(op @ (BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor), l, r) => {
+                    let f = match op {
+                        BinOp::BitAnd => "logand",
+                        BinOp::BitOr => "logor",
+                        _ => "logxor",
+                    };
+                    Ok(format!(
+                        "(FStar.UInt.{} #{} {} {})",
+                        f,
+                        width,
+                        self.num(l, w)?,
+                        self.num(r, w)?
+                    ))
+                }
+                ExprT::BinOp(op @ (BinOp::Shl | BinOp::Shr), l, r) => {
+                    let lty = self.ty_of(l)?;
+                    if matches!(self.tds.resolve(&lty).val, TypeT::SpecInt | TypeT::SpecNat) {
+                        return Err(format!(
+                            "`{}` of a mathematical integer in a contract: shift a value \
+                             of an unsigned C type",
+                            op.to_str()
+                        ));
+                    }
+                    let a = self.num(l, w)?;
+                    // The amount is converted to whatever the machine shift
+                    // takes, which changes nothing about a number the guard
+                    // already holds below the width: say the number.
+                    let r = match &strip_vattr(r).val {
+                        ExprT::Cast(inner, to)
+                            if matches!(
+                                self.tds.resolve(to).val,
+                                TypeT::Int { .. } | TypeT::SizeT
+                            ) && self.ty_of(inner).is_ok_and(|t| {
+                                matches!(
+                                    self.tds.resolve(&t).val,
+                                    TypeT::Int { .. }
+                                        | TypeT::SizeT
+                                        | TypeT::SpecInt
+                                        | TypeT::SpecNat
+                                )
+                            }) =>
+                        {
+                            inner
+                        }
+                        _ => r,
+                    };
+                    let s = self.num(r, w)?;
+                    self.guards
+                        .borrow_mut()
+                        .push(format!(r"(0 <= {s} /\ {s} < {width})"));
+                    Ok(format!(
+                        "(FStar.UInt.{} #{} {} {})",
+                        if matches!(op, BinOp::Shl) {
+                            "shift_left"
+                        } else {
+                            "shift_right"
+                        },
+                        width,
+                        a,
+                        s
+                    ))
+                }
+                _ => unreachable!(),
+            }
+        };
+        match &strip_vattr(e).val {
+            ExprT::UnOp(UnOp::BitNot, _)
+            | ExprT::BinOp(
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr,
+                ..,
+            ) => Some(go()),
+            _ => None,
+        }
+    }
+
     fn spec_wrap(&self, ty: &Type, n: String) -> String {
         let (signed, width) = match peel(self.tds, ty).val {
             TypeT::Int { signed, width } => (signed, width),
@@ -3838,6 +3968,19 @@ impl<'a> Spec<'a> {
                 }
                 return Ok(self.spec_wrap(&ty, n));
             }
+        }
+        if let ExprT::Cast(inner, to) = &strip_vattr(e).val
+            && let Ok(ity) = self.ty_of(inner)
+            && self.tds.resolve(&ity) == self.tds.resolve(to)
+            && matches!(
+                strip_vattr(inner).val,
+                ExprT::BinOp(BinOp::Shl | BinOp::Shr, ..)
+            )
+        {
+            return self.num(inner, w);
+        }
+        if let Some(b) = self.unsigned_bits(e, &ty, w) {
+            return b;
         }
         // A cast from a specification type is the author writing a
         // mathematical integer where C's grammar wants a machine one. It is
@@ -24650,8 +24793,13 @@ impl<'a> Body<'a> {
                     cond,
                     then_branch,
                     else_branch,
-                    ..
-                } if may_exit(then_branch) || may_exit(else_branch) => {
+                    ensures,
+                } if may_exit(then_branch)
+                    || may_exit(else_branch)
+                    || (ensures.is_empty()
+                        && (has_loop(then_branch) || has_loop(else_branch))
+                        && copyable_tail(then_branch, else_branch, &stmts[i + 1..])) =>
+                {
                     self.active.clear();
                     // A test of a freshly allocated pointer is the one
                     // condition that is not just a value: it decides which arm
@@ -27173,6 +27321,113 @@ fn drop_dead_alias_inits(body: &Stmts) -> Option<Stmts> {
     )
 }
 
+/// Pulse joins an `if` that has no annotation by forgetting everything about
+/// the values its arms leave in the locals they write: a pointer one arm moves
+/// is some pointer after the `if`, on both paths. When a loop follows the `if`
+/// directly, its pure invariant is exactly what has to hold at the join, so it
+/// becomes the `if`'s `_ensures` -- each arm proves it about its own values,
+/// and the loop starts from it. That is musl's `memchr`: an `if` that may move
+/// `s` with a word loop, then the byte loop over `s`. `None` when nothing
+/// changes.
+fn loop_entry_joins(tds: &Typedefs, body: &Stmts) -> Option<Stmts> {
+    fn leaves(ss: &Stmts, in_loop: bool) -> bool {
+        ss.iter().any(|s| match &s.val {
+            StmtT::Return(_) | StmtT::Goto(_) | StmtT::Label { .. } => true,
+            StmtT::GotoBlock { .. } => true,
+            StmtT::Break | StmtT::Continue => !in_loop,
+            StmtT::While { body, .. } => leaves(body, true),
+            StmtT::If {
+                then_branch,
+                else_branch,
+                ..
+            } => leaves(then_branch, in_loop) || leaves(else_branch, in_loop),
+            StmtT::Match {
+                branches,
+                default_branch,
+                ..
+            } => {
+                branches.iter().any(|b| leaves(&b.body, in_loop)) || leaves(default_branch, in_loop)
+            }
+            _ => false,
+        })
+    }
+    fn sub(tds: &Typedefs, ss: &Rc<Stmts>, changed: &mut bool) -> Rc<Stmts> {
+        match loop_entry_joins(tds, ss) {
+            Some(n) => {
+                *changed = true;
+                Rc::new(n)
+            }
+            None => ss.clone(),
+        }
+    }
+    let mut changed = false;
+    let mut out: Stmts = Vec::with_capacity(body.len());
+    for (i, s) in body.iter().enumerate() {
+        let s = match &s.val {
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => {
+                let then_branch = sub(tds, then_branch, &mut changed);
+                let else_branch = sub(tds, else_branch, &mut changed);
+                let mut ensures = ensures.clone();
+                if ensures.is_empty()
+                    && let Some(StmtT::While { inv, .. }) = body.get(i + 1).map(|n| &n.val)
+                    && !inv.is_empty()
+                    && !inv.iter().any(|e| is_slprop_clause(tds, e))
+                    && !leaves(&then_branch, false)
+                    && !leaves(&else_branch, false)
+                {
+                    let mut t = Touched::default();
+                    touch_stmts(&then_branch, &mut t);
+                    touch_stmts(&else_branch, &mut t);
+                    let pure: Exprs = inv.iter().filter(|e| !live_only(e)).cloned().collect();
+                    if !t.written.is_empty() && !pure.is_empty() {
+                        ensures = Rc::new(pure);
+                        changed = true;
+                    }
+                }
+                StmtT::If {
+                    cond: cond.clone(),
+                    then_branch,
+                    else_branch,
+                    ensures,
+                }
+                .with_loc(s.loc.clone())
+            }
+            StmtT::While {
+                cond,
+                inv,
+                requires,
+                ensures,
+                body,
+            } => StmtT::While {
+                cond: cond.clone(),
+                inv: inv.clone(),
+                requires: requires.clone(),
+                ensures: ensures.clone(),
+                body: sub(tds, body, &mut changed),
+            }
+            .with_loc(s.loc.clone()),
+            StmtT::GotoBlock {
+                body,
+                label,
+                ensures,
+            } => StmtT::GotoBlock {
+                body: sub(tds, body, &mut changed),
+                label: label.clone(),
+                ensures: ensures.clone(),
+            }
+            .with_loc(s.loc.clone()),
+            _ => s.clone(),
+        };
+        out.push(s);
+    }
+    changed.then_some(out)
+}
+
 /// `q = &a[i++]` and `q = a + i++` evaluate the index once, but an alias
 /// stands for its place at every use and would evaluate it each time. Binding
 /// the index first -- `__pal_idx_n = i++; q = &a[__pal_idx_n]` -- keeps the
@@ -27335,6 +27590,17 @@ fn emit_body(
                 ..defn.clone()
             };
             &undead
+        }
+        None => defn,
+    };
+    let joined;
+    let defn = match loop_entry_joins(tds, &defn.body) {
+        Some(body) => {
+            joined = FnDefn {
+                body,
+                ..defn.clone()
+            };
+            &joined
         }
         None => defn,
     };
@@ -27692,6 +27958,37 @@ fn may_exit(stmts: &Stmts) -> bool {
         StmtT::GotoBlock { body, .. } => may_exit(body),
         _ => false,
     })
+}
+
+/// Whether the straight-line `return` that ends a function may be copied into
+/// both arms of the `if` before it. An `if` whose arms end in loops has
+/// nothing for Pulse to join the two exit invariants into, and the join loses
+/// what each loop established anyway; with the tail in each arm there is no
+/// join at all. Only a tail without control flow is copied, so the copies
+/// stay small, and only when neither arm declares a name the copy could see.
+fn copyable_tail(then_branch: &Stmts, else_branch: &Stmts, after: &[Rc<Stmt>]) -> bool {
+    let declares = |b: &Stmts| {
+        b.iter().any(|s| {
+            matches!(
+                s.val,
+                StmtT::Decl(..) | StmtT::Let(..) | StmtT::DeclStackArray { .. }
+            )
+        })
+    };
+    matches!(after.last().map(|s| &s.val), Some(StmtT::Return(_)))
+        && after.iter().all(|s| {
+            !matches!(
+                s.val,
+                StmtT::If { .. }
+                    | StmtT::While { .. }
+                    | StmtT::Match { .. }
+                    | StmtT::Label { .. }
+                    | StmtT::GotoBlock { .. }
+                    | StmtT::Goto(_)
+            )
+        })
+        && !declares(then_branch)
+        && !declares(else_branch)
 }
 
 /// Whether a C block always leaves the enclosing block: by a `return`, a

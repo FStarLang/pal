@@ -148,6 +148,7 @@ Inside any of these predicates the following spec-only constructs are available:
 - A cast to a C integer type in a contract is C's conversion: `(size_t)-1` is `SIZE_MAX` and `(uint8_t)(x + 1)` is reduced modulo 256 (`spec_to_unsigned`/`spec_to_signed` in `Pulse.Lib.C.Palow.Scalar`); a value already in range is unchanged. A subscript `a[k]` with a `_specint` `k` is the position `k` itself, which must be within the array (`test/spec_cast_wrap`).
 - Contract arithmetic applies C's integer promotions and usual arithmetic conversions: with `unsigned char a, b`, `a - b` is the `int` difference (possibly negative), not a byte subtraction modulo 256, and `-a` is the negated `int` (`test/spec_int_promotion`).
 - Unsigned arithmetic in a contract (`m + k` on `size_t`) is the mathematical result reduced modulo the type's range, written over the operands' numbers (`spec_to_unsigned`), not a new machine integer; where the operator is partial (a checked `size_t` `+`), its definedness condition joins the clause's guards and the sum is the plain number: `d[m + k]` under `_forall(size_t k, ...)` gives the solver no `size_t` term built from `k` to instantiate the quantifier on again (`test/spec_unsigned_index`).
+- Bitwise operators `&`, `|`, `^`, `~`, `<<` and `>>` on unsigned operands in a contract are `FStar.UInt.logand`/`logor`/`logxor`/`shift_left`/`shift_right` at the operand's width (64 for `size_t`), and `~x` is `2^w - 1 - x`, all over the operands' numbers: `((set[b / 64] >> (b % 64)) & 1) != 0` reads a bit of a word. A shift amount must be below the width, which joins the clause's guards like an array index; a `_specint` on the left of a shift is rejected (`test/spec_bitwise`).
 - `_slprop` — type cast that declares a separation-logic predicate (in `_refine`, or on an `_inline_pulse` clause).
 - `$(...)` — antiquotation: splice a C-level entity into an `_inline_pulse` body (see the Antiquotation section under Pulse interop).
 
@@ -299,6 +300,8 @@ if (n && *p != c)
 ```
 
 The contents of a mutable array the arms may write are bound afresh, so restate what is needed about them.
+
+PAL supplies two joins of its own. An `if` without `_ensures` whose arms write locals and that is directly followed by a loop with pure `_invariant`s gets those invariants as its join, since they are what the loop needs on entry (`test/if_loop_join`). An `if` without `_ensures` with a loop in an arm, followed by nothing but straight-line code ending in `return` (musl's `wmemmove`), has that tail copied into both arms, so there is no join at all (`test/if_loops_tail`).
 
 ### Refinements for data types
 
