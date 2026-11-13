@@ -24134,6 +24134,22 @@ impl<'a> Body<'a> {
                     self.drop_seeded(outer_seeded.len());
                 }
                 self.release_from(mark);
+                // An arm is checked against the join of the `if` it belongs
+                // to, and Pulse will not check an `if` with an annotation of
+                // its own against another one: an arm that ends in such an
+                // `if` -- an `else if` chain whose links all state the join
+                // -- ends in a unit step instead, which takes the annotation
+                // to the one expected.
+                if self.lines.last().is_some_and(|l| l == "};")
+                    && stmts.last().is_some_and(|l| match &l.val {
+                        StmtT::If { ensures, .. } => {
+                            ensures.iter().any(|e| states_ownership(self.tds, e))
+                        }
+                        _ => false,
+                    })
+                {
+                    self.lines.push("();".to_string());
+                }
             }
             self.seeded = outer_seeded;
             Ok(BranchResult {

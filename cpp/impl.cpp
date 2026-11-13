@@ -301,6 +301,9 @@ public:
   };
   // When inside a switch desugaring, break sets this flag instead of mk_break
   Rc<ir::Ident> *switchBreakId = nullptr;
+  // The `break`s that end the cases of a switch lowered to a chain of `if`s,
+  // where leaving the case is what the chain does anyway.
+  std::set<const Stmt *> chainBreaks;
 
   // The arm a `?:` actually takes, when clang can decide the condition at
   // compile time, or null when it cannot.
@@ -3455,6 +3458,104 @@ public:
         }
       }
 
+      // A switch none of whose cases falls through is a choice among its
+      // cases, as an `if` is, and its `_ensures` is the join of all of them.
+      // The flag desugaring below cannot say that: between two case tests the
+      // state is either the join (an earlier case ran) or the entry state
+      // (none did), and one `_ensures` on each test cannot be both. So such a
+      // switch becomes a chain `if (c1) s1 else if (c2) s2 ... else sd`, each
+      // `if` carrying the `_ensures`. A case may end in a `break` -- also as
+      // the last statement of a block -- or leave by `return` or `goto`,
+      // which the chain does not have to model; a `break` anywhere else is
+      // left to the general desugaring.
+      if (!switchEnss.empty() && !groups.empty() &&
+          !(groups.size() == 1 && groups.front().isDefault)) {
+        auto countSwitchBreaks = [&](auto &self, Stmt *s) -> int {
+          if (isa<BreakStmt>(s))
+            return 1;
+          if (isa<SwitchStmt>(s) || isa<ForStmt>(s) || isa<WhileStmt>(s) ||
+              isa<DoStmt>(s))
+            return 0;
+          int n = 0;
+          for (auto *child : s->children())
+            if (child)
+              n += self(self, child);
+          return n;
+        };
+        bool chain = true;
+        std::vector<const Stmt *> ends;
+        for (auto &group : groups) {
+          Stmt *last = group.body.empty() ? nullptr : group.body.back();
+          while (auto *cs = dyn_cast_or_null<CompoundStmt>(last))
+            last = cs->body_empty() ? nullptr : cs->body_back();
+          bool isBreak = last && isa<BreakStmt>(last);
+          if (!last ||
+              !(isBreak || isa<ReturnStmt>(last) || isa<GotoStmt>(last))) {
+            chain = false;
+            break;
+          }
+          int breaks = 0;
+          for (auto *bodyStmt : group.body)
+            breaks += countSwitchBreaks(countSwitchBreaks, bodyStmt);
+          if (breaks != (isBreak ? 1 : 0)) {
+            chain = false;
+            break;
+          }
+          if (isBreak)
+            ends.push_back(last);
+        }
+        if (chain) {
+          auto chainEnss = [&]() {
+            auto enss = Vec<Rc<ir::Expr>>::new_();
+            auto combined = switchEnss.front().clone();
+            for (size_t i = 1; i < switchEnss.size(); i++)
+              combined =
+                  mk_rvalue_binop(loc.clone(), ir::BinOp::LogAnd(),
+                                  std::move(combined), switchEnss[i].clone());
+            enss.push(std::move(combined));
+            return enss;
+          };
+          auto savedChainBreaks = chainBreaks;
+          chainBreaks.insert(ends.begin(), ends.end());
+          // Translated in source order; assembled from the last case out.
+          std::vector<Vec<Rc<ir::Stmt>>> bodies;
+          std::vector<Rc<ir::Expr>> conds;
+          for (auto &group : groups) {
+            auto bodyStmts = Vec<Rc<ir::Stmt>>::new_();
+            for (auto *bodyStmt : group.body)
+              trStmt(bodyStmts, bodyStmt);
+            bodies.push_back(std::move(bodyStmts));
+            if (group.isDefault)
+              continue;
+            auto childLoc = getRange(group.label->getSourceRange());
+            Rc<ir::Expr> cond = mk_bool_lit(childLoc.clone(), false);
+            for (auto *cv : group.caseValues) {
+              auto eq = mk_rvalue_binop(
+                  childLoc.clone(), ir::BinOp::Eq(),
+                  mk_lvalue_var(childLoc.clone(), scrutId.clone()),
+                  trRValue(cv->IgnoreParenImpCasts()));
+              cond = mk_rvalue_binop(childLoc.clone(), ir::BinOp::LogOr(),
+                                     std::move(cond), std::move(eq));
+            }
+            conds.push_back(std::move(cond));
+          }
+          chainBreaks = savedChainBreaks;
+          size_t n = groups.size();
+          bool hasDefault = groups.back().isDefault;
+          std::optional<Rc<ir::Stmt>> inner;
+          for (size_t i = hasDefault ? n - 1 : n; i-- > 0;) {
+            auto els = Vec<Rc<ir::Stmt>>::new_();
+            if (inner)
+              els.push(std::move(*inner));
+            else if (hasDefault)
+              els = std::move(bodies[n - 1]);
+            inner = mk_if(loc.clone(), std::move(conds[i]),
+                          std::move(bodies[i]), std::move(els), chainEnss());
+          }
+          return stmts.push(std::move(*inner));
+        }
+      }
+
       // General switches retain explicit hit and break state to model
       // fall-through.
       auto hitName = "__switch_hit_" + std::to_string(switchIndex);
@@ -3608,6 +3709,8 @@ public:
                                  std::move(reqs), std::move(enss),
                                  std::move(bodyStmts)));
     } else if (dyn_cast<BreakStmt>(stmt)) {
+      if (chainBreaks.count(stmt))
+        return {};
       if (switchBreakId) {
         // Inside a switch: set break flag instead of emitting break
         return stmts.push(mk_assign(
