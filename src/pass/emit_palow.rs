@@ -1245,7 +1245,10 @@ fn overlay_path(
 /// read and written one at a time.
 fn holds_overlay(tds: &Typedefs, ty: &Type) -> bool {
     match &peel(tds, ty).val {
-        TypeT::TypeRef(TypeRefKind::Union(n)) => is_overlay(tds, &n.val),
+        TypeT::TypeRef(TypeRefKind::Union(n)) => tds
+            .unions
+            .get(&*n.val)
+            .is_some_and(|ui| ui.overlay || ui.members.iter().any(|m| holds_overlay(tds, &m.ty))),
         TypeT::TypeRef(TypeRefKind::Struct(n)) => tds
             .structs
             .get(&*n.val)
@@ -9416,6 +9419,11 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
          {{\n  unfold {un}_pts_to_uninit a;\n  mem_stack_free a;\n}}\n\n",
         un = un
     );
+    // A union with an overlay union in a member is written member by member,
+    // like a struct with one; see `holds_overlay`.
+    if ui.members.iter().any(|m| holds_overlay(tds, &m.ty)) {
+        return c;
+    }
     // Storing a whole union value is the one operation that has to know which
     // member is live, and the value is where that is written down. The match
     // is on the *value*, not on memory, so nothing here reads a tag that C
@@ -10527,6 +10535,10 @@ fn fill_name(pn: &str, esize: u64, len: u64) -> String {
 /// that declares such a structure. The index is a real argument, and the
 /// measure is how much of the array is left.
 fn emit_fill(tds: &Typedefs, ty: &Type, pn: &str, esize: u64, len: u64) -> String {
+    // An element with overlay bytes in it has no value writer to fill with.
+    if holds_overlay(tds, ty) {
+        return String::new();
+    }
     let elem = fstar_type(tds, ty).unwrap();
     let f = fill_name(pn, esize, len);
     let at = format!("(a +! ({}sz `SizeT.mul` k))", esize);
