@@ -3918,6 +3918,17 @@ public:
                               Vec<Rc<ir::Expr>>::new_()));
     } else if (dyn_cast<NullStmt>(stmt) || dyn_cast<IntegerLiteral>(stmt)) {
       return rust::Unit();
+    } else if (auto *as = dyn_cast<GCCAsmStmt>(stmt);
+               as && as->getAsmString()->getString().empty() &&
+               as->getNumOutputs() == 0 && as->getNumLabels() == 0) {
+      // An empty template executes no instructions, and without outputs or
+      // labels it cannot change a C variable or jump: it is a compiler
+      // barrier (`__asm__ volatile ("" : : "r"(p) : "memory")`, as in
+      // explicit_bzero), so only its inputs' side effects remain.
+      for (unsigned i = 0; i < as->getNumInputs(); i++) {
+        trStmt(stmts, as->getInputExpr(i));
+      }
+      return rust::Unit();
     }
 
     // An expression evaluated for a value that is then discarded, where

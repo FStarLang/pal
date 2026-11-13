@@ -1245,7 +1245,10 @@ fn overlay_path(
 /// read and written one at a time.
 fn holds_overlay(tds: &Typedefs, ty: &Type) -> bool {
     match &peel(tds, ty).val {
-        TypeT::TypeRef(TypeRefKind::Union(n)) => is_overlay(tds, &n.val),
+        TypeT::TypeRef(TypeRefKind::Union(n)) => tds
+            .unions
+            .get(&*n.val)
+            .is_some_and(|ui| ui.overlay || ui.members.iter().any(|m| holds_overlay(tds, &m.ty))),
         TypeT::TypeRef(TypeRefKind::Struct(n)) => tds
             .structs
             .get(&*n.val)
@@ -3597,7 +3600,8 @@ impl<'a> Spec<'a> {
             };
             // At the base the index is the subscript itself, and the guard
             // is the one a contract's `d[k]` gets.
-            self.guards.borrow_mut().push(if at_base {
+            let signed_idx = idx.is_some_and(|i| self.index_may_be_negative(i));
+            self.guards.borrow_mut().push(if at_base && !signed_idx {
                 format!("{} < Seq.length {}", i, term)
             } else {
                 format!("0 <= {} /\\ {} < Seq.length {}", i, i, term)
@@ -3630,7 +3634,11 @@ impl<'a> Spec<'a> {
             };
             self.guards
                 .borrow_mut()
-                .push(format!("{} < Seq.length {}", i, term));
+                .push(if idx.is_some_and(|i| self.index_may_be_negative(i)) {
+                    format!("0 <= {} /\\ {} < Seq.length {}", i, i, term)
+                } else {
+                    format!("{} < Seq.length {}", i, term)
+                });
             let cell = format!("(Seq.index {} {})", term, i);
             if self.maybes.contains(&*v.val) {
                 self.defined.borrow_mut().push(format!("Some? {}", cell));
@@ -3681,13 +3689,19 @@ impl<'a> Spec<'a> {
             return None;
         }
         let (signed, width) = self.bits_ty(e)?;
+        let ptr_width = 8 * self.tds.ptr_bytes as u32;
         // C's integer promotion: nothing narrower than `int` is operated on.
-        let (signed, width) = if width < 32 {
-            (true, 32)
+        let ty = if width < 32 {
+            TypeT::Int {
+                signed: true,
+                width: 32,
+            }
+        } else if width == ptr_width && !signed && self.bits_size_t(e) {
+            TypeT::SizeT
         } else {
-            (signed, width)
-        };
-        let ty = TypeT::Int { signed, width }.with_loc(e.loc.clone());
+            TypeT::Int { signed, width }
+        }
+        .with_loc(e.loc.clone());
         self.lower_bits(e, &ty)
     }
 
@@ -3699,6 +3713,7 @@ impl<'a> Spec<'a> {
                 let t = self.ty_of(inner).ok()?;
                 match peel(self.tds, &t).val {
                     TypeT::Int { signed, width } => Some((signed, width)),
+                    TypeT::SizeT => Some((false, 8 * self.tds.ptr_bytes as u32)),
                     _ => None,
                 }
             }
@@ -3717,11 +3732,32 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// Whether a `size_t` operand is what gives a lifted bitwise expression
+    /// its width, so it is computed at `size_t` rather than at the unsigned
+    /// integer type of the same width.
+    fn bits_size_t(&self, e: &Expr) -> bool {
+        match &strip_vattr(e).val {
+            ExprT::Cast(inner, to)
+                if matches!(self.tds.resolve(to).val, TypeT::SpecInt | TypeT::SpecNat) =>
+            {
+                self.ty_of(inner)
+                    .is_ok_and(|t| matches!(peel(self.tds, &t).val, TypeT::SizeT))
+            }
+            ExprT::UnOp(UnOp::BitNot, x) => self.bits_size_t(x),
+            ExprT::BinOp(BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, l, r) => {
+                self.bits_size_t(l) || self.bits_size_t(r)
+            }
+            _ => false,
+        }
+    }
+
     fn lower_bits(&self, e: &Expr, ty: &Rc<Type>) -> Option<Rc<Expr>> {
         let loc = e.loc.clone();
         let lit = |n: BigInt| -> Option<Rc<Expr>> {
-            let TypeT::Int { signed, width } = ty.val else {
-                return None;
+            let (signed, width) = match ty.val {
+                TypeT::Int { signed, width } => (signed, width),
+                TypeT::SizeT => (false, 8 * self.tds.ptr_bytes as u32),
+                _ => return None,
             };
             let m = BigInt::from(1) << width;
             let n = if signed {
@@ -3875,6 +3911,118 @@ impl<'a> Spec<'a> {
 
     /// The mathematical integer `n` converted to the C integer type `ty`, as
     /// a number: C reduces it modulo the type's range.
+    /// A bitwise operator or shift on an unsigned operand, as the number it
+    /// computes: `FStar.UInt`'s operation at the type's width applied to the
+    /// operands' values. That is the vocabulary F*'s machine-integer
+    /// specifications are stated in (`UInt64.v (logand a b) == UInt.logand
+    /// (v a) (v b)`), so a body's fact about the same bits relates to it by a
+    /// lemma about `FStar.UInt`, and it is the same for `size_t`, which has no
+    /// machine operator of its own here. A shift by the width or more is
+    /// undefined in C, so the amount being in range is a definedness guard,
+    /// like a subscript's bounds. `None` for anything else.
+    fn unsigned_bits(&self, e: &Expr, ty: &Type, w: When) -> Option<Result<String, String>> {
+        let width = match self.tds.resolve(ty).val {
+            TypeT::Int {
+                signed: false,
+                width,
+            } => width,
+            TypeT::SizeT => 8 * self.tds.ptr_bytes as u32,
+            _ => return None,
+        };
+        let go = || -> Result<String, String> {
+            match &strip_vattr(e).val {
+                // The complement is `2^w - 1 - x`, the term the body's `~`
+                // is too (`bitnot`), which arithmetic can use directly.
+                ExprT::UnOp(UnOp::BitNot, x) => Ok(format!(
+                    "({} - {})",
+                    (BigInt::from(1) << width) - 1,
+                    self.num(x, w)?
+                )),
+                ExprT::BinOp(op @ (BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor), l, r) => {
+                    let f = match op {
+                        BinOp::BitAnd => "logand",
+                        BinOp::BitOr => "logor",
+                        _ => "logxor",
+                    };
+                    Ok(format!(
+                        "(FStar.UInt.{} #{} {} {})",
+                        f,
+                        width,
+                        self.num(l, w)?,
+                        self.num(r, w)?
+                    ))
+                }
+                ExprT::BinOp(op @ (BinOp::Shl | BinOp::Shr), l, r) => {
+                    let lty = self.ty_of(l)?;
+                    if matches!(self.tds.resolve(&lty).val, TypeT::SpecInt | TypeT::SpecNat) {
+                        return Err(format!(
+                            "`{}` of a mathematical integer in a contract: shift a value \
+                             of an unsigned C type",
+                            op.to_str()
+                        ));
+                    }
+                    let a = self.num(l, w)?;
+                    // The amount is converted to whatever the machine shift
+                    // takes, which changes nothing about a number the guard
+                    // already holds below the width: say the number.
+                    let r = match &strip_vattr(r).val {
+                        ExprT::Cast(inner, to)
+                            if matches!(
+                                self.tds.resolve(to).val,
+                                TypeT::Int { .. } | TypeT::SizeT
+                            ) && self.ty_of(inner).is_ok_and(|t| {
+                                matches!(
+                                    self.tds.resolve(&t).val,
+                                    TypeT::Int { .. }
+                                        | TypeT::SizeT
+                                        | TypeT::SpecInt
+                                        | TypeT::SpecNat
+                                )
+                            }) =>
+                        {
+                            inner
+                        }
+                        _ => r,
+                    };
+                    let s = self.num(r, w)?;
+                    self.guards
+                        .borrow_mut()
+                        .push(format!(r"(0 <= {s} /\ {s} < {width})"));
+                    Ok(format!(
+                        "(FStar.UInt.{} #{} {} {})",
+                        if matches!(op, BinOp::Shl) {
+                            "shift_left"
+                        } else {
+                            "shift_right"
+                        },
+                        width,
+                        a,
+                        s
+                    ))
+                }
+                _ => unreachable!(),
+            }
+        };
+        match &strip_vattr(e).val {
+            ExprT::UnOp(UnOp::BitNot, _)
+            | ExprT::BinOp(
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr,
+                ..,
+            ) => Some(go()),
+            _ => None,
+        }
+    }
+
+    /// The signedness and width of a machine integer type.
+    fn int_range(&self, ty: &Type) -> Option<(bool, u32)> {
+        match self.tds.resolve(ty).val {
+            TypeT::Int { signed, width } => Some((signed, width)),
+            TypeT::SizeT => Some((false, 8 * self.tds.ptr_bytes as u32)),
+            TypeT::PtrdiffT => Some((true, 8 * self.tds.ptr_bytes as u32)),
+            _ => None,
+        }
+    }
+
     fn spec_wrap(&self, ty: &Type, n: String) -> String {
         let (signed, width) = match peel(self.tds, ty).val {
             TypeT::Int { signed, width } => (signed, width),
@@ -3896,6 +4044,23 @@ impl<'a> Spec<'a> {
     /// to `size_t` to meet C's subscript; it is a position all the same, and
     /// one outside the sequence fails `Seq.index`'s typing rather than
     /// wrapping into it, so the conversion is not reduced (`spec_wrap`).
+    /// Whether a contract subscript is read as a number that may be negative
+    /// -- a `_specint` (or signed) position rather than a `size_t` -- so its
+    /// definedness guard must say `0 <=` as well as the upper bound.
+    fn index_may_be_negative(&self, e: &Expr) -> bool {
+        let e = match &strip_vattr(e).val {
+            ExprT::Cast(inner, to) if matches!(peel(self.tds, to).val, TypeT::SizeT) => inner,
+            _ => e,
+        };
+        match self.ty_of(e) {
+            Ok(ty) => matches!(
+                self.tds.resolve(&ty).val,
+                TypeT::SpecInt | TypeT::PtrdiffT | TypeT::Int { signed: true, .. }
+            ),
+            Err(_) => false,
+        }
+    }
+
     fn index_num(&self, e: &Expr, w: When) -> Result<String, String> {
         if let ExprT::Cast(inner, to) = &strip_vattr(e).val
             && matches!(peel(self.tds, to).val, TypeT::SizeT)
@@ -3949,6 +4114,39 @@ impl<'a> Spec<'a> {
                     self.num(r, w)?
                 ));
             }
+            // Unsigned arithmetic is the mathematical result reduced modulo
+            // the type's range, said as such. As `SizeT.v (m `add` k)` it
+            // would build a new machine integer out of a bound variable, and a
+            // quantifier triggered on `SizeT.v k` (`_forall(size_t k, ...
+            // d[m + k] ...)`) then instantiates itself on its own result
+            // without end; an integer term gives it nothing to match.
+            if matches!(
+                self.tds.resolve(&ty).val,
+                TypeT::Int { signed: false, .. } | TypeT::SizeT
+            ) {
+                let n = format!("({} {} {})", self.num(l, w)?, op.to_str(), self.num(r, w)?);
+                // Where the operator is partial its definedness guard says
+                // the result is in range, so it is the number itself.
+                if let Err(e) = binop(self.tds, *op, &ty, self.signed_ok) {
+                    let g = self.definedness(*op, &ty, l, r, w).ok_or(e)?;
+                    self.guards.borrow_mut().push(g);
+                    return Ok(n);
+                }
+                return Ok(self.spec_wrap(&ty, n));
+            }
+        }
+        if let ExprT::Cast(inner, to) = &strip_vattr(e).val
+            && let Ok(ity) = self.ty_of(inner)
+            && self.tds.resolve(&ity) == self.tds.resolve(to)
+            && matches!(
+                strip_vattr(inner).val,
+                ExprT::BinOp(BinOp::Shl | BinOp::Shr, ..)
+            )
+        {
+            return self.num(inner, w);
+        }
+        if let Some(b) = self.unsigned_bits(e, &ty, w) {
+            return b;
         }
         // A cast from a specification type is the author writing a
         // mathematical integer where C's grammar wants a machine one. It is
@@ -3961,6 +4159,20 @@ impl<'a> Spec<'a> {
         // clause binds itself, which is exactly where these casts appear.
         if let Some(c) = self.cast_bits(e) {
             return self.num(&c, w);
+        }
+        // A conversion between machine integer types is the number when the
+        // target holds every value of the source, and C's reduction of it
+        // otherwise: `(size_t)n` of an `ssize_t` is `spec_to_unsigned`
+        // rather than a machine conversion whose typing needs the value to
+        // be a valid `size_t` already.
+        if let ExprT::Cast(inner, to) = &strip_vattr(e).val
+            && let Some((ts, tw)) = self.int_range(to)
+            && let Ok(ity) = self.ty_of(inner)
+            && let Some((ss, sw)) = self.int_range(&ity)
+        {
+            let n = self.num(inner, w)?;
+            let fits = if ss == ts { tw >= sw } else { !ss && tw > sw };
+            return Ok(if fits { n } else { self.spec_wrap(to, n) });
         }
         if let ExprT::Cast(inner, _) = &strip_vattr(e).val
             && matches!(
@@ -9625,6 +9837,11 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
          {{\n  unfold {un}_pts_to_uninit a;\n  mem_stack_free a;\n}}\n\n",
         un = un
     );
+    // A union with an overlay union in a member is written member by member,
+    // like a struct with one; see `holds_overlay`.
+    if ui.members.iter().any(|m| holds_overlay(tds, &m.ty)) {
+        return c;
+    }
     // Storing a whole union value is the one operation that has to know which
     // member is live, and the value is where that is written down. The match
     // is on the *value*, not on memory, so nothing here reads a tag that C
@@ -10743,6 +10960,10 @@ fn fill_name(pn: &str, esize: u64, len: u64) -> String {
 /// that declares such a structure. The index is a real argument, and the
 /// measure is how much of the array is left.
 fn emit_fill(tds: &Typedefs, ty: &Type, pn: &str, esize: u64, len: u64) -> String {
+    // An element with overlay bytes in it has no value writer to fill with.
+    if holds_overlay(tds, ty) {
+        return String::new();
+    }
     let elem = fstar_type(tds, ty).unwrap();
     let f = fill_name(pn, esize, len);
     let at = format!("(a +! ({}sz `SizeT.mul` k))", esize);
@@ -13416,6 +13637,11 @@ pub fn emit_palow(
                     .iter()
                     .map(|a| extent(&tds, &a.ty) == Some(Extent::Array))
                     .collect(),
+                arr_elems: fndecl
+                    .args
+                    .iter()
+                    .map(|a| pointee(&tds, peel(&tds, &a.ty)).and_then(|e| palow_name(&tds, e)))
+                    .collect(),
                 consumes: fndecl
                     .args
                     .iter()
@@ -14302,6 +14528,9 @@ struct Callee {
     /// Which parameters are `_array`s, and so want a whole sequence's
     /// ownership rather than a single pointee's.
     arr_args: Vec<bool>,
+    /// The element type of each pointer parameter, by position: an `_array`
+    /// argument of another one-byte type is lent at this one.
+    arr_elems: Vec<Option<String>>,
     /// Which parameters are `_arrayptr`s. In Palow such a parameter owns
     /// nothing, so the argument is wanted for its address alone: a name that
     /// stands for an array element must not hand over the element's
@@ -17732,6 +17961,47 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// An element access -- `*p` or `p[i]` -- through a pointer that views
+    /// an array of integers at the other signedness of its element type: a
+    /// walked pointer (`walk_sign_view`), or a local that is another name for
+    /// the array (`const unsigned char *l = (const void *)l0;`). The element
+    /// type and the type the access is at. The access focuses the array at
+    /// its own type and converts what it reads or writes, which is the same
+    /// byte at the other type (`int8_as_uint8_repr`).
+    fn place_sign_view(&self, e: &Expr) -> Option<(Rc<Type>, Rc<Type>)> {
+        let p = match &strip_vattr(e).val {
+            ExprT::Deref(p) | ExprT::Index(p, _) => p,
+            _ => return None,
+        };
+        if let Some(v) = self.walk_sign_view(p) {
+            return Some(v);
+        }
+        let ExprT::Var(v) = &strip_vattr(p).val else {
+            return None;
+        };
+        if !self.is_array_alias(&v.val) {
+            return None;
+        }
+        let owner = self.array_alias(&v.val);
+        let ot = self.env.local_type(&owner)?;
+        let oel = pointee(self.tds, peel(self.tds, &ot))?.clone();
+        let pt = self.ty_of(p).ok()?;
+        let pel = pointee(self.tds, peel(self.tds, &pt))?.clone();
+        match (&self.tds.resolve(&oel).val, &self.tds.resolve(&pel).val) {
+            (
+                TypeT::Int {
+                    width: a,
+                    signed: x,
+                },
+                TypeT::Int {
+                    width: b,
+                    signed: y,
+                },
+            ) if a == b && x != y => Some((oel.into(), pel.into())),
+            _ => None,
+        }
+    }
+
     /// The array an argument for an `_array` parameter is the rest of: a
     /// pointer walked through it, or the array plus an offset. The array
     /// itself is passed whole, and is not one of these.
@@ -17773,13 +18043,17 @@ impl<'a> Body<'a> {
             },
         };
         let ap = &self.arrays[&owner];
-        let elem_ok = |e: &Expr| -> Result<bool, String> {
+        let elem_ok = |e: &Expr, bytes: bool| -> Result<bool, String> {
             let ty = self.ty_of(e)?;
             let elem = pointee(self.tds, peel(self.tds, &ty))
                 .ok_or_else(|| "an array argument that is not a pointer".to_string())?;
-            Ok(palow_name(self.tds, elem).as_deref() == Some(&*ap.pn))
+            let name = palow_name(self.tds, elem);
+            // A `char` array may be lent as the `unsigned char` array a
+            // `void *` parameter is; the call converts it (`array_int8_as_uint8`).
+            Ok(name.as_deref() == Some(&*ap.pn)
+                || (bytes && ap.pn == "int8_t" && name.as_deref() == Some("uint8_t")))
         };
-        if !elem_ok(a)? || !elem_ok(orig)? {
+        if !elem_ok(a, false)? || !elem_ok(orig, true)? {
             return Err(format!(
                 "an array argument walked through `{}` at a type other than its element type",
                 owner
@@ -18745,6 +19019,38 @@ impl<'a> Body<'a> {
             }
             _ => None,
         }
+    }
+
+    /// An assertion in statement position -- an `_assert`, or a label's
+    /// `_ensures` checked at a `goto` -- read off the current state where it
+    /// can be, and as a contract over the frame where it needs binders (a
+    /// quantifier over memory, `_length`, `_old(p[k])`).
+    fn stmt_assertion(&mut self, e: &Rc<Expr>) -> Result<String, String> {
+        let mark = self.lines.len();
+        let p = match self.assertion(e) {
+            Ok(p) => p,
+            // An `_old` of a parameter a local shadows is refused
+            // either way; one the frame can read (`_old(d[k])`)
+            // falls back to the contract reading below.
+            Err(why)
+                if why.starts_with("`_old`") && {
+                    let shadowed: HashSet<String> = self
+                        .params
+                        .iter()
+                        .filter(|p| !self.old_params.contains(*p))
+                        .cloned()
+                        .collect();
+                    old_mentions(e, &shadowed, false)
+                } =>
+            {
+                return Err(why);
+            }
+            Err(why) => {
+                self.lines.truncate(mark);
+                self.spec_assertion(e).map_err(|_| why)?
+            }
+        };
+        Ok(p)
     }
 
     /// A statement assertion may mix ownership and pure propositions. Keep
@@ -19776,6 +20082,20 @@ impl<'a> Body<'a> {
                     Err(format!("`{}` is not in scope", v.val))
                 }
             }
+            ExprT::Deref(_) | ExprT::Index(..)
+                if !self.sign_view
+                    && let Some((oel, pel)) = self.place_sign_view(e) =>
+            {
+                self.sign_view = true;
+                let t = self.rvalue(e);
+                self.sign_view = false;
+                convert(
+                    peel(self.tds, &oel),
+                    peel(self.tds, &pel),
+                    &t?,
+                    self.tds.ptr_bytes,
+                )
+            }
             ExprT::Deref(inner) => {
                 if let ExprT::Var(v) = &inner.val {
                     if self.out_params.iter().any(|n| *n == *v.val) {
@@ -19786,17 +20106,6 @@ impl<'a> Body<'a> {
                     if self.arrays.contains_key(&*v.val.to_string())
                         || self.walk_owner(&v.val).is_some()
                     {
-                        if let Some((oel, pel)) = self.walk_sign_view(inner) {
-                            self.sign_view = true;
-                            let t = self.read_elem(inner);
-                            self.sign_view = false;
-                            return convert(
-                                peel(self.tds, &oel),
-                                peel(self.tds, &pel),
-                                &t?,
-                                self.tds.ptr_bytes,
-                            );
-                        }
                         return self.read_elem(inner);
                     }
                 }
@@ -20713,6 +21022,7 @@ impl<'a> Body<'a> {
         let plain_ptrs = c.plain_ptrs.clone();
         let const_args = c.const_args.clone();
         let arr_args = c.arr_args.clone();
+        let arr_elems = c.arr_elems.clone();
         let arrayptr_args = c.arrayptr_args.clone();
         let consumes = c.consumes.clone();
         let nullables = c.nullables.clone();
@@ -20957,6 +21267,7 @@ impl<'a> Body<'a> {
             // A pointer into one of this function's arrays, not at its base,
             // lends the callee the rest of the array for the call: the
             // prefix stays here, and the two are joined again afterwards.
+            let mut retype_from: Option<String> = None;
             let v = if arr_args.get(i) == Some(&true)
                 && arrayptr_args.get(i) != Some(&true)
                 && outs.get(i) != Some(&true)
@@ -20972,10 +21283,43 @@ impl<'a> Body<'a> {
                 self.lines.push(format!("array_lend_at {};", common));
                 self.pending_close
                     .push(format!("array_return_at {};", common));
+                retype_from = Some(ap.pn.clone());
                 q
             } else {
+                if arr_args.get(i) == Some(&true)
+                    && let ExprT::Var(x) = &strip_casts(a).val
+                    && let Some(ap) = self.arrays.get(&*x.val)
+                {
+                    retype_from = Some(ap.pn.clone());
+                }
                 v
             };
+            // A `char` array passed for an array of `unsigned char` (a
+            // `void *` one) is the same bytes at the other type, converted
+            // for the call and back after it -- before the lent suffix, if
+            // any, rejoins its prefix.
+            let mut retyped = false;
+            if let Some(from) = retype_from
+                && let Some(Some(to)) = arr_elems.get(i)
+                && from != *to
+            {
+                if from == "int8_t" && to == "uint8_t" {
+                    self.lines.push(format!("array_int8_as_uint8 {};", v));
+                    let back = format!("array_uint8_as_int8 {};", v);
+                    match self.pending_close.iter().rposition(|l| {
+                        l.starts_with("array_return_at ") && l.ends_with(&format!(" {};", v))
+                    }) {
+                        Some(at) => self.pending_close.insert(at, back),
+                        None => self.pending_close.push(back),
+                    }
+                    retyped = true;
+                } else {
+                    return Err(format!(
+                        "an array of {} passed for an array of {}",
+                        from, to
+                    ));
+                }
+            }
             if arr_args.get(i) == Some(&true)
                 && let Some(slot) = self.slots.iter().find(|s| s.addr == v)
                 && let Some(value) = &slot.array_value
@@ -20983,7 +21327,14 @@ impl<'a> Body<'a> {
                 if const_args.get(i) == Some(&true) {
                     implicit_args.push("#1.0R".to_string());
                 }
-                implicit_args.push(format!("#(hide {})", value));
+                if retyped {
+                    implicit_args.push(format!(
+                        "#(hide (seq_map FStar.Int.Cast.int8_to_uint8 {}))",
+                        value
+                    ));
+                } else {
+                    implicit_args.push(format!("#(hide {})", value));
+                }
             }
             out += &format!(" {}", v);
         }
@@ -22742,6 +23093,22 @@ impl<'a> Body<'a> {
         if let Some(p) = self.unalias(lhs) {
             return self.store(&p, pn, value);
         }
+        if !self.sign_view
+            && let Some((oel, pel)) = self.place_sign_view(lhs)
+        {
+            let v = convert(
+                peel(self.tds, &pel),
+                peel(self.tds, &oel),
+                value,
+                self.tds.ptr_bytes,
+            )?;
+            let opn = palow_name(self.tds, &oel)
+                .ok_or_else(|| format!("a store of {}", describe(&oel)))?;
+            self.sign_view = true;
+            let r = self.store(lhs, &opn, &v);
+            self.sign_view = false;
+            return r;
+        }
         // Whatever was known about the code pointers here is stale now; the
         // caller re-establishes it if the store was a decay.
         self.clear_fn_notes(lhs);
@@ -23596,10 +23963,27 @@ impl<'a> Body<'a> {
         let outer_prescattered = self.prescattered.clone();
         let mark = self.slots.len();
         let r = (|| -> Result<(), String> {
-            for s in fold_exits(body).iter() {
+            let folded = fold_exits(body);
+            // Where the body ends in an `if` one arm of which leaves, the
+            // start of its lines and whether `then` is the arm that falls
+            // through to the closing brace.
+            let mut tail_if = None;
+            for (k, s) in folded.iter().enumerate() {
                 if matches!(s.val, StmtT::Goto(_)) {
                     self.rest(std::slice::from_ref(s))?;
                     break;
+                }
+                if k + 1 == folded.len()
+                    && let StmtT::If {
+                        then_branch,
+                        else_branch,
+                        ensures,
+                        ..
+                    } = &s.val
+                    && ensures.is_empty()
+                    && exits(then_branch) != exits(else_branch)
+                {
+                    tail_if = Some((self.lines.len(), !exits(then_branch)));
                 }
                 self.env.push_stmt(s);
                 self.stmt(s)?;
@@ -23608,8 +23992,24 @@ impl<'a> Body<'a> {
             // invariant has to hold at the closing brace without it: Pulse
             // would otherwise be asked to carry a local across an edge where C
             // says its lifetime has ended.
+            let released = self.lines.len();
             self.release_from(mark);
             self.forget_loop_storage()?;
+            // The arm that leaves has released all of this already, so it
+            // goes at the end of the other arm. The `if` is then the body's
+            // last statement, which Pulse checks arm by arm against the
+            // invariant, instead of joining the arms first and forgetting
+            // what the arm that falls through knew (`if (!c) return 0;`
+            // followed by an `if` that writes a local).
+            if let Some((start, then_falls)) = tail_if
+                && released < self.lines.len()
+                && self.lines[..released].last().map(String::as_str) == Some("};")
+                && let Some(mid) = (start..released).rfind(|&j| self.lines[j] == "} else {")
+            {
+                let cleanup = self.lines.split_off(released);
+                let at = if then_falls { mid } else { released - 1 };
+                self.lines.splice(at..at, cleanup.iter().map(|l| indent(l)));
+            }
             for &i in &self.loop_storage {
                 self.slots[i].init = false;
                 self.slots[i].holds_fn.clear();
@@ -24333,30 +24733,7 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Assert(e) => {
-                let mark = self.lines.len();
-                let p = match self.assertion(e) {
-                    Ok(p) => p,
-                    // An `_old` of a parameter a local shadows is refused
-                    // either way; one the frame can read (`_old(d[k])`)
-                    // falls back to the contract reading below.
-                    Err(why)
-                        if why.starts_with("`_old`") && {
-                            let shadowed: HashSet<String> = self
-                                .params
-                                .iter()
-                                .filter(|p| !self.old_params.contains(*p))
-                                .cloned()
-                                .collect();
-                            old_mentions(e, &shadowed, false)
-                        } =>
-                    {
-                        return Err(why);
-                    }
-                    Err(why) => {
-                        self.lines.truncate(mark);
-                        self.spec_assertion(e).map_err(|_| why)?
-                    }
-                };
+                let p = self.stmt_assertion(e)?;
                 self.lines.push(format!("assert ({});", p));
                 if is_false_lit(e) {
                     // The assertion is still proved, never assumed. No state
@@ -25095,8 +25472,13 @@ impl<'a> Body<'a> {
                     cond,
                     then_branch,
                     else_branch,
-                    ..
-                } if may_exit(then_branch) || may_exit(else_branch) => {
+                    ensures,
+                } if may_exit(then_branch)
+                    || may_exit(else_branch)
+                    || (ensures.is_empty()
+                        && (has_loop(then_branch) || has_loop(else_branch))
+                        && copyable_tail(then_branch, else_branch, &stmts[i + 1..])) =>
+                {
                     self.active.clear();
                     // A test of a freshly allocated pointer is the one
                     // condition that is not just a value: it decides which arm
@@ -25263,7 +25645,7 @@ impl<'a> Body<'a> {
                     // for, including the initialized ownership `_live` asks
                     // for rather than merely the existence of a slot.
                     for e in ensures.iter() {
-                        let p = self.assertion(e)?;
+                        let p = self.stmt_assertion(e)?;
                         self.lines.push(format!("assert ({});", p));
                     }
                     // Labels inside the one being jumped to are out of scope
@@ -27684,6 +28066,113 @@ fn drop_dead_alias_inits(body: &Stmts) -> Option<Stmts> {
     )
 }
 
+/// Pulse joins an `if` that has no annotation by forgetting everything about
+/// the values its arms leave in the locals they write: a pointer one arm moves
+/// is some pointer after the `if`, on both paths. When a loop follows the `if`
+/// directly, its pure invariant is exactly what has to hold at the join, so it
+/// becomes the `if`'s `_ensures` -- each arm proves it about its own values,
+/// and the loop starts from it. That is musl's `memchr`: an `if` that may move
+/// `s` with a word loop, then the byte loop over `s`. `None` when nothing
+/// changes.
+fn loop_entry_joins(tds: &Typedefs, body: &Stmts) -> Option<Stmts> {
+    fn leaves(ss: &Stmts, in_loop: bool) -> bool {
+        ss.iter().any(|s| match &s.val {
+            StmtT::Return(_) | StmtT::Goto(_) | StmtT::Label { .. } => true,
+            StmtT::GotoBlock { .. } => true,
+            StmtT::Break | StmtT::Continue => !in_loop,
+            StmtT::While { body, .. } => leaves(body, true),
+            StmtT::If {
+                then_branch,
+                else_branch,
+                ..
+            } => leaves(then_branch, in_loop) || leaves(else_branch, in_loop),
+            StmtT::Match {
+                branches,
+                default_branch,
+                ..
+            } => {
+                branches.iter().any(|b| leaves(&b.body, in_loop)) || leaves(default_branch, in_loop)
+            }
+            _ => false,
+        })
+    }
+    fn sub(tds: &Typedefs, ss: &Rc<Stmts>, changed: &mut bool) -> Rc<Stmts> {
+        match loop_entry_joins(tds, ss) {
+            Some(n) => {
+                *changed = true;
+                Rc::new(n)
+            }
+            None => ss.clone(),
+        }
+    }
+    let mut changed = false;
+    let mut out: Stmts = Vec::with_capacity(body.len());
+    for (i, s) in body.iter().enumerate() {
+        let s = match &s.val {
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => {
+                let then_branch = sub(tds, then_branch, &mut changed);
+                let else_branch = sub(tds, else_branch, &mut changed);
+                let mut ensures = ensures.clone();
+                if ensures.is_empty()
+                    && let Some(StmtT::While { inv, .. }) = body.get(i + 1).map(|n| &n.val)
+                    && !inv.is_empty()
+                    && !inv.iter().any(|e| is_slprop_clause(tds, e))
+                    && !leaves(&then_branch, false)
+                    && !leaves(&else_branch, false)
+                {
+                    let mut t = Touched::default();
+                    touch_stmts(&then_branch, &mut t);
+                    touch_stmts(&else_branch, &mut t);
+                    let pure: Exprs = inv.iter().filter(|e| !live_only(e)).cloned().collect();
+                    if !t.written.is_empty() && !pure.is_empty() {
+                        ensures = Rc::new(pure);
+                        changed = true;
+                    }
+                }
+                StmtT::If {
+                    cond: cond.clone(),
+                    then_branch,
+                    else_branch,
+                    ensures,
+                }
+                .with_loc(s.loc.clone())
+            }
+            StmtT::While {
+                cond,
+                inv,
+                requires,
+                ensures,
+                body,
+            } => StmtT::While {
+                cond: cond.clone(),
+                inv: inv.clone(),
+                requires: requires.clone(),
+                ensures: ensures.clone(),
+                body: sub(tds, body, &mut changed),
+            }
+            .with_loc(s.loc.clone()),
+            StmtT::GotoBlock {
+                body,
+                label,
+                ensures,
+            } => StmtT::GotoBlock {
+                body: sub(tds, body, &mut changed),
+                label: label.clone(),
+                ensures: ensures.clone(),
+            }
+            .with_loc(s.loc.clone()),
+            _ => s.clone(),
+        };
+        out.push(s);
+    }
+    changed.then_some(out)
+}
+
 /// `q = &a[i++]` and `q = a + i++` evaluate the index once, but an alias
 /// stands for its place at every use and would evaluate it each time. Binding
 /// the index first -- `__pal_idx_n = i++; q = &a[__pal_idx_n]` -- keeps the
@@ -27846,6 +28335,17 @@ fn emit_body(
                 ..defn.clone()
             };
             &undead
+        }
+        None => defn,
+    };
+    let joined;
+    let defn = match loop_entry_joins(tds, &defn.body) {
+        Some(body) => {
+            joined = FnDefn {
+                body,
+                ..defn.clone()
+            };
+            &joined
         }
         None => defn,
     };
@@ -28202,6 +28702,37 @@ fn may_exit(stmts: &Stmts) -> bool {
         StmtT::GotoBlock { body, .. } => may_exit(body),
         _ => false,
     })
+}
+
+/// Whether the straight-line `return` that ends a function may be copied into
+/// both arms of the `if` before it. An `if` whose arms end in loops has
+/// nothing for Pulse to join the two exit invariants into, and the join loses
+/// what each loop established anyway; with the tail in each arm there is no
+/// join at all. Only a tail without control flow is copied, so the copies
+/// stay small, and only when neither arm declares a name the copy could see.
+fn copyable_tail(then_branch: &Stmts, else_branch: &Stmts, after: &[Rc<Stmt>]) -> bool {
+    let declares = |b: &Stmts| {
+        b.iter().any(|s| {
+            matches!(
+                s.val,
+                StmtT::Decl(..) | StmtT::Let(..) | StmtT::DeclStackArray { .. }
+            )
+        })
+    };
+    matches!(after.last().map(|s| &s.val), Some(StmtT::Return(_)))
+        && after.iter().all(|s| {
+            !matches!(
+                s.val,
+                StmtT::If { .. }
+                    | StmtT::While { .. }
+                    | StmtT::Match { .. }
+                    | StmtT::Label { .. }
+                    | StmtT::GotoBlock { .. }
+                    | StmtT::Goto(_)
+            )
+        })
+        && !declares(then_branch)
+        && !declares(else_branch)
 }
 
 /// Whether a C block always leaves the enclosing block: by a `return`, a

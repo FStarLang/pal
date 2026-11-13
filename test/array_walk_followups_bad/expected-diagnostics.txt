@@ -1,3 +1,2 @@
 # Expected translation diagnostic substrings
-a dereference of a pointer walked through `_d` at uint8_t, which is not its element type
 a dereference of local `p`, whose target the contract does not grant
