@@ -1464,8 +1464,50 @@ public:
                          true);
   }
 
+  // Whether `e` is built only out of integer literals and operators: no
+  // names (an enumerator keeps its name), and no `sizeof`/`_Alignof`, which
+  // PAL keeps symbolic at `size_t`. Anything at all is an operator here --
+  // the evaluation below decides whether it is a constant.
+  static bool isFoldableOperand(const Stmt *s, bool &op) {
+    if (isa<DeclRefExpr, UnaryExprOrTypeTraitExpr, OffsetOfExpr>(s))
+      return false;
+    if (!isa<IntegerLiteral, CharacterLiteral, ParenExpr, ImplicitCastExpr>(s))
+      op = true;
+    for (auto *c : s->children())
+      if (!c || !isFoldableOperand(c, op))
+        return false;
+    return true;
+  }
+
+  // A C integer constant expression with at least one operator in it, folded
+  // to its value: `(size_t)-1/UCHAR_MAX` is `72340172838076673sz`, not a
+  // tree of `Int32` operations each of which has to be proved free of
+  // overflow. Only an evaluation without undefined behaviour is folded; one
+  // with it (`INT_MAX + 1`, `1 / 0`) is translated as written, where its
+  // obligation fails as it should.
+  std::optional<Rc<ir::Expr>> foldIntConstant(Expr *e) {
+    auto ty = e->getType();
+    if (!ty->isIntegerType() || ty->isEnumeralType() || isBoolType(ty))
+      return std::nullopt;
+    bool op = false;
+    if (!isFoldableOperand(e, op) || !op || !e->isIntegerConstantExpr(*astCtx))
+      return std::nullopt;
+    Expr::EvalResult res;
+    SmallVector<PartialDiagnosticAt, 1> notes;
+    res.Diag = &notes;
+    if (!e->EvaluateAsInt(res, *astCtx, Expr::SE_NoSideEffects) ||
+        res.HasUndefinedBehavior || !notes.empty())
+      return std::nullopt;
+    auto loc = getRange(e->getSourceRange());
+    return mk_int_lit(std::move(loc), toBigInt(res.Val.getInt()),
+                      trQualType(ty, e->getSourceRange()));
+  }
+
   Rc<ir::Expr> trRValue(Expr *e) {
     auto loc = getRange(e->getSourceRange());
+
+    if (auto folded = foldIntConstant(e))
+      return std::move(*folded);
 
     if (auto *value = ignoreCCleanups(e); value != e) {
       return trRValue(value);

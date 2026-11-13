@@ -3274,6 +3274,7 @@ impl<'a> Spec<'a> {
             && let Some(r) = self.ptr_pos(inner, w)
         {
             return Some(r.and_then(|(owner, pos)| match self.pointees.get(&owner) {
+                Some((Some(t), _)) if pos == "0" => Ok(format!("(Seq.length {})", t)),
                 Some((Some(t), _)) => Ok(format!("(Seq.length {} - {})", t, pos)),
                 _ => Err(format!("`{}._length` is not available here", v.val)),
             }));
@@ -3423,10 +3424,7 @@ impl<'a> Spec<'a> {
                     && let Some((owner, esize, addr)) = self.walks.get(&*v.val)
                     && let Some(cur) = self.locals.get(&*v.val)
                 {
-                    return Some(Ok((
-                        owner.clone(),
-                        format!("(walk_idx {} {} {})", esize, addr, cur),
-                    )));
+                    return Some(Ok((owner.clone(), walk_pos(esize, addr, cur))));
                 }
                 if self.walks.values().any(|(o, _, _)| *o == *v.val) {
                     return Some(Ok((v.val.to_string(), "0".to_string())));
@@ -3457,7 +3455,7 @@ impl<'a> Spec<'a> {
                         1 => n,
                         k => format!("({} * {})", k, n),
                     };
-                    (owner, format!("({} {} {})", pos, op.to_str(), n))
+                    (owner, pos_op(&pos, *op, &n))
                 }))
             }
             // A cast moves no pointer: where it points is still a position in
@@ -3492,7 +3490,7 @@ impl<'a> Spec<'a> {
         pointee(self.tds, peel(self.tds, &rt))?;
         Some(
             self.ptr_positions(l, r, w)
-                .and_then(|(pl, pr)| Ok(format!("({} - {})", pl, pr))),
+                .and_then(|(pl, pr)| Ok(pos_op(&pl, BinOp::Sub, &pr))),
         )
     }
 
@@ -3567,13 +3565,18 @@ impl<'a> Spec<'a> {
             let Some((Some(term), _)) = self.pointees.get(&owner) else {
                 return Err(format!("`*{}` in a contract", v.val));
             };
+            let at_base = pos == "0";
             let i = match idx {
                 None => pos,
-                Some(i) => format!("({} + {})", pos, self.index_num(i, wi)?),
+                Some(i) => pos_op(&pos, BinOp::Add, &self.index_num(i, wi)?),
             };
-            self.guards
-                .borrow_mut()
-                .push(format!("0 <= {} /\\ {} < Seq.length {}", i, i, term));
+            // At the base the index is the subscript itself, and the guard
+            // is the one a contract's `d[k]` gets.
+            self.guards.borrow_mut().push(if at_base {
+                format!("{} < Seq.length {}", i, term)
+            } else {
+                format!("0 <= {} /\\ {} < Seq.length {}", i, i, term)
+            });
             return Ok(format!("(Seq.index {} {})", term, i));
         }
         let Some((pre, post)) = self.pointees.get(&*v.val) else {
@@ -14413,6 +14416,8 @@ struct Body<'a> {
     /// Pointers the body moves through an array parameter, and which one.
     /// See `walk_map`.
     walks: HashMap<String, Result<String, String>>,
+    /// Walked pointers that always hold their array's base. See `base_copies`.
+    bases: HashSet<String>,
     /// Which member of a union at a given address is live, where the emitter
     /// knows. C's rule is that reading a member other than the one last
     /// written is not reading what you wrote, and Palow says the same thing by
@@ -17959,6 +17964,13 @@ impl<'a> Body<'a> {
         // A walked pointer is focused where it points, but the ownership is
         // the array's, so the element is found relative to the base.
         let (at, cur, at_sfx) = match &walk {
+            // At the walked pointer itself the position is stated without
+            // the `+ 0`, so it matches a contract's index term.
+            Some(cur) if i == "0sz" => (
+                format!("({} +! {})", cur, off),
+                format!(" {}", cur),
+                "_here",
+            ),
             Some(cur) => (format!("({} +! {})", cur, off), format!(" {}", cur), "_at"),
             None => (format!("({} +! {})", arr, off), String::new(), ""),
         };
@@ -17972,7 +17984,13 @@ impl<'a> Body<'a> {
         }
         self.lines.push(format!(
             "array_offset_fits{} {} {} {} {}_alignof{} {};",
-            at_sfx, repr, arr, esize, pn, cur, i
+            if at_sfx.is_empty() { "" } else { "_at" },
+            repr,
+            arr,
+            esize,
+            pn,
+            cur,
+            i
         ));
         self.lines.push(format!(
             "array_focus{} {} {} {} {}_alignof{} {} {};",
@@ -18651,7 +18669,7 @@ impl<'a> Body<'a> {
                 "an assertion that subtracts pointers into different arrays".to_string(),
             ));
         }
-        Some(Ok(format!("({} - {})", pl, pr)))
+        Some(Ok(pos_op(&pl, BinOp::Sub, &pr)))
     }
 
     /// Where a pointer into an array parameter points, as an element index
@@ -18679,7 +18697,7 @@ impl<'a> Body<'a> {
                 Some(self.inline(e).map(|cur| {
                     (
                         owner,
-                        format!("(walk_idx (SizeT.v {}) {} {})", esize, addr, cur),
+                        walk_pos(&format!("(SizeT.v {})", esize), &addr, &cur),
                     )
                 }))
             }
@@ -18692,10 +18710,7 @@ impl<'a> Body<'a> {
                     Ok(x) => x,
                     Err(e) => return Some(Err(e)),
                 };
-                Some(
-                    self.num(r)
-                        .map(|n| (owner, format!("({} {} {})", pos, op.to_str(), n))),
-                )
+                Some(self.num(r).map(|n| (owner, pos_op(&pos, *op, &n))))
             }
             ExprT::Cast(inner, to) => {
                 let it = self.ty_of(inner).ok()?;
@@ -22639,6 +22654,19 @@ impl<'a> Body<'a> {
                     (o.clone(), format!("(SizeT.v {})", a.esize), a.addr.clone()),
                 );
             }
+            // A copy of the array's base (`wchar_t *a = d;` before `d`
+            // moves) is stated to hold that base itself, so that positions
+            // through it are the plain indices a contract's are: a quantified
+            // fact about `a[k]` is then the same term as the `_ensures`' `d[k]`.
+            if let Some(o) = &walk
+                && self.bases.contains(&s.name)
+            {
+                let addr = self.arrays[o].addr.clone();
+                owns.push(s.pts_to(&addr));
+                owns.push(self.walk_ok(o, &addr));
+                locals.insert(s.name.clone(), addr);
+                continue;
+            }
             if let Some(o) = &walk
                 && body_touches.as_ref().is_some_and(|t| {
                     !t.written.contains(&s.name) && !t.rebound.contains_key(&s.name)
@@ -23882,8 +23910,22 @@ impl<'a> Body<'a> {
                 let mark = self.lines.len();
                 let p = match self.assertion(e) {
                     Ok(p) => p,
-                    // An `_old` the body cannot name is refused either way.
-                    Err(why) if why.starts_with("`_old`") => return Err(why),
+                    // An `_old` of a parameter a local shadows is refused
+                    // either way; one the frame can read (`_old(d[k])`)
+                    // falls back to the contract reading below.
+                    Err(why)
+                        if why.starts_with("`_old`") && {
+                            let shadowed: HashSet<String> = self
+                                .params
+                                .iter()
+                                .filter(|p| !self.old_params.contains(*p))
+                                .cloned()
+                                .collect();
+                            old_mentions(e, &shadowed, false)
+                        } =>
+                    {
+                        return Err(why);
+                    }
                     Err(why) => {
                         self.lines.truncate(mark);
                         self.spec_assertion(e).map_err(|_| why)?
@@ -26297,6 +26339,29 @@ fn mentions_return(e: &Expr, ret: &str) -> bool {
     }
 }
 
+/// Whether an `_old` in `e` names one of `names` (or something this cannot
+/// see into).
+fn old_mentions(e: &Expr, names: &HashSet<String>, under: bool) -> bool {
+    let m = |a: &Expr| old_mentions(a, names, under);
+    match &e.val {
+        ExprT::Var(id) => under && names.contains(&*id.val),
+        ExprT::BoolLit(_) | ExprT::IntLit(..) | ExprT::FloatLit(..) => false,
+        ExprT::Old(a) => old_mentions(a, names, true),
+        ExprT::UnOp(_, a)
+        | ExprT::Cast(a, _)
+        | ExprT::Deref(a)
+        | ExprT::Ref(a)
+        | ExprT::Member(a, _)
+        | ExprT::VAttr(_, a)
+        | ExprT::Forall(_, _, a)
+        | ExprT::Exists(_, _, a) => m(a),
+        ExprT::BinOp(_, a, b) | ExprT::Index(a, b) => m(a) || m(b),
+        ExprT::Cond(a, b, c) => m(a) || m(b) || m(c),
+        ExprT::FnCall(_, args) => args.iter().any(|a| m(a)),
+        _ => true,
+    }
+}
+
 fn strip_vattr(e: &Expr) -> &Expr {
     match &e.val {
         ExprT::VAttr(_, inner) => strip_vattr(inner),
@@ -26462,6 +26527,116 @@ fn returned_arg(env: &Env, g: &Ident) -> Option<usize> {
 /// Nothing here is trusted. The access focuses the array at the pointer with
 /// a precondition that says the pointer really is in it, and that is what F*
 /// checks; this only decides which array to ask.
+/// The locals that hold their array parameter's base for as long as they
+/// exist: declared once, at the function's top level, as a copy of the
+/// parameter before anything moves it (`wchar_t *a = d;`), and never
+/// assigned, stepped or addressed afterwards. Without a `goto` the
+/// declaration runs once, so the copy is the parameter's entry value.
+/// Where `cur` points in the array at `addr`, in elements: `walk_idx`, or
+/// `0` when `cur` is the array's base. The plain `0` keeps an index through
+/// the base the same term as a contract's (`Seq.index s k`, not
+/// `Seq.index s (walk_idx e a a + k)`), which quantifier triggers need.
+fn walk_pos(esize: &str, addr: &str, cur: &str) -> String {
+    if cur == addr {
+        "0".to_string()
+    } else {
+        format!("(walk_idx {} {} {})", esize, addr, cur)
+    }
+}
+
+/// `p + n` / `p - n` of positions, without the `0 +` and `- 0` a position at
+/// the base would leave (see `walk_pos`).
+fn pos_op(p: &str, op: BinOp, n: &str) -> String {
+    match op {
+        BinOp::Add if p == "0" => n.to_string(),
+        BinOp::Add | BinOp::Sub if n == "0" => p.to_string(),
+        _ => format!("({} {} {})", p, op.to_str(), n),
+    }
+}
+
+fn base_copies(body: &Stmts, arrays: &HashSet<String>) -> HashSet<String> {
+    fn decls(ss: &Stmts, n: &mut HashMap<String, usize>) -> bool {
+        for s in ss.iter() {
+            match &s.val {
+                StmtT::Let(x, ..) | StmtT::Decl(x, _) => {
+                    *n.entry(x.val.to_string()).or_default() += 1
+                }
+                StmtT::DeclStackArray { name, .. } => {
+                    *n.entry(name.val.to_string()).or_default() += 1
+                }
+                StmtT::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    if !decls(then_branch, n) || !decls(else_branch, n) {
+                        return false;
+                    }
+                }
+                StmtT::Match {
+                    branches,
+                    default_branch,
+                    ..
+                } => {
+                    for b in branches.iter() {
+                        if !decls(&b.body, n) {
+                            return false;
+                        }
+                    }
+                    if !decls(default_branch, n) {
+                        return false;
+                    }
+                }
+                StmtT::While { body, .. } => {
+                    if !decls(body, n) {
+                        return false;
+                    }
+                }
+                StmtT::Goto(_) | StmtT::GotoBlock { .. } | StmtT::Label { .. } => return false,
+                _ => {}
+            }
+        }
+        true
+    }
+    let mut n = HashMap::new();
+    if !decls(body, &mut n) {
+        return HashSet::new();
+    }
+    let mut all = Touched::default();
+    touch_stmts(body, &mut all);
+    let mut before = Touched::default();
+    let mut out = HashSet::new();
+    for (i, s) in body.iter().enumerate() {
+        // `T *a = d;` is a declaration and an assignment straight after it.
+        // The elaborator's cast from the array's pointer kind to a plain
+        // pointer moves nothing.
+        let init = match &s.val {
+            StmtT::Let(x, _, e) => Some((x, e, 0)),
+            StmtT::Decl(x, _) => match body.get(i + 1).map(|n| &n.val) {
+                Some(StmtT::Assign(l, e)) if matches!(&strip_vattr(l).val, ExprT::Var(v) if v.val == x.val) => {
+                    Some((x, e, 1))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((x, e, assigns)) = init
+            && let ExprT::Var(d) = &strip_casts(e).val
+            && arrays.contains(&*d.val)
+            && !before.rebound.contains_key(&*d.val)
+            && !before.addressed.contains(&*d.val)
+            && !before.declared.contains(&*d.val)
+            && n.get(&*x.val) == Some(&1)
+            && all.rebound.get(&*x.val).copied().unwrap_or(0) == assigns
+            && !all.addressed.contains(&*x.val)
+        {
+            out.insert(x.val.to_string());
+        }
+        touch_stmts(&vec![s.clone()], &mut before);
+    }
+    out
+}
+
 fn walk_map(
     body: &Stmts,
     arrays: &HashSet<String>,
@@ -27324,6 +27499,7 @@ fn emit_body(
     let walks = walk_map(&defn.body, &arrays.keys().cloned().collect(), &|g| {
         returned_arg(&env, g)
     });
+    let bases = base_copies(&defn.body, &arrays.keys().cloned().collect());
     let mut b = Body {
         tds,
         env,
@@ -27423,6 +27599,7 @@ fn emit_body(
         fp_from_call: call_bound_map(&defn.body),
         array_aliases: array_alias_map(tds, &defn.body),
         walks,
+        bases,
         active: HashMap::new(),
         union_values: HashMap::new(),
         // Only where the contract survived: a dropped `_requires` is not a

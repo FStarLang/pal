@@ -7295,3 +7295,66 @@ Limitations:
       array to a pointer to its own element type, under a subscript -- is
       `p[k]`, and a `void *` compared with an array is compared as a
       pointer (`test/array_void_bytes`).
+61. **A copy of an array's base is the base.** In musl's `wcsncat`,
+    `wchar_t *a = d;` is taken before `d` moves, and the body's `a[k]` was
+    `Seq.index xs (walk_idx 4 var_d tmp + v k)` -- `tmp` the value read from
+    `a`'s slot -- while the `_ensures`' `d[k]` is `Seq.index xs (v k)`. Even
+    once `walk_idx_self` made the offset `0`, `0 + v k` and `v k` are
+    different terms, so a quantified `_assert` equal to the postcondition
+    never E-matched it. Now:
+    - *Base copies* (`base_copies`): a top-level `T *a = d;` (or a
+      declaration followed directly by that assignment), with `d` an
+      `_array` parameter not yet moved, declared or addressed, and `a`
+      declared once, never reassigned and not addressed, is the base for the
+      whole body. Functions with labels or `goto` have none. The frames of
+      loop invariants and quantified asserts state its slot as
+      `ptr_pts_to loc_a 1.0R var_d` rather than binding a `tmp_loop_ptr`, so
+      `a` is `var_d` there; Pulse checks that equation at every frame, so a
+      wrong analysis fails to verify rather than being unsound.
+    - *Positions* (`walk_pos`, `pos_op`): a pointer that is syntactically
+      the base has position `0`, and `0 + n`, `p + 0` and `p - 0` are not
+      written, in contracts and in bodies (`ptr_pos`, `ptr_diff`,
+      `pointee_at_in`, `length_of`, `pos_diff`, `body_ptr_pos`). So `a[k]`
+      is `Seq.index xs (v k)`, `d - a` is `walk_idx 4 var_d inv_d`, and
+      `a._length` is `Seq.length xs`.
+      Its definedness guard is the contract's `v k < Seq.length xs`, without
+      the `0 <=` a walked position needs.
+    - *`_old` in `_assert`.* A quantified `_assert` that the body cannot
+      translate falls back to the frame reading, but one with an `_old` was
+      refused outright; now only an `_old` naming a parameter a local
+      shadows is, so `_old(d[k])` (the entry element) works as in an
+      `_invariant` (`test/array_walk_base`).
+62. **Integer constant expressions are literals.** musl's
+    `#define ONES ((size_t)-1/UCHAR_MAX)` and `HIGHS (ONES * (UCHAR_MAX/2+1))`
+    were emitted operator by operator, and each `Int32` operation's overflow
+    and division typing obligations timed out in strchrnul's heavy word
+    loop. `trRValue` now first asks clang (`isIntegerConstantExpr`,
+    `EvaluateAsInt` with no side effects, no UB and no notes) for the value
+    of an integer, non-`bool`, non-enum expression with at least one operator
+    and emits it as one literal of the expression's type
+    (`0x0101010101010101sz`, `128l`). Leaves that are names (enumerators),
+    `sizeof`/`_Alignof`/`offsetof` are not folded: PAL keeps `sizeof`
+    symbolic at `size_t`, which allocation patterns rely on. An expression
+    with undefined behaviour stays unfolded, so its obligation still fails
+    (`test/int_const_fold`).
+63. **Contracts promote.** Contract expressions are parsed by PAL, not
+    clang, and were typed at the meet of their operands' types: musl
+    memcmp's `return == ((const unsigned char *)vl)[i] -
+    ((const unsigned char *)vr)[i]` became a byte `sub_wrap` converted to
+    `int`, while the code computes the `int` difference. `elab` now applies
+    the integer promotions to `-`/`~` operands and to arithmetic and
+    comparison operands narrower than `int` (an equality or order between
+    two operands of one narrow type is unaffected and left alone). The
+    item-60 cast semantics (`spec_to_unsigned`) are unchanged
+    (`test/spec_int_promotion`).
+64. **A local copying an `_array void *` is the array.** In
+    `const unsigned char *s = m;` with `m` an `_array const void *`, the
+    initialiser is a cast of an array pointer of `uint8_t` to `uint8_t *`;
+    `refine_decl_pointer_kind` now gives the local (and the cast) the array
+    kind, as for a typed copy, so `s[n]` and `s + n` work (musl's
+    `memrchr`).
+65. **Focus at the walked pointer itself.** `*p` on a walked pointer was
+    focused by `array_focus_at ... q 0sz`, whose element is
+    `Seq.index xs (walk_idx e a q + 0)`; `array_focus_here`,
+    `array_unfocus_here` and `array_unfocus_read_here` state the `i == 0`
+    case with `walk_idx e a q`, the term a contract writes.

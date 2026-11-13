@@ -136,7 +136,7 @@ Beyond ownership, the user typically also wants to constrain values. PAL provide
 - `_preserves_value(x)` = `_ensures(x == _old(x))`.
 - `_invariant(p)` / `_ensures(p)` on a loop — see below.
 - `_decreases(p)` — termination measure on a `_rec` function (required there; not a loop annotation).
-- `_assert(p)` — verification assertion inside a function body. It may quantify over array contents (`_exists(size_t m, m < c._length && c[m] == 0)`) and read through walked pointers (`*s`); those are read at their current values, as in an `_invariant` (`test/assert_quantified_array`).
+- `_assert(p)` — verification assertion inside a function body. It may quantify over array contents (`_exists(size_t m, m < c._length && c[m] == 0)`) and read through walked pointers (`*s`); those are read at their current values, as in an `_invariant` (`test/assert_quantified_array`). `_old(d[k])` there is the array's element on entry, as in an `_invariant`.
 
 Inside any of these predicates the following spec-only constructs are available:
 
@@ -146,10 +146,13 @@ Inside any of these predicates the following spec-only constructs are available:
 - `_live(x)` — the storage of `x` exists. For a local in a loop invariant, or a parameter, the generated frame already says so, and `_live` translates to `True`; for a mutable global it is the global's points-to (see below).
 - `_specint` — arbitrary-precision integer (ghost arithmetic); `(_specint) e` turns a machine integer into a mathematical one, so overflow bounds can be stated.
 - A cast to a C integer type in a contract is C's conversion: `(size_t)-1` is `SIZE_MAX` and `(uint8_t)(x + 1)` is reduced modulo 256 (`spec_to_unsigned`/`spec_to_signed` in `Pulse.Lib.C.Palow.Scalar`); a value already in range is unchanged. A subscript `a[k]` with a `_specint` `k` is the position `k` itself, which must be within the array (`test/spec_cast_wrap`).
+- Contract arithmetic applies C's integer promotions and usual arithmetic conversions: with `unsigned char a, b`, `a - b` is the `int` difference (possibly negative), not a byte subtraction modulo 256, and `-a` is the negated `int` (`test/spec_int_promotion`).
 - `_slprop` — type cast that declares a separation-logic predicate (in `_refine`, or on an `_inline_pulse` clause).
 - `$(...)` — antiquotation: splice a C-level entity into an `_inline_pulse` body (see the Antiquotation section under Pulse interop).
 
 Pure builtins with a Pulse model may be used in specifications too, e.g. `__builtin_bswap64(x)` is `Pulse.Lib.C.UInt64.bswap64 x`.
+
+In function bodies, an integer constant expression built from literals and operators (`(size_t)-1/UCHAR_MAX`, `ONES * (UCHAR_MAX/2+1)`) is emitted as a single literal of its type, so it carries no overflow or division obligations. Expressions mentioning `sizeof`/`_Alignof`, enumerators, or whose evaluation is undefined (`INT_MAX + 1`) are translated operator by operator as before (`test/int_const_fold`).
 
 In function bodies, `__builtin_mul_overflow(a, b, result)` supports unsigned
 operands of at most 64 bits and a nonvolatile unsigned 32-bit destination.
@@ -218,6 +221,7 @@ In a loop `_invariant` or an `_assert` -- not a function's `_requires`/`_ensures
 - Anything combined with a position is mathematical too: `(l - _old(l)) + n == _old(n)`, `l - _old(l) == _old(n) - n` and `_forall(size_t k, k < s - a ==> ...)` compare numbers, not `ptrdiff_t` values, and a `_exists(size_t i, ...)` whose witness is where a pointer stopped needs no hint. A conversion that keeps every distance (to `ptrdiff_t`, `int64_t` or `_specint`) is read through; one that can change it, `(uint8_t)(p - a)`, is refused in an `_invariant` rather than read as the count. The `size_t` arithmetic itself still wraps: `_old(n) - n` is the wrapped difference, so an invariant using it also states `n <= _old(n)`.
 - `p[k]`, `*p` and `p._length` are relative to where `p` points: `p._length` is the number of elements left. `_old(p)[k]` is the array at entry.
 - A walked pointer the loop does not move (`a` above) keeps its value; a `const` array's contents are its entry contents.
+- A local that copies an array parameter before the parameter moves and is never reassigned (`wchar_t *a = d;`) is the array's base for the whole body, and `a[k]` is the same term as the contract's `d[k]`: a quantified `_assert` or `_invariant` through `a` matches an `_ensures` that says it about `d` (`test/array_walk_base`).
 
 `*(unsigned char *)p` on an array of `char` is the element converted to `unsigned char`, and so is `*l` where `const unsigned char *l = (void *)_l` walks a `char` array (musl's `strncmp`); writes through such a pointer are refused. In a contract `l - _l` between the two signednesses is a position difference too. A subscript is a `size_t`, so read behind a walked pointer with `*(p - 1)`, not `p[-1]`. `test/array_pointer_walk` has `wcslen`, `strcmp`, `memchr`, `memcpy` and a backward walk.
 
@@ -225,7 +229,7 @@ In an `_invariant`, `_old(d._length)` and `_old(d)._length` are the length on en
 
 A function can return a pointer into an array it is passed: `_ensures(return == s + i)` (or `(wchar_t *)(s + i)`) with a `size_t i` is `elem_ptr esize s i`, the pointer `i` elements past `s`. A caller then treats the result as a pointer walked through the array it lent: when exactly one pointer parameter appears as `return == p` or `return == p + e` in the callee's `_ensures`, `z = f(s, ...)` makes `z` a walked pointer of `s`, so `z - s` is a position and `*z` reads `s` there (behind an `if (z)` when the result may be null). `test/array_walk_followups` has musl's `wmemchr`, `wcsnlen`, `wcschr`-like `s + wcslen(s)`, `wmemset`, `wmemcpy` and `strncmp`.
 
-A `void *` parameter declared `_array` (or `_arrayptr`) is an array of `unsigned char`, the type through which C lets any object be read and written: musl's `void *memset(_array void *dest, int c, size_t n)` walks it through `unsigned char *s = dest;`. A contract reads it as `((unsigned char *)dest)[k]` (C does not subscript a `void *`), and `return == dest` compares the `void *` result with it. A caller passes an `_array` of `unsigned char` (`test/array_void_bytes`).
+A `void *` parameter declared `_array` (or `_arrayptr`) is an array of `unsigned char`, the type through which C lets any object be read and written: musl's `void *memset(_array void *dest, int c, size_t n)` walks it through `unsigned char *s = dest;`. A contract reads it as `((unsigned char *)dest)[k]` (C does not subscript a `void *`), and `return == dest` compares the `void *` result with it. A caller passes an `_array` of `unsigned char` (`test/array_void_bytes`). A local initialised from such a parameter (`const unsigned char *s = m;`) is the array itself, so `s[n]` and `s + n` work as for a typed array (musl's `memrchr`, `test/spec_int_promotion`).
 
 Inside a loop body, an `if` one of whose branches always leaves (`return`, `break`, `continue`, `goto`) is followed by the rest of the block only on its other branch, so the code after it knows the condition: `if (!*s || *s == c) return s; ...` (musl's `strchrnul`) continues with `*s != 0 && *s != c` (`test/if_exit_rest`).
 

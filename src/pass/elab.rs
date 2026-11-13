@@ -634,7 +634,17 @@ impl<'a> Elaborator<'a> {
                 self.elab_rvalue(env, Rc::make_mut(arg), None);
                 match un_op {
                     UnOp::Not => self.cast_to_bool(env, arg),
-                    UnOp::Neg | UnOp::BitNot => {}
+                    // C's integer promotion: an operand narrower than `int`
+                    // is converted to `int` first. Code arrives with clang's
+                    // conversions already in it; a contract does not.
+                    UnOp::Neg | UnOp::BitNot => {
+                        if let Some(t) = self.infer_expr(env, arg)
+                            && let TypeT::Int { width, .. } = env.vtype_whnf(t).val
+                            && width < 32
+                        {
+                            cast_to(arg, int32_type(&arg.loc));
+                        }
+                    }
                 }
             }
             ExprT::BinOp(bin_op, lhs, rhs) => {
@@ -864,6 +874,30 @@ impl<'a> Elaborator<'a> {
                                 }
                                 .with_loc(lhs.loc.clone())
                                 .into();
+                            }
+                            // The integer promotions: operands narrower
+                            // than `int` are computed with as `int`. A
+                            // comparison of two values of one narrow type
+                            // means the same either way, so only a mixed
+                            // one (`(uint8_t)x == (int8_t)y`) is promoted.
+                            if let TypeT::Int { width, .. } = env.vtype_whnf(meet_type.clone()).val
+                                && width < 32
+                                && (!matches!(bin_op, BinOp::Eq | BinOp::LEq | BinOp::Lt)
+                                    || !env.vtype_eq(lhs_ty.clone(), rhs_ty.clone()))
+                            {
+                                meet_type = int32_type(&lhs.loc).into();
+                            }
+                            // The integer promotions: operands narrower
+                            // than `int` are computed with as `int`. A
+                            // comparison of two values of one narrow type
+                            // means the same either way, so only a mixed
+                            // one (`(uint8_t)x == (int8_t)y`) is promoted.
+                            if let TypeT::Int { width, .. } = env.vtype_whnf(meet_type.clone()).val
+                                && width < 32
+                                && (!matches!(bin_op, BinOp::Eq | BinOp::LEq | BinOp::Lt)
+                                    || !env.vtype_eq(lhs_ty.clone(), rhs_ty.clone()))
+                            {
+                                meet_type = int32_type(&lhs.loc).into();
                             }
                             if !env.vtype_eq(lhs_ty, meet_type.clone()) {
                                 cast_to(lhs, meet_type.clone().to_rc())
@@ -1159,6 +1193,33 @@ impl<'a> Elaborator<'a> {
             };
             if assign_name.val != *var_name {
                 continue;
+            }
+            // `const unsigned char *s = m;` with `m` an `_array void *`: the
+            // conversion to the array's own element type is a pointer into
+            // the same array, so it keeps the array's kind, as a copy of a
+            // typed array parameter does.
+            if let ExprT::Cast(inner, to) = &v.val
+                && let TypeT::Pointer(pt, PointerKind::Unknown | PointerKind::Ref) = &to.val
+                && let Ok(i_ty) = env.infer_expr(inner)
+                && let TypeT::Pointer(ipt, ik @ (PointerKind::Array | PointerKind::ArrayPtr)) =
+                    &env.vtype_whnf(i_ty).val
+                && env.vtype_eq(pt.clone().into(), ipt.clone().into())
+            {
+                let ik = ik.clone();
+                let s = Rc::make_mut(&mut stmts[j]);
+                if let StmtT::Assign(_, v) = &mut s.val
+                    && let ExprT::Cast(_, to) = &mut Rc::make_mut(v).val
+                    && let TypeT::Pointer(_, kind) = &mut Rc::make_mut(to).val
+                {
+                    *kind = ik.clone();
+                }
+                if let StmtT::Decl(_, decl_ty) = &mut Rc::make_mut(&mut stmts[decl_idx]).val
+                    && let TypeT::Pointer(_, kind) = &mut Rc::make_mut(decl_ty).val
+                    && matches!(kind, PointerKind::Unknown | PointerKind::Ref)
+                {
+                    *kind = ik;
+                }
+                break;
             }
             let Ok(v_ty) = env.infer_expr(v) else {
                 break;
@@ -1601,4 +1662,13 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         elab.elab_decl(&env, decl);
         env.push_decl(decl);
     }
+}
+
+fn int32_type(loc: &Rc<SourceInfo>) -> Rc<Type> {
+    TypeT::Int {
+        signed: true,
+        width: 32,
+    }
+    .with_loc(loc.clone())
+    .into()
 }
