@@ -25077,6 +25077,14 @@ impl<'a> Body<'a> {
                 self.lines.extend(else_pre.iter().map(|l| indent(l)));
                 self.lines.extend(els.lines.iter().map(|l| indent(l)));
                 self.lines.push("};".to_string());
+                // Pulse refuses an annotated `if` in tail position under an
+                // expected postcondition -- the end of an enclosing annotated
+                // `if`'s arm, or of a loop body -- as two postconditions for
+                // one statement. A unit after it is the tail instead, checked
+                // against the outer expectation from the `if`'s own.
+                if pure_join || states_own {
+                    self.lines.push("();".to_string());
+                }
                 for (addr, key) in fps {
                     self.seeded
                         .push((addr, "_".to_string(), "_".to_string(), key));

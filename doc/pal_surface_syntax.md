@@ -304,6 +304,8 @@ if (n && *p != c)
 
 The contents of a mutable array the arms may write are bound afresh, so restate what is needed about them.
 
+Annotated `if`s nest: one may end an arm of another, or a loop body, and an explicit `_ensures` on an `if` directly before a loop is used as written rather than replaced by the loop's invariant (`test/if_ensures_tail`).
+
 PAL supplies two joins of its own. An `if` without `_ensures` whose arms write locals and that is directly followed by a loop with pure `_invariant`s gets those invariants as its join, since they are what the loop needs on entry (`test/if_loop_join`). An `if` without `_ensures` with a loop in an arm, followed by nothing but straight-line code ending in `return` (musl's `wmemmove`), has that tail copied into both arms, so there is no join at all (`test/if_loops_tail`).
 
 ### Labels

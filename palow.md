@@ -7503,3 +7503,11 @@ Limitations:
     reading a cell is `Some?.v` and claims `Some?`, as for an `_out` array
     being filled (`test/local_array_spec`, `test/local_array_spec_bad`;
     musl's `strspn`/`strcspn` byte sets).
+78. **An annotated `if` at the end of an annotated block.** An `if` with
+    `_ensures` that ended an arm of another annotated `if`, or a loop
+    body, was in tail position under an expected postcondition, and Pulse
+    refused it as "Multiple annotated postconditions" (musl's `strlcpy`,
+    where the outer `if` precedes the byte loop). Every annotated `if` is
+    now followed by `();`, which takes the tail position and is checked
+    against the outer expectation from the inner `if`'s postcondition
+    (`test/if_ensures_tail`).
