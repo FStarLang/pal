@@ -3571,6 +3571,30 @@ impl<'a> Spec<'a> {
         Ok((pl, pr))
     }
 
+    /// The element type of array `owner` and the pointee type of `p`, when
+    /// `p` views the array at the other signedness of the same width.
+    fn sign_view_of(&self, p: &Expr, owner: &str) -> Option<(Type, Type)> {
+        let ot = self.env.local_type(owner)?;
+        let oel = pointee(self.tds, peel(self.tds, &ot))?.clone();
+        let pt = self.ty_of(p).ok()?;
+        let pel = pointee(self.tds, peel(self.tds, &pt))?.clone();
+        match (&self.tds.resolve(&oel).val, &self.tds.resolve(&pel).val) {
+            (
+                TypeT::Int {
+                    width: a,
+                    signed: x,
+                },
+                TypeT::Int {
+                    width: b,
+                    signed: y,
+                },
+            ) if a == b && x != y => {
+                Some((peel(self.tds, &oel).clone(), peel(self.tds, &pel).clone()))
+            }
+            _ => None,
+        }
+    }
+
     fn pointee_at(&self, base: &Expr, idx: Option<&Expr>, w: When) -> Result<String, String> {
         self.pointee_at_in(base, idx, w, w)
     }
@@ -3644,7 +3668,14 @@ impl<'a> Spec<'a> {
             } else {
                 format!("0 <= {} /\\ {} < Seq.length {}", i, i, term)
             });
-            return Ok(format!("(Seq.index {} {})", term, i));
+            let cell = format!("(Seq.index {} {})", term, i);
+            // A pointer viewing the array at the other signedness of its
+            // element type (`const unsigned char *l = (const void *)l0;`)
+            // reads the same byte at its own type, as the body's read does.
+            if let Some((oel, pel)) = self.sign_view_of(base, &owner) {
+                return convert(&oel, &pel, &cell, self.tds.ptr_bytes).map(|c| format!("({})", c));
+            }
+            return Ok(cell);
         }
         let Some((pre, post)) = self.pointees.get(&*v.val) else {
             return Err(format!("`*{}` in a contract", v.val));

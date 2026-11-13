@@ -7511,3 +7511,10 @@ Limitations:
     now followed by `();`, which takes the tail position and is checked
     against the outer expectation from the inner `if`'s postcondition
     (`test/if_ensures_tail`).
+79. **Sign views in invariants.** A subscript of a local viewing a `char`
+    array as `unsigned char` (`l[i]` with `const unsigned char *l =
+    (const void *)l0`) in an `_invariant` or `_assert` was `Seq.index` of
+    the `char` sequence used at `UInt8`, which does not typecheck (musl's
+    `strverscmp`). The contract read now converts the cell to the view's
+    type, the conversion the body's read makes (`test/sign_view_spec`,
+    `test/sign_view_spec_bad`).
