@@ -19356,6 +19356,14 @@ impl<'a> Body<'a> {
                     if self.union_of(e).is_some() {
                         return self.read_union_value(e, &a, &v.val);
                     }
+                    if let Some(value) = self.union_values.get(&a).cloned()
+                        && let Some(pn) = palow_name(self.tds, &ty)
+                        && pn.starts_with("struct_")
+                    {
+                        self.lines
+                            .push(format!("assert ({}_pts_to {} 1.0R {});", pn, a, value));
+                        return Ok(value);
+                    }
                     if !readable_field(self.tds, &ty) {
                         return Err(format!(
                             "a whole-value read of `{}`, which is {}",
@@ -22382,6 +22390,40 @@ impl<'a> Body<'a> {
                 self.slots[i].init = true;
                 let a = self.slots[i].addr.clone();
                 self.union_values.remove(&a);
+                // A struct whose reader is guarded by union arm choices reads
+                // back only through the first arm of each union. Remembering
+                // the stored value lets a whole-value read forward it instead,
+                // whichever arms it has.
+                let guarded = !self.slots[i].global
+                    && self.inlining == 0
+                    && !value.is_empty()
+                    && pn.starts_with("struct_")
+                    && self.ty_of(lhs).ok().is_some_and(|ty| {
+                        value_read_guard(self.tds, &ty, "x").is_some()
+                            && fstar_type(self.tds, &ty).is_some()
+                    });
+                if guarded {
+                    let value = if value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                        value.to_string()
+                    } else {
+                        let ty = self.ty_of(lhs)?;
+                        let t = self.fresh("stored");
+                        self.lines.push(format!(
+                            "let {} : {} = {};",
+                            t,
+                            fstar_type(self.tds, &ty).unwrap(),
+                            value
+                        ));
+                        t
+                    };
+                    self.union_values.insert(a.clone(), value.clone());
+                    self.lines.push(format!("{}_{} {} {};", pn, op, a, value));
+                    if let Some(gm) = self.mirrors.get(&v.val.to_string()).cloned() {
+                        self.lines
+                            .push(format!("Pulse.Lib.GhostReference.write {} {};", gm, value));
+                    }
+                    return Ok(());
+                }
                 if pn.starts_with("union_") {
                     self.active.remove(&a);
                     if !self.slots[i].global
