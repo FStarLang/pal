@@ -7518,3 +7518,9 @@ Limitations:
     `strverscmp`). The contract read now converts the cell to the view's
     type, the conversion the body's read makes (`test/sign_view_spec`,
     `test/sign_view_spec_bad`).
+80. **Current contents of a walked parameter, from its entry position.**
+    No new mechanism: a `_specint` subscript of a walked pointer is
+    already read at `pos + k` with `0 <= pos + k` as its well-formedness,
+    so `d[k - (d - _old(d))]` is the current element `k` of the array
+    `d` was walked through, and musl's `__stpcpy` byte loop states what it
+    has copied with it (`test/array_walk_relative`).
