@@ -13922,6 +13922,10 @@ struct Body<'a> {
     /// Whether we are translating the arm of an `if`, where a slot introduced
     /// now would not outlive the arm.
     in_branch: bool,
+    /// Whether the `if` whose arm we are in states ownership in a `_ensures`,
+    /// so its arms join in the author's words and validity seeded in an arm
+    /// may be what those words are made of.
+    own_join: bool,
     /// Whether the statements emitted so far on this path end in a call that
     /// does not return, so nothing after them runs.
     diverged: bool,
@@ -22946,6 +22950,7 @@ impl<'a> Body<'a> {
                     }
                 };
 
+                let outer_own_join = std::mem::replace(&mut self.own_join, false);
                 let mut arms: Vec<(String, BranchResult)> = Vec::new();
                 for br in branches.iter() {
                     for p in br.patterns.iter() {
@@ -22965,6 +22970,7 @@ impl<'a> Body<'a> {
                 }
                 restore(self);
                 arms.push(("_".to_string(), self.branch(default_branch)?));
+                self.own_join = outer_own_join;
 
                 // Every arm has to leave the same state behind, or there is no
                 // join. The `default` arm is the one C always has, so it is
@@ -23449,6 +23455,7 @@ impl<'a> Body<'a> {
                 if let Some((p, _)) = pt.as_ref().filter(|_| pt_live_then) {
                     self.unguarded.push(p.clone());
                 }
+                let outer_own_join = std::mem::replace(&mut self.own_join, states_own);
                 let then = self.branch(then_branch);
                 if pt.is_some() && pt_live_then {
                     self.unguarded.pop();
@@ -23468,6 +23475,7 @@ impl<'a> Body<'a> {
                     self.unguarded.push(p.clone());
                 }
                 let els = self.branch(else_branch);
+                self.own_join = outer_own_join;
                 if pt.is_some() && !pt_live_then {
                     self.unguarded.pop();
                 }
@@ -24091,6 +24099,15 @@ impl<'a> Body<'a> {
             // steps after the program has stopped.
             let returned = result?;
             if !returned && !diverged {
+                // Validity seeded inside the arm is the arm's to put down:
+                // only the function's own frame (`mark == 0`) releases seeds,
+                // and restoring the outer list below would otherwise forget
+                // them while the arm still holds them, so the arms would not
+                // join. Unless the author states the join: then the arm's
+                // ghost steps may already have spent the seed on it.
+                if !self.own_join && self.seeded.len() > outer_seeded.len() {
+                    self.drop_seeded(outer_seeded.len());
+                }
                 self.release_from(mark);
             }
             self.seeded = outer_seeded;
@@ -26042,6 +26059,7 @@ fn emit_body(
         signed_ok: sig.contract,
         has_contract: !defn.decl.ensures.is_empty(),
         in_branch: false,
+        own_join: false,
         keep_reads: false,
         ghost_names: {
             let mut out = HashSet::new();
