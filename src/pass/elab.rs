@@ -278,7 +278,7 @@ impl<'a> Elaborator<'a> {
                 self.suppress_next_view = true;
                 self.elab_type(env, Rc::make_mut(ty));
             }
-            TypeT::Nullable(ty) => self.elab_type(env, Rc::make_mut(ty)),
+            TypeT::Nullable(ty) | TypeT::Overread(ty) => self.elab_type(env, Rc::make_mut(ty)),
         }
     }
 
@@ -1302,7 +1302,6 @@ impl<'a> Elaborator<'a> {
             is_pure: _,
             is_rec: _,
             is_total: _,
-            is_overread: _,
             adopts_signature: _,
             decreases,
         }: &mut FnDecl,
@@ -1428,7 +1427,8 @@ fn view_pointee(body: &Type) -> Option<&TypeRefKind> {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, _, _, _)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => view_pointee(t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => view_pointee(t),
         TypeT::Pointer(to, _) => match &to.val {
             TypeT::TypeRef(k) => Some(k),
             _ => None,

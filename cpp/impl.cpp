@@ -778,7 +778,10 @@ public:
     t = t.IgnoreParens();
     auto loc = getRange(range);
 
-    if (t.getAsString() == "size_t") {
+    // By name *and* type: a program may declare its own `size_t`, such as a
+    // block-scope `typedef uint8_t size_t;`, which is not the target's.
+    if (t.getAsString() == "size_t" &&
+        astCtx->hasSameType(t, astCtx->getSizeType())) {
       return mk_sizet(std::move(loc));
     } else if (auto typeOf = dyn_cast<TypeOfType>(t)) {
       return trQualType(typeOf->desugar(), range, liftStructs);
@@ -787,6 +790,14 @@ public:
     } else if (auto tydef = dyn_cast<TypedefType>(t)) {
       if (reportIgnoredUse(tydef->getDecl(), range))
         return mk_type_err(std::move(loc));
+      // A block-scope typedef is only a local spelling of its underlying
+      // type (see `localTypedefObstacle`), so it is translated as that
+      // type: the IR's typedefs are file-scope names, and two functions may
+      // each declare their own `word`.
+      if (tydef->getDecl()->getDeclContext()->isFunctionOrMethod())
+        return trQualType(
+            tydef->getDecl()->getUnderlyingType(), range, liftStructs,
+            findFnProtoTypeLoc(tydef->getDecl()->getTypeSourceInfo()));
       auto id = ctx.mk_ident(toStr(tydef->getDecl()->getName()), loc.clone());
       return mk_type_typedef(std::move(loc), std::move(id));
 #if LLVM_VERSION_MAJOR < 22
@@ -968,12 +979,35 @@ public:
         } else if (ann->getAnnotation() == "pal-core-ref" &&
                    ann->args_size() == 0) {
           ty = mk_type_core_ref(std::move(loc), std::move(ty));
+        } else if (ann->getAnnotation() == "pal-overread" &&
+                   ann->args_size() == 0) {
+          ty = mk_type_overread(std::move(loc), std::move(ty));
         }
       }
     }
     (void)sawNullable;
     (void)nullableLoc;
     return ty;
+  }
+
+  // Why a block-scope typedef cannot be read as its underlying type, if it
+  // cannot. A PAL annotation on it would be lost, an alignment attribute
+  // changes the layout of what it names, and a variably modified type is
+  // evaluated where it is declared. Other attributes, such as
+  // `__may_alias__`, only relax what a compiler may assume, so a proof about
+  // the underlying type holds of the typedef too.
+  static std::optional<std::string>
+  localTypedefObstacle(const TypedefNameDecl *td) {
+    if (td->getUnderlyingType()->isVariablyModifiedType())
+      return "has a variably modified type";
+    for (auto *attr : td->attrs()) {
+      if (auto *ann = dyn_cast<AnnotateAttr>(attr);
+          ann && ann->getAnnotation().starts_with("pal-"))
+        return "carries a PAL annotation";
+      if (isa<AlignedAttr>(attr))
+        return "carries an alignment attribute";
+    }
+    return std::nullopt;
   }
 
   // A `_core_ref` parameter carries no ownership: `core_ref` is an
@@ -3726,6 +3760,17 @@ public:
           // nested function, which can capture enclosing locals and hence
           // cannot be hoisted; that falls through to the error below.
           HandleDecl(fd);
+        } else if (auto td = dyn_cast<TypedefNameDecl>(d)) {
+          // A block-scope typedef has no runtime effect; uses of it are
+          // translated as its underlying type. Only one that is exactly a
+          // new spelling of that type can be treated so.
+          if (auto why = localTypedefObstacle(td)) {
+            ctx.report_diag(dloc.clone(), true,
+                            toStr("block-scope typedef '" +
+                                  td->getName().str() + "' " + *why +
+                                  "; declare it at file scope"));
+            stmts.push(mk_stmt_err(dloc.clone()));
+          }
         } else {
           reportUnsupported(d->getSourceRange(), dloc,
                             "unsupported variable declaration ",
@@ -4036,8 +4081,6 @@ public:
                             snippets);
       }
     }
-    if (hasAnnotation(FD, "pal-overread"))
-      builder.set_overread();
     return builder;
   }
 
@@ -4204,7 +4247,7 @@ public:
       }
 
       // Regular function decl
-      auto builder = fnSignature(FD, getDeclName(FD), FD->hasBody() && !admit);
+      auto builder = fnSignature(FD, getDeclName(FD), !admit);
       if (FD->hasBody() && !admit &&
           ctx.selects_function_body(toStr(FD->getName()))) {
         auto &sm = astCtx->getSourceManager();

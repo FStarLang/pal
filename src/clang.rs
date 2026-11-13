@@ -232,7 +232,6 @@ impl<'a> Ctx<'a> {
                 is_pure: builder.is_pure,
                 is_rec: builder.is_rec,
                 is_total: builder.is_total,
-                is_overread: builder.is_overread,
                 adopts_signature: builder.adopts_signature,
                 decreases: builder.decreases,
             }),
@@ -253,7 +252,6 @@ impl<'a> Ctx<'a> {
                     is_pure: builder.is_pure,
                     is_rec: builder.is_rec,
                     is_total: builder.is_total,
-                    is_overread: builder.is_overread,
                     adopts_signature: builder.adopts_signature,
                     decreases: builder.decreases,
                 },
@@ -577,7 +575,6 @@ struct DeclBuilder {
     is_pure: bool,
     is_rec: bool,
     is_total: bool,
-    is_overread: bool,
     adopts_signature: bool,
     decreases: Option<Rc<Expr>>,
     eager_unfold_pred: bool,
@@ -599,7 +596,6 @@ impl DeclBuilder {
             is_pure: false,
             is_rec: false,
             is_total: false,
-            is_overread: false,
             adopts_signature: false,
             decreases: None,
             eager_unfold_pred: false,
@@ -672,9 +668,6 @@ impl DeclBuilder {
     }
     fn set_total(&mut self) {
         self.is_total = true;
-    }
-    fn set_overread(&mut self) {
-        self.is_overread = true;
     }
     fn set_adopts_signature(&mut self) {
         self.adopts_signature = true;
@@ -836,6 +829,13 @@ fn mk_type_plain(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
 }
 fn mk_type_nullable(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
     TypeT::Nullable(ty).with_loc(loc)
+}
+fn mk_type_overread(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
+    if !matches!(ty.val, TypeT::Pointer(..)) {
+        eprintln!("warning: _pal_overread on non-pointer type: {}", ty);
+        return ty;
+    }
+    TypeT::Overread(ty).with_loc(loc)
 }
 fn mk_type_array(loc: Rc<SourceInfo>, ty: Rc<Type>) -> Rc<Type> {
     match &ty.val {
