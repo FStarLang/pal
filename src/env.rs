@@ -191,6 +191,7 @@ impl Env {
                     is_pure: !let_decl.is_impure,
                     is_rec: let_decl.is_rec,
                     is_total: false,
+                    adopts_signature: false,
                     decreases: None,
                 });
             }

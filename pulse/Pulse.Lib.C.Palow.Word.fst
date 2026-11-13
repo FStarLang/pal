@@ -595,6 +595,16 @@ let uintptr_u64_step (q: ptr) (n: SZ.t) (m: pos)
   = addr_of_add_nowrap q n;
     M.lemma_mod_add_distr (addr_of q) (SZ.v n) m
 
+(* The same in the form a contract's `(uintptr_t)w % ALIGN` takes when `ALIGN`
+   is a `size_t` (`sizeof(size_t)`): the remainder is `SizeT.rem` of the
+   address as a `size_t`, not `%` on the number. *)
+let uintptr_rem_step (q: ptr) (n m: SZ.t)
+  : Lemma (requires addr_of q + SZ.v n < T.addr_limit /\ SZ.v m > 0 /\ SZ.v n % SZ.v m == 0)
+          (ensures  SZ.v (SZ.rem (sizet_of_uint64 (uintptr_u64 (q +! n))) m) ==
+                    SZ.v (SZ.rem (sizet_of_uint64 (uintptr_u64 q)) m))
+          [SMTPat (SZ.rem (sizet_of_uint64 (uintptr_u64 (q +! n))) m)]
+  = uintptr_u64_step q n (SZ.v m)
+
 let aligned_of_mod (q: ptr) (n: SZ.t)
   : Lemma (requires SZ.v n > 0 /\ addr_of q % SZ.v n == 0) (ensures aligned q n)
   = reveal_opaque (`%divides_addr) divides_addr

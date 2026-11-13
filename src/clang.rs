@@ -232,6 +232,7 @@ impl<'a> Ctx<'a> {
                 is_pure: builder.is_pure,
                 is_rec: builder.is_rec,
                 is_total: builder.is_total,
+                adopts_signature: builder.adopts_signature,
                 decreases: builder.decreases,
             }),
         })
@@ -251,6 +252,7 @@ impl<'a> Ctx<'a> {
                     is_pure: builder.is_pure,
                     is_rec: builder.is_rec,
                     is_total: builder.is_total,
+                    adopts_signature: builder.adopts_signature,
                     decreases: builder.decreases,
                 },
                 body: body,
@@ -573,6 +575,7 @@ struct DeclBuilder {
     is_pure: bool,
     is_rec: bool,
     is_total: bool,
+    adopts_signature: bool,
     decreases: Option<Rc<Expr>>,
     eager_unfold_pred: bool,
     overlay: bool,
@@ -593,6 +596,7 @@ impl DeclBuilder {
             is_pure: false,
             is_rec: false,
             is_total: false,
+            adopts_signature: false,
             decreases: None,
             eager_unfold_pred: false,
             overlay: false,
@@ -664,6 +668,9 @@ impl DeclBuilder {
     }
     fn set_total(&mut self) {
         self.is_total = true;
+    }
+    fn set_adopts_signature(&mut self) {
+        self.adopts_signature = true;
     }
     fn set_eager_unfold_pred(&mut self) {
         self.eager_unfold_pred = true;

@@ -17300,6 +17300,69 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// The array an argument for an `_array` parameter is the rest of: a
+    /// pointer walked through it, or the array plus an offset. The array
+    /// itself is passed whole, and is not one of these.
+    fn lent_owner(&self, a: &Expr) -> Result<Option<String>, String> {
+        let orig = a;
+        let mut a = strip_vattr(a);
+        // `p + i` passed to an array parameter arrives converted to the
+        // parameter's array view; the conversion does not move the pointer.
+        while let ExprT::Cast(inner, to) = &a.val
+            && matches!(self.tds.resolve(to).val, TypeT::Pointer(..))
+        {
+            a = strip_vattr(inner);
+        }
+        let owner = match self.walk_root(a) {
+            Some(v) => match self.walk_owner(&v) {
+                Some(Ok(o)) => o,
+                Some(Err(e)) => return Err(e),
+                None => return Ok(None),
+            },
+            None => match &a.val {
+                ExprT::BinOp(BinOp::Add, l, r)
+                    if self.ty_of(r).is_ok_and(|t| {
+                        matches!(peel(self.tds, &t).val, TypeT::Int { .. } | TypeT::SizeT)
+                    }) =>
+                {
+                    match &strip_vattr(l).val {
+                        ExprT::Var(x)
+                            if self.arrays.contains_key(&*x.val)
+                                && !self.walks.contains_key(&*x.val)
+                                && !self.out_params.contains(&x.val.to_string())
+                                && self.arrays.get(&*x.val).is_some_and(|ap| !ap.maybe) =>
+                        {
+                            x.val.to_string()
+                        }
+                        _ => return Ok(None),
+                    }
+                }
+                _ => return Ok(None),
+            },
+        };
+        let ap = &self.arrays[&owner];
+        let elem_ok = |e: &Expr| -> Result<bool, String> {
+            let ty = self.ty_of(e)?;
+            let elem = pointee(self.tds, peel(self.tds, &ty))
+                .ok_or_else(|| "an array argument that is not a pointer".to_string())?;
+            Ok(palow_name(self.tds, elem).as_deref() == Some(&*ap.pn))
+        };
+        if !elem_ok(a)? || !elem_ok(orig)? {
+            return Err(format!(
+                "an array argument walked through `{}` at a type other than its element type",
+                owner
+            ));
+        }
+        if !ap.known_len && !self.requires_ok {
+            return Err(
+                "an array argument inside an array parameter, whose bounds obligation needs a \
+                 `_requires` that is not translated"
+                    .to_string(),
+            );
+        }
+        Ok(Some(owner))
+    }
+
     /// That `q` points into array parameter `owner`, at an element boundary.
     fn walk_ok(&self, owner: &str, q: &str) -> String {
         let a = &self.arrays[owner];
@@ -20375,6 +20438,28 @@ impl<'a> Body<'a> {
                 let held: Vec<String> = slot.holds_fn.values().cloned().collect();
                 self.laundered.extend(held);
             }
+            // A pointer into one of this function's arrays, not at its base,
+            // lends the callee the rest of the array for the call: the
+            // prefix stays here, and the two are joined again afterwards.
+            let v = if arr_args.get(i) == Some(&true)
+                && arrayptr_args.get(i) != Some(&true)
+                && outs.get(i) != Some(&true)
+                && let Some(owner) = self.lent_owner(a)?
+            {
+                let ap = self.arrays[&owner].clone();
+                let q = self.fresh("lent");
+                self.lines.push(format!("let {} = {};", q, v));
+                let common = format!(
+                    "{}_repr {} {} {}_alignof {}",
+                    ap.pn, ap.addr, ap.esize, ap.pn, q
+                );
+                self.lines.push(format!("array_lend_at {};", common));
+                self.pending_close
+                    .push(format!("array_return_at {};", common));
+                q
+            } else {
+                v
+            };
             if arr_args.get(i) == Some(&true)
                 && let Some(slot) = self.slots.iter().find(|s| s.addr == v)
                 && let Some(value) = &slot.array_value
@@ -22738,6 +22823,40 @@ impl<'a> Body<'a> {
         Ok((binders, owns, props, storage, groups))
     }
 
+    /// An `_assert` the body cannot evaluate by loading what it mentions --
+    /// a quantifier whose body reads an array, or `a._length` -- read the way
+    /// a loop invariant is, against the current values: each is bound from
+    /// the ownership held at this point, and the proposition is stated over
+    /// the binders.
+    fn spec_assertion(&mut self, e: &Rc<Expr>) -> Result<String, String> {
+        if is_slprop_clause(self.tds, e) {
+            return Err("an ownership clause".to_string());
+        }
+        let clause: Exprs = vec![e.clone()];
+        let (binders, owns, props, storage) =
+            self.frame(&clause, "an assertion", Some(&Vec::new()))?;
+        self.frame_slots.clear();
+        if !storage.is_empty() {
+            return Err("an assertion about storage not yet written".to_string());
+        }
+        let held: Vec<String> = owns
+            .into_iter()
+            .filter(|o| !o.starts_with("pure "))
+            .collect();
+        if !binders.is_empty() {
+            self.lines.push(format!(
+                "with {}. assert ({});",
+                binders.join(" "),
+                held.join(" ** ")
+            ));
+        }
+        Ok(if props.is_empty() {
+            "pure True".to_string()
+        } else {
+            format!("pure ({})", props.join(r" /\ "))
+        })
+    }
+
     /// The same frame, written out as one slprop.
     fn frame_slprop(&mut self, clause: &Exprs, what: &str, indent: &str) -> Result<String, String> {
         let (binders, owns, props, _) = self.frame(clause, what, None)?;
@@ -22787,10 +22906,18 @@ impl<'a> Body<'a> {
         // either the condition is false and the `_requires` holds or the loop
         // broke out with the `_ensures`.
         let contract = !requires.is_empty();
+        // The condition runs on every iteration too, and `while (*d++ = *s++)`
+        // moves its pointers there: what it writes is as much the loop's as
+        // what the body writes.
+        let mut iteration = body.clone();
+        iteration.push(Rc::new(Stmt {
+            val: StmtT::Call(Rc::new(cond.clone())),
+            loc: cond.loc.clone(),
+        }));
         let (binders, mut owns, mut props, storage, groups) = if contract {
-            self.frame_ext(inv, &[requires, ensures], "a loop", Some(body))?
+            self.frame_ext(inv, &[requires, ensures], "a loop", Some(&iteration))?
         } else {
-            let (b, o, p, st) = self.frame(inv, "a loop", Some(body))?;
+            let (b, o, p, st) = self.frame(inv, "a loop", Some(&iteration))?;
             (b, o, p, st, Vec::new())
         };
         let mut binders = binders;
@@ -23643,7 +23770,16 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Assert(e) => {
-                let p = self.assertion(e)?;
+                let mark = self.lines.len();
+                let p = match self.assertion(e) {
+                    Ok(p) => p,
+                    // An `_old` the body cannot name is refused either way.
+                    Err(why) if why.starts_with("`_old`") => return Err(why),
+                    Err(why) => {
+                        self.lines.truncate(mark);
+                        self.spec_assertion(e).map_err(|_| why)?
+                    }
+                };
                 self.lines.push(format!("assert ({});", p));
                 if is_false_lit(e) {
                     // The assertion is still proved, never assumed. No state

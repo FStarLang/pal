@@ -383,6 +383,13 @@ Key facts:
   `return == s + i` returns a walked pointer of the caller's `s`
   (`test/array_walk_followups`); a `const unsigned char *` walking a `char`
   array reads elements converted.
+  A walked pointer or `base + i` passed to an `_array` parameter lends the
+  suffix from there (`wcscpy(dest + wcslen(dest), src)`; `test/array_walk_lend`);
+  a pointer advanced in a loop condition (`while ((*d++ = *s++))`) is written
+  by the loop. `_assert` may quantify over arrays (`c[m]`, `c._length`) and
+  read `*s` of a walked pointer, e.g. after a loop to help the postcondition.
+- **`weak_alias(old, new)`** (`__attribute__((__alias__("old")))`) gives `new`
+  `old`'s contract, or verifies `old` against `new`'s when only `new` has one.
 - **Word-at-a-time access** (`w = (const void *)s; *w`, `*(uint32_t *)(s + 4) = v`)
   through a walked pointer into a byte array reads/writes `W` elements as one
   little-endian integer (`word_byte W x j == x / pow2 (8*j) % 256`). State

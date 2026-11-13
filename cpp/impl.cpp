@@ -455,6 +455,7 @@ public:
       auto *function = dyn_cast<FunctionDecl>(d);
       auto *object = dyn_cast<VarDecl>(d);
       if (!ignored && (function || object) && isLinkerAlias(d) &&
+          !isSupportedFnAlias(d) &&
           (astCtx->getSourceManager().isWrittenInMainFile(
                astCtx->getSourceManager().getExpansionLoc(d->getLocation())) ||
            (function && function->doesThisDeclarationHaveABody()) ||
@@ -547,7 +548,8 @@ public:
     // glibc's own inline definitions call functions it renames with
     // `__REDIRECT` (`atoi` calls `strtol`, which is `__isoc23_strtol` in C2X
     // mode). Only a reference the program itself makes is diagnosed.
-    if (reference && isLinkerAlias(d) && !inSystemBody)
+    if (reference && isLinkerAlias(d) && !isSupportedFnAlias(d) &&
+        !inSystemBody)
       ctx.report_diag(loc.clone(), true, "unsupported linker symbol alias"_rs);
     bool internal = isa<FunctionDecl>(d) && !d->hasExternalFormalLinkage();
     if (auto *vd = dyn_cast<VarDecl>(d))
@@ -3920,6 +3922,168 @@ public:
     return {};
   }
 
+  // The function `FD` names through `__attribute__((alias("old")))`, as
+  // musl's `weak_alias(old, new)` declares it, when `old` is a function
+  // declared in this translation unit with the same type. The alias is the
+  // same code under a second symbol, so it is given `old`'s contract (or
+  // `old` is given the alias's, see `handleFnAlias`) instead of being
+  // refused like the other linker aliases.
+  FunctionDecl *aliasTarget(const FunctionDecl *FD) {
+    auto *alias = FD->getAttr<AliasAttr>();
+    if (!alias || FD->hasAttr<AsmLabelAttr>() || FD->hasAttr<IFuncAttr>() ||
+        FD->hasAttr<WeakRefAttr>())
+      return nullptr;
+    auto &id = astCtx->Idents.get(alias->getAliasee());
+    for (auto *nd :
+         astCtx->getTranslationUnitDecl()->lookup(DeclarationName(&id))) {
+      auto *old = dyn_cast<FunctionDecl>(nd);
+      if (old && old != FD && !old->hasAttr<AliasAttr>() &&
+          !isLinkerAlias(old) &&
+          astCtx->hasSameType(old->getType(), FD->getType()))
+        return old;
+    }
+    return nullptr;
+  }
+
+  bool isSupportedFnAlias(const Decl *d) {
+    auto *fd = dyn_cast<FunctionDecl>(d);
+    return fd && aliasTarget(fd);
+  }
+
+  // The first declaration of `FD` that writes a contract itself (rather than
+  // inheriting it), or null if none does.
+  FunctionDecl *contractDecl(FunctionDecl *FD) {
+    for (auto *rd : FD->getFirstDecl()->redecls()) {
+      for (auto *attr : rd->getAttrs()) {
+        if (attr->isInherited())
+          continue;
+        if (auto *ann = dyn_cast<AnnotateAttr>(attr);
+            ann && (ann->getAnnotation() == "pal-requires" ||
+                    ann->getAnnotation() == "pal-ensures"))
+          return rd;
+      }
+    }
+    return nullptr;
+  }
+
+  // `new` aliases `old`: both symbols are `old`'s code. `new` is declared with
+  // the contract `old` is verified against, so calls to it are as sound as
+  // calls to `old`. When only `new` has a contract (musl prepends a spec
+  // header naming the public `stpcpy`, not `__stpcpy`), `old` is declared
+  // with that contract, so its definition is verified against it. When both
+  // have one, the two declarations of `new` must agree, which `merge`
+  // checks like any other pair of redeclarations.
+  void handleFnAlias(FunctionDecl *FD, FunctionDecl *old) {
+    auto *oldC = contractDecl(old);
+    auto *newC = contractDecl(FD);
+    FunctionDecl *sig = oldC ? oldC : newC;
+    if (!sig) {
+      sig = old->getDefinition() ? old->getDefinition() : old;
+    }
+    ctx.add_fn_decl(fnSignature(sig, getDeclName(FD), false));
+    if (!oldC && newC) {
+      auto builder = fnSignature(newC, getDeclName(old), false);
+      builder.set_adopts_signature();
+      ctx.add_fn_decl(std::move(builder));
+    }
+  }
+
+  // The signature and contract of `FD`, under the name `ident`. A linker
+  // alias borrows the signature of the declaration that carries the
+  // contract, which may belong to a different function.
+  DeclBuilder fnSignature(FunctionDecl *FD, Rc<ir::Ident> ident,
+                          bool skipInherited) {
+    auto builder =
+        DeclBuilder::new_(getRange(FD->getSourceRange()), ident.clone());
+    for (auto param : FD->parameters()) {
+      auto ty = trQualType(param->getType(), param->getSourceRange(), nullptr,
+                           findFnProtoTypeLoc(param->getTypeSourceInfo()));
+      ty = trTypeAttrs(param->getAttrs(), std::move(ty), param->getType(),
+                       param->getSourceRange());
+      auto mode = hasConsumesAttr(param->getAttrs()) ? ir::ParamMode::Consumed()
+                  : hasOutAttr(param->getAttrs())
+                      ? ir::ParamMode::Out()
+                      : [&]() {
+                          auto qt = param->getType().IgnoreParens();
+                          if (hasCoreRefAttr(param->getAttrs()) ||
+                              isCoreRefQualType(param->getType()))
+                            return ir::ParamMode::Regular();
+                          // `_mutable` opts a const-qualified parameter out
+                          // of const mode, which a `const` hidden behind a
+                          // typedef otherwise leaves no way to do.
+                          for (auto *attr : param->getAttrs()) {
+                            if (auto *ann = dyn_cast<AnnotateAttr>(attr);
+                                ann && ann->getAnnotation() == "pal-mutable")
+                              return ir::ParamMode::Regular();
+                          }
+                          // A top-level `const` on a parameter passed by
+                          // value says nothing about ownership: the callee
+                          // gets its own copy, and the qualifier only
+                          // forbids reassigning the local. Reading it as a
+                          // borrow gives the parameter a permission
+                          // implicit, and for a scalar -- whose ownership
+                          // predicate is `emp` -- nothing at the call site
+                          // can ever solve it, so the call does not
+                          // elaborate. Only an indirection can be borrowed.
+                          if (qt.getCanonicalType()->isPointerType() &&
+                              qt.getCanonicalType().isConstQualified())
+                            return ir::ParamMode::Const();
+                          // `getAs` desugars through typedefs, so a
+                          // parameter declared with a pointer-to-const
+                          // typedef (`PCFOO`) is recognized just
+                          // like one that writes `const T *` through.
+                          if (auto ptr = qt->getAs<PointerType>()) {
+                            if (ptr->getPointeeType()
+                                    .getCanonicalType()
+                                    .isConstQualified())
+                              return ir::ParamMode::Const();
+                          }
+                          return ir::ParamMode::Regular();
+                        }();
+      if (param->getDeclName().isIdentifier() && param->getName().size() > 0) {
+        builder.arg(ctx.mk_ident(toStr(param->getName()),
+                                 getRange(param->getSourceRange())),
+                    std::move(ty), std::move(mode));
+      } else {
+        builder.arg_anon(std::move(ty), std::move(mode));
+      }
+    }
+    builder.return_type(trTypeAttrs(
+        FD->getAttrs(),
+        trQualType(FD->getReturnType(), FD->getReturnTypeSourceRange()),
+        FD->getReturnType(), FD->getReturnTypeSourceRange()));
+    for (auto attr : FD->getAttrs()) {
+      if (skipInherited && attr->isInherited())
+        continue;
+      if (auto req = isUnaryAttrOf(attr, "pal-requires")) {
+        builder.requires(std::move(req.value()));
+      }
+      if (auto ens = isUnaryAttrOf(attr, "pal-ensures")) {
+        builder.ensures(std::move(ens.value()));
+      }
+      if (auto dec = isUnaryAttrOf(attr, "pal-decreases")) {
+        builder.decreases(std::move(dec.value()));
+      }
+      if (auto ann = dyn_cast<AnnotateAttr>(attr);
+          ann && ann->getAnnotation() == "pal-pure" && ann->args_size() == 0) {
+        builder.set_pure();
+      }
+      if (auto ann = dyn_cast<AnnotateAttr>(attr);
+          ann && ann->getAnnotation() == "pal-rec" && ann->args_size() == 0) {
+        builder.set_rec();
+      }
+      if (auto ann = dyn_cast<AnnotateAttr>(attr);
+          ann && ann->getAnnotation() == "pal-total" && ann->args_size() == 0) {
+        builder.set_total();
+      }
+      if (auto ctr = isUnaryAttrCounter(attr, "pal-ghost-arg")) {
+        ctx.parse_ghost_arg(builder, getRange(attr->getRange()), ctr.value(),
+                            snippets);
+      }
+    }
+    return builder;
+  }
+
   rust::Unit HandleDecl(Decl *D) {
     if (hasAnnotation(D, "pal-ignore")) {
       if (auto *fd = dyn_cast<FunctionDecl>(D);
@@ -4077,100 +4241,13 @@ public:
         }
       }
 
+      if (auto *old = aliasTarget(FD)) {
+        handleFnAlias(FD, old);
+        return {};
+      }
+
       // Regular function decl
-      auto ident = getDeclName(FD);
-      auto builder =
-          DeclBuilder::new_(getRange(FD->getSourceRange()), ident.clone());
-      for (auto param : FD->parameters()) {
-        auto ty = trQualType(param->getType(), param->getSourceRange(), nullptr,
-                             findFnProtoTypeLoc(param->getTypeSourceInfo()));
-        ty = trTypeAttrs(param->getAttrs(), std::move(ty), param->getType(),
-                         param->getSourceRange());
-        auto mode = hasConsumesAttr(param->getAttrs())
-                        ? ir::ParamMode::Consumed()
-                    : hasOutAttr(param->getAttrs())
-                        ? ir::ParamMode::Out()
-                        : [&]() {
-                            auto qt = param->getType().IgnoreParens();
-                            if (hasCoreRefAttr(param->getAttrs()) ||
-                                isCoreRefQualType(param->getType()))
-                              return ir::ParamMode::Regular();
-                            // `_mutable` opts a const-qualified parameter out
-                            // of const mode, which a `const` hidden behind a
-                            // typedef otherwise leaves no way to do.
-                            for (auto *attr : param->getAttrs()) {
-                              if (auto *ann = dyn_cast<AnnotateAttr>(attr);
-                                  ann && ann->getAnnotation() == "pal-mutable")
-                                return ir::ParamMode::Regular();
-                            }
-                            // A top-level `const` on a parameter passed by
-                            // value says nothing about ownership: the callee
-                            // gets its own copy, and the qualifier only
-                            // forbids reassigning the local. Reading it as a
-                            // borrow gives the parameter a permission
-                            // implicit, and for a scalar -- whose ownership
-                            // predicate is `emp` -- nothing at the call site
-                            // can ever solve it, so the call does not
-                            // elaborate. Only an indirection can be borrowed.
-                            if (qt.getCanonicalType()->isPointerType() &&
-                                qt.getCanonicalType().isConstQualified())
-                              return ir::ParamMode::Const();
-                            // `getAs` desugars through typedefs, so a
-                            // parameter declared with a pointer-to-const
-                            // typedef (`PCFOO`) is recognized just
-                            // like one that writes `const T *` through.
-                            if (auto ptr = qt->getAs<PointerType>()) {
-                              if (ptr->getPointeeType()
-                                      .getCanonicalType()
-                                      .isConstQualified())
-                                return ir::ParamMode::Const();
-                            }
-                            return ir::ParamMode::Regular();
-                          }();
-        if (param->getDeclName().isIdentifier() &&
-            param->getName().size() > 0) {
-          builder.arg(ctx.mk_ident(toStr(param->getName()),
-                                   getRange(param->getSourceRange())),
-                      std::move(ty), std::move(mode));
-        } else {
-          builder.arg_anon(std::move(ty), std::move(mode));
-        }
-      }
-      builder.return_type(trTypeAttrs(
-          FD->getAttrs(),
-          trQualType(FD->getReturnType(), FD->getReturnTypeSourceRange()),
-          FD->getReturnType(), FD->getReturnTypeSourceRange()));
-      for (auto attr : FD->getAttrs()) {
-        if (!admit && attr->isInherited())
-          continue;
-        if (auto req = isUnaryAttrOf(attr, "pal-requires")) {
-          builder.requires(std::move(req.value()));
-        }
-        if (auto ens = isUnaryAttrOf(attr, "pal-ensures")) {
-          builder.ensures(std::move(ens.value()));
-        }
-        if (auto dec = isUnaryAttrOf(attr, "pal-decreases")) {
-          builder.decreases(std::move(dec.value()));
-        }
-        if (auto ann = dyn_cast<AnnotateAttr>(attr);
-            ann && ann->getAnnotation() == "pal-pure" &&
-            ann->args_size() == 0) {
-          builder.set_pure();
-        }
-        if (auto ann = dyn_cast<AnnotateAttr>(attr);
-            ann && ann->getAnnotation() == "pal-rec" && ann->args_size() == 0) {
-          builder.set_rec();
-        }
-        if (auto ann = dyn_cast<AnnotateAttr>(attr);
-            ann && ann->getAnnotation() == "pal-total" &&
-            ann->args_size() == 0) {
-          builder.set_total();
-        }
-        if (auto ctr = isUnaryAttrCounter(attr, "pal-ghost-arg")) {
-          ctx.parse_ghost_arg(builder, getRange(attr->getRange()), ctr.value(),
-                              snippets);
-        }
-      }
+      auto builder = fnSignature(FD, getDeclName(FD), !admit);
       if (FD->hasBody() && !admit &&
           ctx.selects_function_body(toStr(FD->getName()))) {
         auto &sm = astCtx->getSourceManager();

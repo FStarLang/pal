@@ -426,6 +426,7 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
             is_pure: _,
             is_rec: _,
             is_total: _,
+            adopts_signature: _,
             decreases: _,
         }: &FnDecl,
     ) {

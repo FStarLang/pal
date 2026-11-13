@@ -638,6 +638,11 @@ pub struct FnDecl {
     pub is_pure: bool,
     pub is_rec: bool,
     pub is_total: bool,
+    /// Declared for a function that a linker alias (`weak_alias(old, new)`)
+    /// gave the alias's contract. The definition adopts this declaration's
+    /// parameter types, whose array annotations the contract relies on, as it
+    /// would by inheriting them from an earlier prototype.
+    pub adopts_signature: bool,
     pub decreases: Option<Rc<Expr>>,
 }
 
