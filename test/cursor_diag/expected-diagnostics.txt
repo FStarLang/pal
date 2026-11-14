@@ -1,0 +1,3 @@
+# Expected translation diagnostic substrings
+`Func_post_contents`: its contract is weakened: `(*str)[k]` after the call, where `*str` may have moved
+`Func_caller`: its body is not translated: `next` takes a `_cursor` parameter, which callers cannot pass yet

@@ -60,6 +60,12 @@ struct Cli {
     )]
     portable: bool,
 
+    #[arg(
+        long = "split-invariants",
+        help = "Assert each conjunct of a loop invariant on its own before the invariant is re-established"
+    )]
+    split_invariants: bool,
+
     #[arg(long = "quiet", short = 'q', help = "Suppress diagnostic output")]
     quiet: bool,
 
@@ -360,6 +366,7 @@ fn main() {
         &header_statics,
         diags.has_errors(),
         cli.portable,
+        cli.split_invariants,
     );
     if cli.time_passes {
         eprintln!(

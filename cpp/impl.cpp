@@ -934,6 +934,30 @@ public:
   Rc<ir::Type> trTypeAttrs(AttrVec const &attrs, Rc<ir::Type> &&ty,
                            QualType declQt = QualType(),
                            SourceRange declRange = SourceRange()) {
+    // `_cursor` on a `T **` is about the inner pointer: `*p` is a
+    // `_nullable _array T *`. The outer pointer's own qualifiers carry no
+    // meaning for the contract, so the type is rebuilt from the pointee.
+    for (auto attr : attrs) {
+      auto ann = dyn_cast<AnnotateAttr>(attr);
+      if (!ann || ann->getAnnotation() != "pal-cursor" || ann->args_size() != 0)
+        continue;
+      auto outer = declQt.isNull()
+                       ? nullptr
+                       : declQt.IgnoreParens()->getAs<PointerType>();
+      auto inner =
+          outer ? outer->getPointeeType()->getAs<PointerType>() : nullptr;
+      if (!inner) {
+        llvm::errs() << "warning: _cursor on a type that is not a pointer to "
+                        "a pointer\n";
+        break;
+      }
+      auto loc = getRange(ann->getRange());
+      auto elem = trQualType(outer->getPointeeType(), declRange);
+      elem = mk_type_nullable(loc.clone(),
+                              mk_type_array(loc.clone(), std::move(elem)));
+      ty = mk_pointer_unknown(std::move(loc), std::move(elem));
+      break;
+    }
     for (auto attr : attrs) {
       if (auto ann = dyn_cast<AnnotateAttr>(attr)) {
         if (isPointerKindAttr(ann)) {
