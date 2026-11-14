@@ -20105,6 +20105,24 @@ impl<'a> Body<'a> {
     /// Returns the address passed for each argument handled here. Storage that
     /// holds no value yet is left to `out_arg`, which already fills such an
     /// object field by field.
+    /// `a` with any cast between pointers to pointers taken off, as in
+    /// `(void **)&p->f` for a pointer field `f`: every pointer is the same
+    /// `ptr` here, so the cast changes nothing about the storage handed over.
+    fn strip_ptr_ptr_casts<'e>(&self, a: &'e Expr) -> &'e Expr {
+        let ptr_ptr = |ty: &Type| match &peel(self.tds, ty).val {
+            TypeT::Pointer(e, _) => matches!(peel(self.tds, e).val, TypeT::Pointer(..)),
+            _ => false,
+        };
+        match &strip_vattr(a).val {
+            ExprT::Cast(inner, ty)
+                if ptr_ptr(ty) && self.ty_of(inner).is_ok_and(|t| ptr_ptr(&t)) =>
+            {
+                self.strip_ptr_ptr_casts(inner)
+            }
+            _ => a,
+        }
+    }
+
     fn field_args(
         &mut self,
         args: &Exprs,
@@ -20119,7 +20137,7 @@ impl<'a> Body<'a> {
             if !out && !owns_one(i) {
                 continue;
             }
-            let ExprT::Ref(inner) = &strip_vattr(a).val else {
+            let ExprT::Ref(inner) = &strip_vattr(self.strip_ptr_ptr_casts(a)).val else {
                 continue;
             };
             let ExprT::Member(base, f) = &strip_vattr(inner).val else {
