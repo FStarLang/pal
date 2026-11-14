@@ -7538,7 +7538,7 @@ Limitations:
     return `array_somes` moves the block to the plain view, which needs
     every cell written (musl's `strdup`/`strndup`; `test/alloc_array_return`,
     `test/alloc_array_return_bad`). Callers cannot take over a returned
-    array yet, and `wmemcpy` into a block (`wcsdup`) is not handled.
+    array yet; `wmemcpy` into a block (`wcsdup`) is item 83.
 82. **`_cursor` out-parameters.** `strsep(char **str, ...)` reads a
     position `*str` into a terminated array, splits a token off it and
     stores back a pointer into the same array, or null. `_cursor T **p`
@@ -7567,3 +7567,11 @@ Limitations:
     `test/cursor_strsep_bad`, `test/cursor_diag`). `strtok_r` is not
     covered: its token pointer comes from either `s` or `*p`, i.e. two
     different arrays, depending on the path.
+83. **`wmemcpy` into a fresh heap array.** `wcsdup` copies with
+    `wmemcpy(d, s, l + 1)` into `malloc((l + 1) * sizeof(wchar_t))`. Like
+    `memcpy` (item 81) it is a reserved name with a fixed meaning, the
+    copy of `n` wide chars, so it goes to `array_copy_maybe` with the
+    element size and `n * esize` bytes instead of through a contract that
+    wants an initialised destination. Source and destination must have
+    the same element type (musl's `wcsdup`; `test/alloc_wide_return`,
+    `test/alloc_wide_return_bad`).

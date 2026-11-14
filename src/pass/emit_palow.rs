@@ -20974,8 +20974,15 @@ impl<'a> Body<'a> {
     /// the machine `memcpy` and leaves the copied cells holding the source's
     /// values. Only byte-sized elements of the same type, so that the byte
     /// count is the element count; anything else takes the ordinary path.
+    /// `wmemcpy(d, s, n)` is the same copy counted in `wchar_t`s: `n`
+    /// elements of the source's type, `n * sizeof(wchar_t)` bytes.
     fn copy_into_block(&mut self, name: &Ident, args: &Exprs) -> Result<Option<String>, String> {
-        if *name.val != *"memcpy" || args.len() != 3 {
+        let wide = match &*name.val.to_string() {
+            "memcpy" => false,
+            "wmemcpy" => true,
+            _ => return Ok(None),
+        };
+        if args.len() != 3 {
             return Ok(None);
         }
         let ExprT::Var(d) = &strip_casts(&args[0]).val else {
@@ -20989,8 +20996,8 @@ impl<'a> Body<'a> {
         }
         let dst = self.array_place(strip_casts(&args[0]))?;
         let src = self.array_place(strip_casts(&args[1]))?;
-        if dst.esize != "1sz"
-            || src.esize != "1sz"
+        if (!wide && (dst.esize != "1sz" || src.esize != "1sz"))
+            || dst.esize != src.esize
             || dst.pn != src.pn
             || src.maybe
             || dst.walk.is_some()
@@ -21000,19 +21007,27 @@ impl<'a> Body<'a> {
             || !dst.close_read.is_empty()
             || !src.close_read.is_empty()
         {
-            return Err(
+            return Err(if wide {
+                "a `wmemcpy` into an unfilled heap array from anything but an array of the \
+                 same type"
+            } else {
                 "a `memcpy` into an unfilled heap array from anything but an array of the \
                  same byte-sized type"
-                    .to_string(),
-            );
+            }
+            .to_string());
         }
         let n = self.rvalue(&args[2])?;
+        let nbytes = if wide {
+            format!("({n}) `SizeT.mul` {}", dst.esize)
+        } else {
+            n.clone()
+        };
         self.lines.push(format!(
-            "array_copy_maybe {pn}_repr {} {} 1sz {pn}_alignof ({n}) ({n});",
+            "array_copy_maybe {pn}_repr {} {} {es} {pn}_alignof ({n}) ({nbytes});",
             dst.addr,
             src.addr,
             pn = dst.pn,
-            n = n
+            es = dst.esize,
         ));
         self.copied_call = true;
         Ok(Some(dst.addr))
