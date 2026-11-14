@@ -4591,6 +4591,58 @@ std::string getResourcesPath() {
 #endif
 }
 
+// --- Builtin virtual include directory ---
+// pal injects a wrapper assert.h so that #include <assert.h> always
+// results in assert() being translated to __pal_c_assert(), regardless
+// of whether assert.h is included before or after pal.h.
+static const char BUILTIN_INCLUDE_DIR[] = "/pal_builtins";
+static const char BUILTIN_ASSERT_H_PATH[] = "/pal_builtins/assert.h";
+// The wrapper uses #include_next to pull in the real system assert.h and then
+// re-overrides the assert macro so pal can always intercept assert() calls.
+static const char BUILTIN_ASSERT_H_CONTENT[] =
+    "#include_next <assert.h>\n"
+    "#ifdef C2PULSE\n"
+    "#undef assert\n"
+    "#define assert(x) __pal_c_assert(x)\n"
+    "#endif\n";
+
+// Stable unique IDs for builtin virtual filesystem entries (device 2 to avoid
+// collisions with real files which use device 0).
+static const llvm::sys::fs::UniqueID BUILTIN_ASSERT_H_UID(2, 1);
+static const llvm::sys::fs::UniqueID BUILTIN_INCLUDE_DIR_UID(2, 2);
+
+// A VFS file that serves static string content (used for builtin headers).
+// The UID is passed explicitly so each builtin file has a stable, distinct ID.
+class BuiltinVFSFile : public llvm::vfs::File {
+  llvm::StringRef name;
+  llvm::StringRef content;
+  llvm::sys::fs::UniqueID uid;
+
+public:
+  BuiltinVFSFile(llvm::StringRef n, llvm::StringRef c,
+                 llvm::sys::fs::UniqueID u)
+      : name(n), content(c), uid(u) {}
+
+  llvm::ErrorOr<llvm::vfs::Status> status() override {
+    llvm::sys::TimePoint<> time;
+    return llvm::vfs::Status(name, uid, time, 0, 0, content.size(),
+                             llvm::sys::fs::file_type::regular_file,
+                             llvm::sys::fs::perms::all_all);
+  }
+
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>>
+  getBuffer(const Twine &Name, int64_t FileSize = -1,
+            bool RequiresNullTerminator = true,
+            bool IsVolatile = false) override {
+    if (!RequiresNullTerminator)
+      return llvm::MemoryBuffer::getMemBuffer(content, name);
+    return llvm::MemoryBuffer::getMemBufferCopy(content, name);
+  }
+
+  std::error_code close() override { return {}; }
+  llvm::ErrorOr<std::string> getName() override { return name.str(); }
+};
+
 llvm::vfs::Status mkStatus(Ref<rust::pal::vfs::VFSEntry> entry) {
   auto fileName = entry.get_file_name();
   llvm::sys::fs::UniqueID unique(0, (uint64_t)fileName.as_ptr());
@@ -4635,6 +4687,14 @@ class CtxVFS : public llvm::vfs::FileSystem {
   RefMut<Ctx> ctx;
   IntrusiveRefCntPtr<llvm::vfs::FileSystem> realFS;
 
+  static bool isBuiltinFile(llvm::StringRef path) {
+    return path == BUILTIN_ASSERT_H_PATH;
+  }
+
+  static bool isBuiltinDir(llvm::StringRef path) {
+    return path == BUILTIN_INCLUDE_DIR;
+  }
+
 public:
   CtxVFS(RefMut<Ctx> c) : ctx(c), realFS(llvm::vfs::getRealFileSystem()) {}
 
@@ -4643,7 +4703,22 @@ public:
   }
 
   llvm::ErrorOr<llvm::vfs::Status> status(const Twine &Path) override {
-    auto res = ctx.read_vfs_file(toStr(Path.str()));
+    auto pathStr = Path.str();
+    if (isBuiltinFile(pathStr)) {
+      llvm::sys::TimePoint<> time;
+      return llvm::vfs::Status(BUILTIN_ASSERT_H_PATH, BUILTIN_ASSERT_H_UID,
+                               time, 0, 0, sizeof(BUILTIN_ASSERT_H_CONTENT) - 1,
+                               llvm::sys::fs::file_type::regular_file,
+                               llvm::sys::fs::perms::all_all);
+    }
+    if (isBuiltinDir(pathStr)) {
+      llvm::sys::TimePoint<> time;
+      return llvm::vfs::Status(BUILTIN_INCLUDE_DIR, BUILTIN_INCLUDE_DIR_UID,
+                               time, 0, 0, 0,
+                               llvm::sys::fs::file_type::directory_file,
+                               llvm::sys::fs::perms::all_all);
+    }
+    auto res = ctx.read_vfs_file(toStr(pathStr));
     if (!res.is_ok()) {
       // TODO: fallback for directories
       return realFS->status(Path);
@@ -4653,6 +4728,13 @@ public:
 
   llvm::ErrorOr<std::unique_ptr<llvm::vfs::File>>
   openFileForRead(const Twine &Path) override {
+    if (isBuiltinFile(Path.str())) {
+      return std::make_unique<BuiltinVFSFile>(
+          llvm::StringRef(BUILTIN_ASSERT_H_PATH),
+          llvm::StringRef(BUILTIN_ASSERT_H_CONTENT,
+                          sizeof(BUILTIN_ASSERT_H_CONTENT) - 1),
+          BUILTIN_ASSERT_H_UID);
+    }
     auto res = ctx.read_vfs_file(toStr(Path.str()));
     if (!res.is_ok()) {
       return llvm::errc::no_such_file_or_directory;
@@ -4680,7 +4762,10 @@ public:
   }
 
   bool exists(const Twine &Path) override {
-    auto res = ctx.read_vfs_file(toStr(Path.str()));
+    auto pathStr = Path.str();
+    if (isBuiltinFile(pathStr) || isBuiltinDir(pathStr))
+      return true;
+    auto res = ctx.read_vfs_file(toStr(pathStr));
     if (res.is_ok())
       return true;
 
@@ -4788,6 +4873,15 @@ static void parse_file(RefMut<Ctx> ctx) {
     Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
         incPath.c_str(), ArgumentInsertPosition::BEGIN));
   }
+
+  // Append the builtin include directory adjuster last. Because each adjuster
+  // uses ArgumentInsertPosition::BEGIN, later-appended adjusters insert their
+  // flags before earlier ones. The last adjuster therefore places its flags
+  // first in the final command line, giving the builtin directory the highest
+  // include-path priority. This ensures our wrapper assert.h is found before
+  // any user or system assert.h.
+  Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
+      {"-I", BUILTIN_INCLUDE_DIR}, ArgumentInsertPosition::BEGIN));
 
   PALActionFactory factory(ctx, rangeMap);
   if (Tool.run(&factory) != 0)
