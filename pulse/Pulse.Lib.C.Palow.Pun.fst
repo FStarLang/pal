@@ -122,6 +122,14 @@ let overlay_exact (old: bytes) (s: nat) (c: bytes)
           [SMTPat (overlay old s c s)]
   = Seq.lemma_eq_intro (overlay old s c s) c
 
+(* A slice of an overlay inside the range written is a slice of that range:
+   a callee handed a whole member writes back all its bytes, and a promise it
+   makes about some of them is about these. *)
+let overlay_covered (old: bytes) (s: nat) (c: bytes) (o: nat) (i: nat) (j: nat { i <= j /\ j <= len old })
+  : Lemma (requires o <= s + i /\ s + j <= o + len c)
+          (ensures  slice (overlay old s c o) i j == slice c (s + i - o) (s + j - o))
+  = Seq.lemma_eq_intro (slice (overlay old s c o) i j) (slice c (s + i - o) (s + j - o))
+
 (* Writing a range back over itself changes nothing. *)
 let overlay_self (b: bytes) (o: nat) (n: nat { o + n <= len b })
   : Lemma (overlay b 0 (slice b o (o + n)) o == b)

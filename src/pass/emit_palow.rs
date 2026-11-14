@@ -3016,8 +3016,8 @@ impl<'a> Spec<'a> {
             .map(|t| t.to_rc())
             .map_err(|_| "a subexpression whose type could not be inferred".to_string())?;
         if let ExprT::Member(b, f) = &e.val
-            && let Ok(bt) = self.env.infer_expr(b)
-            && let Some(it) = island_field(self.tds, &bt.to_rc(), &f.val)
+            && let Ok(bt) = self.ty_of(b)
+            && let Some(it) = island_field(self.tds, &bt, &f.val)
         {
             return Ok(it);
         }
@@ -8051,6 +8051,9 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
     for decl in &tu.decls {
         if let DeclT::UnionDefn(ud) = &decl.val {
             let overlay = ud.overlay || reach.contains(&format!("union {}", ud.name.val));
+            if !overlay {
+                code.extend(sized_flex_members(tds, env, &reach, &layouts, ud));
+            }
             let mut c = collect_union(tds, &layouts, ud, overlay);
             c.origin = origin_of(decl);
             code.push(c);
@@ -8083,7 +8086,6 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
         // Every field has to have a Palow type. Structs are processed in
         // declaration order, so a field of an earlier struct type works and a
         // field of a later one does not -- which is also all C allows.
-        let mut fields = Vec::new();
         let mut bitfields: Vec<(String, BitField)> = Vec::new();
         let mut ok = true;
         let mut bad = String::new();
@@ -8156,143 +8158,277 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
             }
             i = j;
         }
-        let in_overlay = reach.contains(&format!("struct {}", name));
-        for (fname, fty, off) in plan {
-            let fty = match &peel(tds, &fty).val {
-                TypeT::TypeRef(TypeRefKind::Union(n))
-                    if in_overlay && tds.unions.contains_key(&island_name(&n.val)) =>
-                {
-                    Rc::new(Type {
-                        val: TypeT::TypeRef(TypeRefKind::Union(Rc::new(Ident {
-                            val: island_name(&n.val).into(),
-                            loc: n.loc.clone(),
-                        }))),
-                        loc: fty.loc.clone(),
-                    })
-                }
-                _ => fty,
-            };
-            let (Some(shape), true) = (field_shape(tds, &fty), field_type(tds, &fty).is_some())
+        let origin = origin_of(decl);
+        let chunk = finish_struct(
+            tds,
+            env,
+            &reach,
+            &name,
+            (size, align),
+            plan,
+            bitfields,
+            if ok { None } else { Some(bad) },
+            origin,
+        );
+        code.push(chunk);
+    }
+    code
+}
+
+/// The rest of a struct's collection once its fields are laid out: each
+/// field's shape, the packed-struct fix-ups, the `StructInfo`, and the module.
+/// `failed` is why laying the fields out already failed, if it did.
+#[allow(clippy::too_many_arguments)]
+fn finish_struct(
+    tds: &mut Typedefs,
+    env: &Env,
+    reach: &HashSet<String>,
+    name: &str,
+    (size, align): (u64, u64),
+    plan: Vec<(String, Rc<Type>, u64)>,
+    bitfields: Vec<(String, BitField)>,
+    failed: Option<String>,
+    origin: Option<Origin>,
+) -> Chunk {
+    let name = name.to_string();
+    let mut fields = Vec::new();
+    let mut ok = failed.is_none();
+    let mut bad = failed.unwrap_or_default();
+    let in_overlay = reach.contains(&format!("struct {}", name));
+    for (fname, fty, off) in plan {
+        let fty = match &peel(tds, &fty).val {
+            TypeT::TypeRef(TypeRefKind::Union(n))
+                if in_overlay && tds.unions.contains_key(&island_name(&n.val)) =>
+            {
+                Rc::new(Type {
+                    val: TypeT::TypeRef(TypeRefKind::Union(Rc::new(Ident {
+                        val: island_name(&n.val).into(),
+                        loc: n.loc.clone(),
+                    }))),
+                    loc: fty.loc.clone(),
+                })
+            }
+            _ => fty,
+        };
+        let (Some(shape), true) = (field_shape(tds, &fty), field_type(tds, &fty).is_some())
+        else {
+            ok = false;
+            bad = format!("field `{}` is {}", fname, describe(tds.resolve(&fty)));
+            break;
+        };
+        let Some(fsize) = shape.size(tds, &fty) else {
+            ok = false;
+            bad = format!("field `{}` has no size", fname);
+            break;
+        };
+        // An `_array` field's refinement is about the sequence in the
+        // ownership record; every other field's is about its value.
+        let seq = extent(tds, &fty) == Some(Extent::Array) || flex_elem(tds, &fty).is_some();
+        let inv = field_invariant(tds, env, &fty, seq);
+        fields.push(StructField {
+            name: fname,
+            ty: fty,
+            offset: off,
+            size: fsize,
+            shape,
+            inv,
+        });
+    }
+    // A packed struct -- or one with a packed struct inside -- can be
+    // less aligned than its fields. The struct keeps the alignment C gives
+    // it, which is what an allocator or an enclosing object guarantees,
+    // and each field is aligned or not by arithmetic on that: it is when
+    // its own alignment divides both the struct's and its offset. A
+    // scalar or a pointer that is not is owned by its bytes alone and
+    // accessed by the `_u` operations, which go through an aligned
+    // temporary; anything bigger would need unaligned versions of its
+    // whole ownership, which is not done.
+    if ok {
+        for f in &mut fields {
+            let Some(fa) = palow_alignof(tds, &f.ty)
+                .or_else(|| flex_elem(tds, &f.ty).and_then(|t| palow_alignof(tds, t)))
             else {
-                ok = false;
-                bad = format!("field `{}` is {}", fname, describe(tds.resolve(&fty)));
-                break;
+                continue;
             };
-            let Some(fsize) = shape.size(tds, &fty) else {
-                ok = false;
-                bad = format!("field `{}` has no size", fname);
-                break;
-            };
-            // An `_array` field's refinement is about the sequence in the
-            // ownership record; every other field's is about its value.
-            let seq = extent(tds, &fty) == Some(Extent::Array) || flex_elem(tds, &fty).is_some();
-            let inv = field_invariant(tds, env, &fty, seq);
-            fields.push(StructField {
-                name: fname,
-                ty: fty,
-                offset: off,
-                size: fsize,
-                shape,
-                inv,
-            });
-        }
-        // A packed struct -- or one with a packed struct inside -- can be
-        // less aligned than its fields. The struct keeps the alignment C gives
-        // it, which is what an allocator or an enclosing object guarantees,
-        // and each field is aligned or not by arithmetic on that: it is when
-        // its own alignment divides both the struct's and its offset. A
-        // scalar or a pointer that is not is owned by its bytes alone and
-        // accessed by the `_u` operations, which go through an aligned
-        // temporary; anything bigger would need unaligned versions of its
-        // whole ownership, which is not done.
-        if ok {
-            for f in &mut fields {
-                let Some(fa) = palow_alignof(tds, &f.ty)
-                    .or_else(|| flex_elem(tds, &f.ty).and_then(|t| palow_alignof(tds, t)))
-                else {
-                    continue;
-                };
-                if align % fa == 0 && f.offset % fa == 0 {
-                    continue;
+            if align % fa == 0 && f.offset % fa == 0 {
+                continue;
+            }
+            match &f.shape {
+                FieldShape::One { pn } if UNALIGNED_TYPES.contains(&pn.as_str()) => {
+                    f.shape = FieldShape::Unaligned { pn: pn.clone() };
                 }
-                match &f.shape {
-                    FieldShape::One { pn } if UNALIGNED_TYPES.contains(&pn.as_str()) => {
-                        f.shape = FieldShape::Unaligned { pn: pn.clone() };
-                    }
-                    _ => {
-                        ok = false;
-                        bad = format!(
-                            "field `{}` is not aligned, as the struct is packed, and is not a scalar or a pointer",
-                            f.name
-                        );
-                        break;
-                    }
+                _ => {
+                    ok = false;
+                    bad = format!(
+                        "field `{}` is not aligned, as the struct is packed, and is not a scalar or a pointer",
+                        f.name
+                    );
+                    break;
                 }
             }
         }
-        if !ok {
-            code.push(Chunk {
-                module: format!("Struct_{}", name),
-                code: format!("(* skipped struct {}: {} *)\n\n", name, bad),
-                origin: origin_of(decl),
-            });
+    }
+    if !ok {
+        return Chunk {
+            module: format!("Struct_{}", name),
+            code: format!("(* skipped struct {}: {} *)\n\n", name, bad),
+            origin,
+        };
+    }
+    // The byte-level view needs every field to have one and to sit at a
+    // byte offset of its own, so that the object splits into fields and
+    // padding with nothing left over. An array field qualifies when its
+    // element does: `array_repr` is that element's representation laid end
+    // to end, and it pins the field's length as a scalar's does.
+    //
+    // Bound the whole-object proof context for very wide configuration
+    // records. Larger structs retain their field-wise view; the limit is
+    // a proof-generation budget, not a restriction of the memory model.
+    let has_bytes = fields.len() <= MAX_BYTE_LEVEL_FIELDS
+        && fields.iter().all(|f| {
+            match &f.shape {
+                FieldShape::One { .. } | FieldShape::Unaligned { .. } => has_repr(tds, &f.ty),
+                // `field_shape` only gives an array field its shape when
+                // the element has a representation. A zero-length one
+                // owns no bytes, and the view does not say so for it.
+                FieldShape::Array { .. } => f.size > 0,
+                FieldShape::Flex { .. } => false,
+            }
+        });
+    let has_read = fields.iter().all(|f| readable_field(tds, &f.ty));
+    let inv = struct_invariant(tds, env, &fields);
+    tds.structs.insert(
+        name.clone(),
+        StructInfo {
+            fields,
+            own: Vec::new(),
+            bitfields,
+            size,
+            align,
+            has_read,
+            has_bytes,
+            view: false,
+            inv,
+            elem_refine: None,
+        },
+    );
+    let own = collect_own_items(tds, &tds.structs[&name], &name);
+    tds.structs.get_mut(&name).unwrap().own = own;
+    let elem_refine = struct_elem_refine(tds, env, &name);
+    tds.structs.get_mut(&name).unwrap().elem_refine = elem_refine;
+    let mut sc = emit_struct(tds, &name);
+    if reach.contains(&format!("struct {}", name))
+        && let Some(v) = emit_struct_view(tds, &name)
+    {
+        sc += &v;
+        tds.structs.get_mut(&name).unwrap().view = true;
+    }
+    Chunk {
+        module: format!("Struct_{}", name),
+        code: sc,
+        origin,
+    }
+}
+
+/// A struct whose last field is a flexible array member, as a member of a
+/// union: `union { SNAP_BITMAP Bitmap; uint8_t Storage[N]; }`, where another
+/// member gives the union the size the flexible struct's tail is meant to
+/// fill. As a member, such a struct is not of unknown size: its tail runs to
+/// the end of the union, as far as whole elements go. Its member type is a
+/// copy of the struct with that tail as a fixed-size array, `S__fill<k>`,
+/// which has a byte-level `_repr` when the copy does.
+fn flex_fill(tds: &Typedefs, ty: &Type, usize: u64) -> Option<(String, u64, u64)> {
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
+        return None;
+    };
+    let si = tds.structs.get(&*n.val)?;
+    let flex = si.fields.last()?;
+    let FieldShape::Flex { esize, .. } = &flex.shape else {
+        return None;
+    };
+    if usize < flex.offset || *esize == 0 {
+        return None;
+    }
+    let k = (usize - flex.offset) / esize;
+    let ssize = flex.offset + k * esize;
+    if ssize % si.align != 0 {
+        return None;
+    }
+    Some((format!("{}__fill{}", n.val, k), k, ssize))
+}
+
+/// The member type `flex_fill` gives a flexible struct in a union of `usize`
+/// bytes, once `sized_flex_members` has generated it.
+fn sized_flex_type(tds: &Typedefs, ty: &Type, usize: u64) -> Option<Rc<Type>> {
+    let (name, _, _) = flex_fill(tds, ty, usize)?;
+    tds.structs.contains_key(&name).then(|| {
+        Rc::new(Type {
+            val: TypeT::TypeRef(TypeRefKind::Struct(Rc::new(Ident {
+                val: name.into(),
+                loc: ty.loc.clone(),
+            }))),
+            loc: ty.loc.clone(),
+        })
+    })
+}
+
+/// Generate the sized copy (`flex_fill`) of each flexible struct that is a
+/// member of the union `ud`.
+fn sized_flex_members(
+    tds: &mut Typedefs,
+    env: &Env,
+    reach: &HashSet<String>,
+    layouts: &crate::layout::LayoutCtx,
+    ud: &crate::ir::UnionDefn,
+) -> Vec<Chunk> {
+    let key = TypeRefKind::Union(ud.name.clone());
+    let Some(usize) = layouts.table.get(&LayoutKey::of_type_ref(&key)).map(|l| l.size) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for f in &ud.fields {
+        let mty = f.val.logical_type(&f.loc);
+        let Some((name, k, ssize)) = flex_fill(tds, &mty, usize) else {
+            continue;
+        };
+        if tds.structs.contains_key(&name) {
             continue;
         }
-        // The byte-level view needs every field to have one and to sit at a
-        // byte offset of its own, so that the object splits into fields and
-        // padding with nothing left over. An array field qualifies when its
-        // element does: `array_repr` is that element's representation laid end
-        // to end, and it pins the field's length as a scalar's does.
-        //
-        // Bound the whole-object proof context for very wide configuration
-        // records. Larger structs retain their field-wise view; the limit is
-        // a proof-generation budget, not a restriction of the memory model.
-        let has_bytes = fields.len() <= MAX_BYTE_LEVEL_FIELDS
-            && fields.iter().all(|f| {
-                match &f.shape {
-                    FieldShape::One { .. } | FieldShape::Unaligned { .. } => has_repr(tds, &f.ty),
-                    // `field_shape` only gives an array field its shape when
-                    // the element has a representation. A zero-length one
-                    // owns no bytes, and the view does not say so for it.
-                    FieldShape::Array { .. } => f.size > 0,
-                    FieldShape::Flex { .. } => false,
-                }
-            });
-        let has_read = fields.iter().all(|f| readable_field(tds, &f.ty));
-        let inv = struct_invariant(tds, env, &fields);
-        tds.structs.insert(
-            name.clone(),
-            StructInfo {
-                fields,
-                own: Vec::new(),
-                bitfields,
-                size,
-                align,
-                has_read,
-                has_bytes,
-                view: false,
-                inv,
-                elem_refine: None,
-            },
-        );
-        let own = collect_own_items(tds, &tds.structs[&name], &name);
-        tds.structs.get_mut(&name).unwrap().own = own;
-        let elem_refine = struct_elem_refine(tds, env, &name);
-        tds.structs.get_mut(&name).unwrap().elem_refine = elem_refine;
-        let mut sc = emit_struct(tds, &name);
-        if reach.contains(&format!("struct {}", name))
-            && let Some(v) = emit_struct_view(tds, &name)
-        {
-            sc += &v;
-            tds.structs.get_mut(&name).unwrap().view = true;
-        }
-        code.push(Chunk {
-            module: format!("Struct_{}", name),
-            code: sc,
-            origin: origin_of(decl),
-        });
+        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, &mty).val else {
+            unreachable!()
+        };
+        let si = &tds.structs[&*n.val];
+        let align = si.align;
+        let plan: Vec<(String, Rc<Type>, u64)> = si
+            .fields
+            .iter()
+            .map(|f| {
+                let ty = match &peel(tds, &f.ty).val {
+                    TypeT::FlexArray(t) => Rc::new(Type {
+                        val: TypeT::FixedArray(t.clone(), k),
+                        loc: f.ty.loc.clone(),
+                    }),
+                    _ => f.ty.clone(),
+                };
+                (f.name.clone(), ty, f.offset)
+            })
+            .collect();
+        let bitfields = si.bitfields.clone();
+        tds.aggregate_layouts
+            .insert(format!("struct {}", name), (ssize, align));
+        out.push(finish_struct(
+            tds,
+            env,
+            reach,
+            &name,
+            (ssize, align),
+            plan,
+            bitfields,
+            None,
+            None,
+        ));
     }
-    code
+    out
 }
 
 /// Generate the Palow type for one union. Every member has to have a
@@ -8335,6 +8471,7 @@ fn collect_union(
     for f in &ud.fields {
         let mname = f.val.name().val.to_string();
         let mty = f.val.logical_type(&f.loc);
+        let mty = sized_flex_type(tds, &mty, size).unwrap_or(mty);
         // A member's own ownership has to be defined over *bytes*: the
         // members overlap, so the union's representation is a case split on
         // the same bytes and a member whose ownership is field-wise has
@@ -8581,6 +8718,16 @@ fn overlay_reach(tu: &TranslationUnit, tds: &Typedefs) -> (HashSet<String>, Hash
 /// (see `overlay_reach`): the field's C type is the named union, but inside an
 /// overlay what it holds is the union's bytes.
 fn island_field(tds: &Typedefs, bty: &Type, f: &str) -> Option<Rc<Type>> {
+    // A union's flexible struct member has the sized type `flex_fill` gave it.
+    if let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(tds, bty).val {
+        let m = tds.unions.get(&*u.val)?.members.iter().find(|m| m.name == f)?;
+        return match &m.ty.val {
+            TypeT::TypeRef(TypeRefKind::Struct(n)) if n.val.contains("__fill") => {
+                Some(m.ty.clone())
+            }
+            _ => None,
+        };
+    }
     let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, bty).val else {
         return None;
     };
@@ -9078,7 +9225,7 @@ fn emit_overlay_own(tds: &Typedefs, name: &str) -> String {
             .map(|(a, b)| format!("slice u {a} {b} == slice y {a} {b}"))
             .collect(),
     );
-    let rw: String = tds.structs[&o.sn]
+    let owned: Vec<&str> = tds.structs[&o.sn]
         .fields
         .iter()
         .filter(|f| {
@@ -9087,13 +9234,18 @@ fn emit_overlay_own(tds: &Typedefs, name: &str) -> String {
                 .iter()
                 .any(|i| i.at.contains(&format!("(x).fld_{})", f.name)))
         })
-        .map(|f| {
-            format!(
-                "  rewrite each ({un}_get_{arm} u).fld_{f} as ({un}_get_{arm} y).fld_{f};\n",
-                f = f.name
-            )
-        })
+        .map(|f| &*f.name)
         .collect();
+    let rw: String = owned
+        .iter()
+        .map(|f| format!("  rewrite each ({un}_get_{arm} u).fld_{f} as ({un}_get_{arm} y).fld_{f};\n"))
+        .collect();
+    let same_view = conj(
+        owned
+            .iter()
+            .map(|f| format!("({un}_get_{arm} u).fld_{f} == ({un}_get_{arm} y).fld_{f}"))
+            .collect(),
+    );
     // A load of an owned pointer that comes back as the term the ownership
     // is at, so that what it points to is found by it.
     let readers: String = o
@@ -9130,6 +9282,15 @@ fn emit_overlay_own(tds: &Typedefs, name: &str) -> String {
          let {un}_own_same (u y: {un}) : prop = {same}\n\n\
          ghost fn {un}_own_follow (a: ptr) (u: {un}) (#p #q: perm) (#y: {un}) (#s: {un}_own_spec)\n\
          \x20 requires {un}_pts_to a p y ** {un}_own u q s ** pure ({un}_own_same u y)\n\
+         \x20 ensures  {un}_pts_to a p y ** {un}_own y q s\n\
+         {{\n  unfold {un}_own u q s;\n  \
+         unfold {sn}_own ({un}_get_{arm} u) q s;\n\
+         {rw}  fold {sn}_own ({un}_get_{arm} y) q s;\n  \
+         fold {un}_own y q s;\n}}\n\n\
+         (* The same, after a store through member `{arm}` itself: its view\n   \
+         still has the owned pointers, so the bytes they are in still hold them. *)\n\
+         ghost fn {un}_own_follow_view (a: ptr) (u: {un}) (#p #q: perm) (#y: {un}) (#s: {un}_own_spec)\n\
+         \x20 requires {un}_pts_to a p y ** {un}_own u q s ** pure ({un}_is_{arm} y /\\ {same_view})\n\
          \x20 ensures  {un}_pts_to a p y ** {un}_own y q s\n\
          {{\n  unfold {un}_own u q s;\n  \
          unfold {sn}_own ({un}_get_{arm} u) q s;\n\
@@ -9229,8 +9390,9 @@ fn owned_ptr_offsets(
 /// - `_focus_m` / `_unfocus_m`: lend the member as its own type, keeping the
 ///   bytes past it exactly (`_rest_m`), and take it back. Coming back, only
 ///   the member's own range has changed: `overlay u 0 c 0`.
-/// - `_focus_read_m` / `_unfocus_read_m`, for a struct member: the same lend
-///   for a read, which gives the union back with exactly the bytes it had.
+/// - `_focus_read_m` / `_unfocus_read_m`, for a struct member or a nested
+///   overlay union: the same lend for a read, which gives the union back with
+///   exactly the bytes it had.
 /// - `_switch_m`: the member's storage, for a callee to fill.
 /// - `_as_m` / `_of_m` (`pulse_intro`), when `m` is an overlay union of the
 ///   same size and alignment: the conversions a pointer cast between the two
@@ -9438,6 +9600,25 @@ fn emit_overlay_union(tds: &Typedefs, name: &str) -> String {
              {tp}_claim_uninit a #(slice u 0 {sz});\n  \
              fold {un}_rest_{f} a 1.0R u;\n}}\n\n"
         );
+        if is_union {
+            // A nested overlay union's value is its bytes, so the lend gives
+            // them back as they were: the union is exactly what it was.
+            c += &format!(
+                "ghost fn {un}_focus_read_{f} (a: ptr) (#p: perm) (#u: {un})\n\
+                 \x20 requires {un}_pts_to a p u\n\
+                 \x20 ensures  {tp}_pts_to a p ({un}_get_{f} u)\n\
+                 \x20 ensures  {un}_rest_{f} a p u\n\
+                 {{\n  {un}_focus_{f} a;\n}}\n\n\
+                 ghost fn {un}_unfocus_read_{f} (a: ptr) (#p: perm) (#u: {un})\n\
+                 \x20 requires {tp}_pts_to a p ({un}_get_{f} u)\n\
+                 \x20 requires {un}_rest_{f} a p u\n\
+                 \x20 ensures  {un}_pts_to a p u\n\
+                 {{\n  \
+                 {un}_unfocus_{f} a;\n  \
+                 overlay_self u 0 {sz};\n  \
+                 rewrite ({un}_pts_to a p (overlay u 0 ({un}_get_{f} u) 0)) as ({un}_pts_to a p u);\n}}\n\n"
+            );
+        }
     }
     // A member that is itself an overlay union of the same size and alignment
     // is the whole object under another name: the two points-to are the same
@@ -11003,6 +11184,36 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         sn = sn,
         acc = accs[regions.len() - 1]
     );
+    // Both directions are congruence: a field's representation holds of its
+    // slice exactly when it holds of the bytes the slice is equal to. What a
+    // representation *says* never matters here, and an aggregate's says a
+    // great deal -- unfolded, a wide struct of nested ones is a context the
+    // solver drowns in. So the proofs do not see what they say.
+    let mut hidden: Vec<String> = Vec::new();
+    for f in &si.fields {
+        // An empty field's repr holds of no bytes by its definition, which
+        // is what the proofs use instead of a reveal.
+        if let FieldShape::One { pn } = &f.shape
+            && f.size > 0
+            && (pn.starts_with("struct_") || pn.starts_with("union_"))
+        {
+            let mut m = pn.clone();
+            m[..1].make_ascii_uppercase();
+            let h = format!(" -{}.{}_repr", m, pn);
+            if !hidden.contains(&h) {
+                hidden.push(h);
+            }
+        }
+    }
+    let (push, pop) = if hidden.is_empty() {
+        (String::new(), String::new())
+    } else {
+        (
+            format!("#push-options \"--using_facts_from '*{}'\"\n", hidden.concat()),
+            "#pop-options\n\n".to_string(),
+        )
+    };
+    c += &push;
     c += &format!(
         "ghost fn {sn}_reveal (a: ptr) (#p: perm) (#x: {sn})\n\
          \x20 requires {sn}_pts_to a p x\n\
@@ -11059,6 +11270,7 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         iv = struct_inv_req(si, &sn, "x"),
         w = w
     );
+    c += &pop;
 
     // The adapters that make the struct an array element. `elem_pts_to` is
     // the generic array layer's view of one slot, stated over the element's
@@ -14978,6 +15190,9 @@ struct Body<'a> {
     /// per statement rather than per function is what keeps every branch,
     /// loop and call seeing the same shape.
     own_open: Vec<OpenOwn>,
+    /// Set while a call argument for a `const` parameter is focused: the
+    /// callee cannot store through it.
+    const_lend: bool,
     /// How many slots existed when the enclosing loop's body began. A `break`
     /// or `continue` past a slot allocated since then would skip its release.
     loop_mark: Option<usize>,
@@ -15150,8 +15365,8 @@ impl<'a> Body<'a> {
             .map(|t| t.to_rc())
             .map_err(|_| "the type of a subexpression could not be inferred".to_string())?;
         if let ExprT::Member(b, f) = &e.val
-            && let Ok(bt) = self.env.infer_expr(b)
-            && let Some(it) = island_field(self.tds, &bt.to_rc(), &f.val)
+            && let Ok(bt) = self.ty_of(b)
+            && let Some(it) = island_field(self.tds, &bt, &f.val)
         {
             return Ok(it);
         }
@@ -15769,15 +15984,69 @@ impl<'a> Body<'a> {
     /// ownership reads, it is the same ownership afterwards and `follow_own`
     /// moves it to the new value; when they are, it stays where it was.
     fn union_own_before_write(&mut self, lhs: &Expr) -> Option<(String, String, String)> {
-        let pn = palow_name(self.tds, &*self.ty_of(lhs).ok()?)?;
-        let n = ov_leaf(self.tds, &pn)?.size;
-        let (root, uname, o) = overlay_path(self.tds, &|x| self.ty_of(x).ok(), lhs)
+        let ty = self.ty_of(lhs).ok()?;
+        let leaf = palow_name(self.tds, &ty).and_then(|pn| ov_leaf(self.tds, &pn));
+        // An island is stored whole, as bytes, like a scalar (`overlay_leaf`).
+        let island = match &peel(self.tds, &ty).val {
+            TypeT::TypeRef(TypeRefKind::Union(u)) => u
+                .val
+                .strip_suffix("__island")
+                .filter(|o| island_member(self.tds, o).is_some())
+                .map(|o| self.tds.unions[o].size),
+            _ => None,
+        };
+        let n = match (&leaf, island) {
+            (Some(l), _) => l.size,
+            (None, Some(n)) => n,
+            (None, None) => palow_sizeof(self.tds, &ty)?,
+        };
+        let (mut root, mut uname, o) = overlay_path(self.tds, &|x| self.ty_of(x).ok(), lhs)
             .ok()?
             .root?;
+        // `(&r->m)->...`, as a macro handed `&r->m` writes: the overlay root
+        // is `m`'s union, but the ownership may be held by `r`'s, of which `m`
+        // is a member at byte 0.
+        while self.tds.unions.get(&uname)?.own.is_none() {
+            let ExprT::Deref(a) = &strip_vattr(&root).val else {
+                return None;
+            };
+            let ExprT::Ref(m) = &strip_vattr(a).val else {
+                return None;
+            };
+            let ExprT::Member(b, _) = &strip_vattr(m).val else {
+                return None;
+            };
+            let bt = self.ty_of(b).ok()?;
+            let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(self.tds, &bt).val else {
+                return None;
+            };
+            if !is_overlay(self.tds, &u.val) {
+                return None;
+            }
+            uname = u.val.to_string();
+            root = (**b).clone();
+        }
         let own = self.tds.unions.get(&uname)?.own.as_ref()?;
         if own.reads.iter().any(|&(a, b)| o < b && a < o + n) {
             return None;
         }
+        // A scalar is stored into the union's bytes; anything larger goes
+        // through a focus on its member, which only the owning member's view
+        // can say leaves the owned pointers alone.
+        let follow = if leaf.is_some() || island.is_some() {
+            "own_follow"
+        } else {
+            let mut e = strip_vattr(lhs);
+            let mut arm = None;
+            while let ExprT::Member(b, f) = &e.val {
+                arm = Some(f.val.to_string());
+                e = strip_vattr(b);
+            }
+            if arm.as_deref() != Some(own.arm.as_str()) {
+                return None;
+            }
+            "own_follow_view"
+        };
         let ExprT::Deref(r) = &strip_vattr(&root).val else {
             return None;
         };
@@ -15798,11 +16067,9 @@ impl<'a> Body<'a> {
         }
         let un = format!("union_{}", uname);
         let w = self.fresh("own_value");
-        self.lines.push(format!(
-            "with {}. assert ({}_pts_to {} _ {});",
-            w, un, at, w
-        ));
-        Some((un, at, w))
+        self.lines
+            .push(format!("with {}. assert ({}_pts_to {} _ {});", w, un, at, w));
+        Some((format!("{}_{}", un, follow), at, w))
     }
 
     /// Owned containers from a parameter down through its embedded structs.
@@ -15901,12 +16168,12 @@ impl<'a> Body<'a> {
             "with {}. assert ({}_pts_to {} _ {});",
             w, sn, at, w
         ));
-        Some((sn, at, w))
+        Some((format!("{}_own_follow", sn), at, w))
     }
 
     fn follow_own(&mut self, before: Option<(String, String, String)>) {
         if let Some((sn, at, w)) = before {
-            self.lines.push(format!("{}_own_follow {} {};", sn, at, w));
+            self.lines.push(format!("{} {} {};", sn, at, w));
         }
     }
 
@@ -16934,8 +17201,19 @@ impl<'a> Body<'a> {
                 )
             })?;
             let (a, base_close_read, base_close_write) = self.base_addr(base, writing)?;
-            let close = |mut base: Vec<String>| {
-                let mut v = vec![format!("{}_unfocus_{} {};", un, f.val, a)];
+            // A nested overlay union lent to a callee that cannot store
+            // through it comes back as the very bytes it was, so the union
+            // keeps its value term, and what is keyed on it -- its ownership
+            // -- still matches.
+            let rd = if self.const_lend
+                && matches!(peel(self.tds, &fty).val, TypeT::TypeRef(TypeRefKind::Union(_)))
+            {
+                "_read"
+            } else {
+                ""
+            };
+            let close = |sfx: &str, mut base: Vec<String>| {
+                let mut v = vec![format!("{}_unfocus{}_{} {};", un, sfx, f.val, a)];
                 v.append(&mut base);
                 v
             };
@@ -16945,10 +17223,10 @@ impl<'a> Body<'a> {
                 pn,
                 unaligned: false,
                 at: a.clone(),
-                open_read: vec![format!("{}_focus_{} {};", un, f.val, a)],
+                open_read: vec![format!("{}_focus{}_{} {};", un, rd, f.val, a)],
                 open_write: vec![format!("{}_switch_{} {};", un, f.val, a)],
-                close_read: close(base_close_read),
-                close_write: close(base_close_write),
+                close_read: close(rd, base_close_read),
+                close_write: close("", base_close_write),
             });
         }
         // An array arm has no single Palow name -- its ownership is the array
@@ -21276,6 +21554,18 @@ impl<'a> Body<'a> {
                 values.insert(i, self.arg_value(a)?);
             }
         }
+        // A read-only callee leaves the union as it was, and the ownership
+        // with it; only a callee that may store needs the follow.
+        let mut follows: Vec<(String, String, String)> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            if consts.get(i) != Some(&true)
+                && let ExprT::Ref(lv) = &strip_vattr(a).val
+                && let Some(f) = self.union_own_before_lend(lv)
+                && !follows.iter().any(|g| g.1 == f.1)
+            {
+                follows.push(f);
+            }
+        }
         let field_close = self.pending_close.len();
         let opened = self.field_args(args, &outs, &consts, |i| {
             !(arr_args.get(i) == Some(&true)
@@ -21599,7 +21889,54 @@ impl<'a> Body<'a> {
         // arguments are set up, since they are evaluated before the call.
         self.active.clear();
         self.union_values.clear();
+        for (f, at, w) in follows {
+            self.pending_close.push(format!("{} {} {};", f, at, w));
+        }
         Ok(format!("({})", out))
+    }
+
+    /// A callee handed another member of an overlay union whose ownership is
+    /// held through its `_owning` member may store anywhere in that member,
+    /// so the ownership follows the call only as far as the callee promises
+    /// the bytes it is keyed on `_unchanged`; `own_follow` asks for exactly
+    /// that. Name the union's value before the member is lent.
+    fn union_own_before_lend(&mut self, lv: &Expr) -> Option<(String, String, String)> {
+        let (root, uname, _) = overlay_path(self.tds, &|x| self.ty_of(x).ok(), lv)
+            .ok()?
+            .root?;
+        let own = self.tds.unions.get(&uname)?.own.as_ref()?;
+        let mut e = strip_vattr(lv);
+        let mut arm = None;
+        while let ExprT::Member(b, f) = &e.val {
+            arm = Some(f.val.to_string());
+            e = strip_vattr(b);
+        }
+        if arm.is_none() || arm.as_deref() == Some(own.arm.as_str()) {
+            return None;
+        }
+        let ExprT::Deref(r) = &strip_vattr(&root).val else {
+            return None;
+        };
+        let ExprT::Var(v) = &strip_vattr(r).val else {
+            return None;
+        };
+        let p = v.val.to_string();
+        if !self.owned_here(&p) || !self.params.contains(&p) {
+            return None;
+        }
+        let at = format!("var_{}", p);
+        if self
+            .own_open
+            .iter()
+            .any(|o| o.root.at.as_deref() == Some(at.as_str()))
+        {
+            return None;
+        }
+        let un = format!("union_{}", uname);
+        let w = self.fresh("own_value");
+        self.lines
+            .push(format!("with {}. assert ({}_pts_to {} _ {});", w, un, at, w));
+        Some((format!("{}_own_follow", un), at, w))
     }
 
     /// A callee states an optional parameter's ownership under a guard, which
@@ -21741,7 +22078,10 @@ impl<'a> Body<'a> {
                     .ty_of(inner)
                     .is_ok_and(|t| matches!(peel(self.tds, &t).val, TypeT::FixedArray(..)))
             {
-                let fo = self.union_member(base, f, out)?;
+                self.const_lend = !out && consts.get(i) == Some(&true);
+                let fo = self.union_member(base, f, out);
+                self.const_lend = false;
+                let fo = fo?;
                 self.lines.extend(match out {
                     true => fo.open_write.iter().cloned(),
                     false => fo.open_read.iter().cloned(),
@@ -28770,6 +29110,7 @@ fn emit_body(
         prescattered: HashSet::new(),
         decls: Vec::new(),
         own_open: Vec::new(),
+        const_lend: false,
         loop_mark: None,
         loop_storage: Vec::new(),
         mirrors: HashMap::new(),
