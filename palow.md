@@ -7539,3 +7539,31 @@ Limitations:
     every cell written (musl's `strdup`/`strndup`; `test/alloc_array_return`,
     `test/alloc_array_return_bad`). Callers cannot take over a returned
     array yet, and `wmemcpy` into a block (`wcsdup`) is not handled.
+82. **`_cursor` out-parameters.** `strsep(char **str, ...)` reads a
+    position `*str` into a terminated array, splits a token off it and
+    stores back a pointer into the same array, or null. `_cursor T **p`
+    makes the pointee `_nullable _array T *`, and the contract owns the
+    array under a virtual parameter `p__arr`: `ptr_pts_to var_p 1.0R
+    var_p__arr ** unless_null var_p__arr (array_pts_to ... var_p__arr
+    1.0R val_p__arr)` on entry, the same at the entry base with fresh
+    `var_p__arr'`/`val_p__arr'` on exit. Contract `*p` is `var_p__arr`
+    (`var_p__arr'` in an `_ensures`), `(*p)[k]` reads `val_p__arr`,
+    `_old(*p)[k]` reads `val_p__arr'`, and `*p - _old(*p)` is
+    `walk_idx esize var_p__arr var_p__arr'`. In the body `p__arr` is an
+    array parameter whose base is the erased `var_p__arr`: a local read
+    from `*p` walks it, and its null test asserts it equals `var_p__arr`
+    and opens the guard (`elim_unless_null` plus `array_fits` and
+    `array_walk_base`) in the live arm. Storing a walked pointer or null
+    back into `*p` is a plain pointer store. Two fixes came with it: a
+    `_nullable _array` parameter's contents may be named in a contract,
+    each such clause read under `not (is_null var_a)`; and reading a local
+    that only aliases an array parameter (`char *s = a; return s;`) emitted
+    the unbound `var_s` instead of `var_a`. An `if` whose arm writes an
+    element through a walked pointer (`if (*end) *end++ = 0; else end =
+    0;`) now has its copyable tail copied into both arms, as an `if` with a
+    loop already did: Pulse types the arm's `Seq.upd` at the join, outside
+    the facts that bound the position. Callers of `_cursor` functions are
+    refused for now (musl's `strsep`; `test/cursor_strsep`,
+    `test/cursor_strsep_bad`, `test/cursor_diag`). `strtok_r` is not
+    covered: its token pointer comes from either `s` or `*p`, i.e. two
+    different arrays, depending on the path.

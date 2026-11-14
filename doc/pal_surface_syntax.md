@@ -122,6 +122,7 @@ fn func_f (var_x: ptr) (#val_x: erased T)
 | `_allocated T *x`         | adds `freeable var_x <size>`: the block came from `malloc` and may be freed (usually with `_consumes`) |
 | `_array T *x` / `T x[]`   | `array_pts_to T_repr <size> (SizeT.v T_alignof) var_x 1.0R val_x`, `val_x : Seq.seq T` |
 | `_arrayptr T *x`          | nothing: a pointer into an array owned elsewhere (stated by hand, see `test/arrayptrs`) |
+| `_cursor T **x`           | `ptr_pts_to var_x 1.0R var_x__arr` plus `unless_null var_x__arr (array_pts_to ... var_x__arr 1.0R val_x__arr)`: `*x` is null or points into an array the function owns for the call (see below) |
 | `struct s x` (by value)   | `struct_s_own var_x 1.0R own_x` when `struct s` has owned pointer fields |
 | `_core_ref T *f` (a field)| nothing: a non-owning back-pointer, left out of the struct's `_own` |
 
@@ -129,7 +130,9 @@ fn func_f (var_x: ptr) (#val_x: erased T)
 
 `_allocated _nullable _array T *f(...)` returns a fresh heap array: under `return != 0` the `_ensures` can name its contents and length (`return[k]`, `return._length`), and every cell must have been written before it is returned. A `char`-sized `malloc(n)` (no `sizeof` factor) allocates an array of `n` elements, and `memcpy(d, s, n)` from a `T` array of the same byte-sized type fills the first `n` cells of such a fresh block; its value is `d`, so `return memcpy(d, s, n);` works (`test/alloc_array_return`). A caller cannot yet take over such a returned array.
 
-The body may dereference a `_nullable` parameter only where a null test on it has settled that it is not null: in the matching arm of `if (p)`, `if (p != NULL)` or `if (!p) return ...;`, of `p ? ... : ...`, or on the right of `p && ...` / `p == NULL || ...`. The translation opens the guard there (`elim_unless_null`) and closes it again where the arm ends. A contract still cannot mention `*p`, and a `_refine` behind the guard keeps the body from opening it.
+The body may dereference a `_nullable` parameter only where a null test on it has settled that it is not null: in the matching arm of `if (p)`, `if (p != NULL)` or `if (!p) return ...;`, of `p ? ... : ...`, or on the right of `p && ...` / `p == NULL || ...`. The translation opens the guard there (`elim_unless_null`) and closes it again where the arm ends. A contract still cannot mention `*p` of a `_nullable T *p`, and a `_refine` behind the guard keeps the body from opening it. A `_nullable _array` parameter's contents and length (`a[k]`, `a._length`) can be named; each clause that does is read under `a != 0`.
+
+`_cursor T **x` is an in/out position in a terminated array, as in `strsep(char **str, ...)`: `*x` is null or points at the start of an array the function owns for the call, and the function may store back a pointer into that array, or null. In the contract `*x` is the incoming pointer, `(*x)[k]` / `(*x)._length` the array's entry contents and length (in an `_ensures` written `_old((*x)[k])`), and `_old(*x)[k]` its contents at exit. In an `_ensures`, `*x` is the outgoing pointer: it can be compared with null and measured from the incoming one, `*x - _old(*x)`. `(*x)[k]` in an `_ensures` is rejected, since `*x` may have moved. The body reads `*x` into a local, tests it for null, and walks, reads and writes the array through it like an `_array` parameter (`test/cursor_strsep`). The parameter must be a plain `T **`, and callers of a function with a `_cursor` parameter are not supported yet.
 
 Beyond ownership, the user typically also wants to constrain values. PAL provides the following annotations for adding extra contract clauses:
 

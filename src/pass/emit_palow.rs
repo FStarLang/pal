@@ -2451,6 +2451,18 @@ fn is_void_ptr(tds: &Typedefs, ty: &Type) -> bool {
     }
 }
 
+/// The array pointer a `_cursor` parameter points at: `T **p` whose `*p` is
+/// a `_nullable _array T *`. The contract owns that array for the call
+/// under a name of its own, `p__arr`, whose base is the incoming `*p`.
+fn cursor_pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
+    if extent(tds, ty) != Some(Extent::One) {
+        return None;
+    }
+    let pt = pointee(tds, ty)?;
+    (is_nullable(tds, pt) && extent(tds, pt) == Some(Extent::Array) && !is_arrayptr(tds, pt))
+        .then_some(pt)
+}
+
 fn pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
     match &tds.resolve(ty).val {
         // `void *` points at no object: C gives it no size and no
@@ -3329,6 +3341,12 @@ impl<'a> Spec<'a> {
                     .map(|o| format!("(Seq.length {})", o)),
             );
         }
+        if let Some(r) = self.cursor_array(inner, w) {
+            return Some(r.and_then(|(arr, wa)| {
+                let len = ExprT::VAttr(VAttr::Length, arr).with_loc(e.loc.clone());
+                self.length_of(&len, wa).unwrap()
+            }));
+        }
         let (inner, w) = match &strip_vattr(inner).val {
             ExprT::Old(i) => (i, When::Old),
             _ => (inner, w),
@@ -3485,6 +3503,17 @@ impl<'a> Spec<'a> {
     /// this does not know as one; an array parameter itself is at 0, and a
     /// pointer a loop walks is wherever its invariant binder says.
     fn ptr_pos(&self, e: &Expr, w: When) -> Option<Result<(String, String), String>> {
+        if let Some(c) = self.cursor_name(e) {
+            let arr = format!("{}__arr", c);
+            let pos = match (w, &self.pointees[&c]) {
+                (When::Post, (Some(pre), Some(post))) => {
+                    let esize = self.owner_elem_size(&arr)?;
+                    walk_pos(&esize.to_string(), pre, post)
+                }
+                _ => "0".to_string(),
+            };
+            return Some(Ok((arr, pos)));
+        }
         match &strip_vattr(e).val {
             ExprT::Old(inner) => self.ptr_pos(inner, When::Old),
             ExprT::Var(v) => {
@@ -3542,8 +3571,58 @@ impl<'a> Spec<'a> {
 
     /// The size of an element of the array parameter `owner`.
     fn owner_elem_size(&self, owner: &str) -> Option<u64> {
+        if let Some(c) = owner.strip_suffix("__arr")
+            && let Some(t) = self.env.local_type(c)
+            && let Some(pt) = cursor_pointee(self.tds, &t)
+        {
+            return palow_sizeof(self.tds, pointee(self.tds, peel(self.tds, pt))?);
+        }
         let t = self.env.local_type(owner)?;
         palow_sizeof(self.tds, pointee(self.tds, peel(self.tds, &t))?)
+    }
+
+    /// The `_cursor` parameter `p` of `*p`, when the contract owns the array
+    /// it points at.
+    fn cursor_name(&self, e: &Expr) -> Option<String> {
+        let ExprT::Deref(x) = &strip_vattr(e).val else {
+            return None;
+        };
+        let ExprT::Var(v) = &strip_vattr(x).val else {
+            return None;
+        };
+        let t = self.env.local_type(&v.val)?;
+        cursor_pointee(self.tds, &t)?;
+        let arr = format!("{}__arr", v.val);
+        self.pointees
+            .contains_key(&arr)
+            .then_some(v.val.to_string())
+    }
+
+    /// The array a `_cursor` parameter's `*p` points at, as the name the
+    /// contract owns it under and the state to read it in. `(*p)[k]` is the
+    /// incoming array, so it is only meaningful where `*p` is the incoming
+    /// pointer: before the call, or under `_old`. After it, `*p` may have
+    /// moved or be null, and `_old(*p)[k]` names the array's final contents.
+    fn cursor_array(&self, base: &Expr, w: When) -> Option<Result<(Rc<Expr>, When), String>> {
+        let (inner, under_old) = match &strip_vattr(base).val {
+            ExprT::Old(i) => (&**i, true),
+            _ => (base, false),
+        };
+        let c = self.cursor_name(inner)?;
+        let wa = match (under_old, w) {
+            (true, When::Post) => When::Post,
+            (true, _) => When::Old,
+            (false, When::Post) => {
+                return Some(Err(format!(
+                    "`(*{c})[k]` after the call, where `*{c}` may have moved: \
+                     `_old(*{c})[k]` is the array's final contents"
+                )));
+            }
+            (false, w) => w,
+        };
+        let id: Rc<IdentT> = Rc::from(format!("{}__arr", c).as_str());
+        let v = ExprT::Var(id.with_loc(base.loc.clone())).with_loc(base.loc.clone());
+        Some(Ok((v, wa)))
     }
 
     /// `p - q` between two pointers into the same array parameter: the
@@ -4619,6 +4698,16 @@ impl<'a> Spec<'a> {
                     &format!("struct_{}_offsetof_{}", sname.val, field.val),
                 ))
             }
+            ExprT::Deref(inner) | ExprT::Index(inner, _)
+                if let Some(r) = self.cursor_array(inner, w) =>
+            {
+                let (arr, wa) = r?;
+                let idx = match &strip_vattr(e).val {
+                    ExprT::Index(_, i) => Some(&**i),
+                    _ => None,
+                };
+                self.pointee_at_in(&arr, idx, wa, w)
+            }
             ExprT::Deref(inner) => self.pointee_at(inner, None, w),
             ExprT::Index(base, idx) if matches!(strip_vattr(base).val, ExprT::Var(_)) => {
                 self.pointee_at(base, Some(idx), w)
@@ -5442,14 +5531,41 @@ fn emit_fn(
     // separate from the map that permits ordinary specification dereferences.
     let mut guarded_pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
 
-    for (i, arg) in decl.args.iter().enumerate() {
+    // A `_cursor` parameter `p` comes with the array `*p` points at, owned
+    // for the call as if it were a `_nullable _array` parameter of its own
+    // whose address is the incoming `*p`. It is not passed: its address is
+    // the ghost value of `*p`, which is what the pointer binder is named
+    // after (`var_p__arr`), and its contents get binders like any array's.
+    let mut all_args: Vec<(FnArg, bool)> = decl.args.iter().map(|a| (a.clone(), false)).collect();
+    for a in &decl.args {
+        if let (Some(n), Some(pt)) = (&a.name, cursor_pointee(tds, &a.ty)) {
+            if a.mode != ParamMode::Regular {
+                return Err(format!(
+                    "`_cursor` parameter var_{} is not a plain `T **`",
+                    n.val
+                ));
+            }
+            let id: Rc<IdentT> = Rc::from(format!("{}__arr", n.val).as_str());
+            all_args.push((
+                FnArg {
+                    name: Some(id.with_loc(n.loc.clone())),
+                    ty: pt.clone(),
+                    mode: ParamMode::Regular,
+                },
+                true,
+            ));
+        }
+    }
+    for (i, (arg, cursor_arr)) in all_args.iter().enumerate() {
         let pname = match &arg.name {
             Some(n) => format!("var_{}", n.val),
             None => format!("arg_{}", i),
         };
         let fty = fstar_type(tds, &arg.ty)
             .ok_or_else(|| format!("parameter {} is {}", pname, describe(tds.resolve(&arg.ty))))?;
-        params.push(format!("({}: {})", pname, fty));
+        if !cursor_arr {
+            params.push(format!("({}: {})", pname, fty));
+        }
 
         // A user-supplied ownership predicate is a contract even when the
         // parameter is `_plain` and so has no points-to of its own -- `_plain`
@@ -5545,7 +5661,11 @@ fn emit_fn(
         })?;
         let vty = fstar_type(tds, pt).unwrap();
         let base = pname.trim_start_matches("var_").to_string();
-        let vname = format!("val_{}", base);
+        let vname = if cursor_pointee(tds, &arg.ty).is_some() {
+            format!("var_{}__arr", base)
+        } else {
+            format!("val_{}", base)
+        };
         // A kind of refinement Palow cannot state is not a reason to drop the
         // function -- it is a reason to say its contract is incomplete, which
         // is what the dropped-contract path already does, and which is what
@@ -6321,6 +6441,19 @@ fn emit_fn(
         }
     }
 
+    // A nullable array parameter's contents and length may be named, but only
+    // where the pointer is not null: a clause that mentions its sequence is
+    // stated as `not (is_null p) ==> ...`, the way a refinement of it is, so
+    // on a null path it says nothing about the arbitrary witness.
+    let mut guarded_arrays: Vec<(String, String)> = Vec::new();
+    for (b, entry) in &guarded_pointees {
+        if arrays.contains(b) && !null_outs.contains_key(b) && !pointees.contains_key(b) {
+            pointees.insert(b.clone(), entry.clone());
+            if let Some(p) = null_wrap.get(b) {
+                guarded_arrays.push((format!("val_{}", b), p.clone()));
+            }
+        }
+    }
     // The contract is all-or-nothing: a half-translated one would be silently
     // weaker in a way nothing downstream could detect.
     let spec = Spec {
@@ -6350,10 +6483,20 @@ fn emit_fn(
                 spec.guards.borrow_mut().clear();
                 let p = spec.prop(e, w).map_err(|why| with_loc_tag(why, e))?;
                 let guards = spec.guards.borrow();
-                Ok(if guards.is_empty() {
+                let p = if guards.is_empty() {
                     p
                 } else {
                     format!("{} /\\ {}", guards.join(" /\\ "), p)
+                };
+                let nonnull: Vec<String> = guarded_arrays
+                    .iter()
+                    .filter(|(v, _)| mentions_ident(&p, v))
+                    .map(|(_, ptr)| format!("not (is_null {})", ptr))
+                    .collect();
+                Ok(if nonnull.is_empty() {
+                    p
+                } else {
+                    format!("({} ==> ({}))", nonnull.join(" /\\ "), p)
                 })
             })
             .collect()
@@ -13498,6 +13641,16 @@ pub fn emit_palow(
                     )
                 }) {
                     Err("moves ownership across the call")
+                } else if fndecl
+                    .args
+                    .iter()
+                    .any(|a| cursor_pointee(&tds, &a.ty).is_some())
+                {
+                    // The callee owns the array `*p` points at under a name
+                    // of its own; the caller would have to lend it the array
+                    // its pointer walks and take back a pointer into it,
+                    // which its slot bookkeeping does not model yet.
+                    Err("takes a `_cursor` parameter, which callers cannot pass yet")
                 } else if fndecl.args.iter().any(|a| refined(&tds, &a.ty)) && !sig.contract {
                     // A `_refine` on a parameter is part of the contract on
                     // both sides of the call. When the contract translated it
@@ -17544,6 +17697,25 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// Whether an arm writes an element through a walked pointer. What the
+    /// arm leaves is then the array updated at the pointer's position, and
+    /// that term is only well typed where the arm's facts about the
+    /// position are known -- not at a join Pulse computes after the `if`.
+    fn writes_walked(&self, body: &Stmts) -> bool {
+        body.iter().any(|s| match &s.val {
+            StmtT::Assign(l, _) => match &strip_vattr(l).val {
+                ExprT::Deref(x) | ExprT::Index(x, _) => self.walk_root(x).is_some(),
+                _ => false,
+            },
+            StmtT::If {
+                then_branch,
+                else_branch,
+                ..
+            } => self.writes_walked(then_branch) || self.writes_walked(else_branch),
+            _ => false,
+        })
+    }
+
     /// The walked pointer a pointer expression steps from, when it is one
     /// moved by `++`/`--` or offset by an integer: `*p++` and `*(p + 1)`
     /// are accesses through `p`'s array as much as `*p` is.
@@ -19702,9 +19874,32 @@ impl<'a> Body<'a> {
         let r = self.cond_arm(e);
         self.unguarded.pop();
         let (mut lines, v) = r?;
-        lines.insert(0, format!("elim_unless_null var_{} ({});", p, payload));
+        lines.splice(0..0, self.open_guard(&p, &payload));
         lines.push(format!("intro_unless_null var_{} ({});", p, payload));
         Ok((lines, v))
+    }
+
+    /// The lines that open a `_nullable` parameter's guard on its live
+    /// side. An array behind the guard gets there the layout facts an
+    /// unconditionally owned one has from the start, which is what lets a
+    /// pointer walked through it be in bounds.
+    fn open_guard(&self, p: &str, payload: &str) -> Vec<String> {
+        let mut out = vec![format!("elim_unless_null var_{} ({});", p, payload)];
+        if let Some(a) = self.arrays.get(p) {
+            let esize = a.esize.trim_end_matches("sz");
+            let repr = if a.maybe {
+                format!("(maybe_repr {}_repr {})", a.pn, esize)
+            } else {
+                format!("{}_repr", a.pn)
+            };
+            for f in ["array_fits", "array_walk_base"] {
+                out.push(format!(
+                    "{} {} {} {} {}_alignof;",
+                    f, repr, a.addr, a.esize, a.pn
+                ));
+            }
+        }
+        out
     }
 
     /// Translate one arm of a conditional expression into its own lines.
@@ -19830,6 +20025,12 @@ impl<'a> Body<'a> {
                     let t = self.fresh(&v.val);
                     self.lines.push(format!("let {} = {}_read {};", t, pn, a));
                     Ok(t)
+                } else if self.is_array_alias(&v.val) {
+                    // A second name for an array has no storage of its own:
+                    // its value is the array's.
+                    let target: Rc<IdentT> = Rc::from(self.array_alias(&v.val).as_str());
+                    let target = ExprT::Var(target.with_loc(e.loc.clone())).with_loc(e.loc.clone());
+                    self.rvalue(&target)
                 } else if self.env.lookup_var(v).is_some() {
                     Ok(format!("var_{}", v.val))
                 } else if let Some(value) = self.global_value(v) {
@@ -22530,6 +22731,32 @@ impl<'a> Body<'a> {
     /// the guard is closed again (see `unguarded`). The null arm has `emp`
     /// behind the guard, including when an output's payload changes.
     fn param_null_test(&self, cond: &Expr) -> Option<(String, bool)> {
+        let (v, null_when_true) = Self::null_tested(cond)?;
+        // A local that is another name for the array tests the array.
+        let name = self.array_alias(&v);
+        // A pointer read out of a `_cursor` parameter tests the array the
+        // contract owns behind it; that it is that array's base is checked
+        // where the test is emitted (`param_null_cond`).
+        if !self.params.contains(&*name)
+            && let Some(Ok(o)) = self.walk_owner(&name)
+            && !self.params.contains(&o)
+            && self.null_payload.contains_key(&o)
+            && !self.unguarded.contains(&o)
+        {
+            return Some((o, null_when_true));
+        }
+        if !self.params.contains(&*name)
+            || !self.null_payload.contains_key(&name)
+            || self.unguarded.contains(&name)
+        {
+            return None;
+        }
+        Some((name, null_when_true))
+    }
+
+    /// The variable a null test tests, and whether the test is true when
+    /// it is null.
+    fn null_tested(cond: &Expr) -> Option<(String, bool)> {
         fn peel(e: &Expr) -> &Expr {
             match &strip_vattr(e).val {
                 ExprT::Cast(inner, _) => peel(inner),
@@ -22550,17 +22777,23 @@ impl<'a> Body<'a> {
         let ExprT::Var(v) = &var.val else {
             return None;
         };
-        let name = v.val.to_string();
-        if !self.params.contains(&*name)
-            || !self.null_payload.contains_key(&name)
-            || self.unguarded.contains(&name)
-        {
-            return None;
-        }
-        Some((name, null_when_true))
+        Some((v.val.to_string(), null_when_true))
     }
 
     fn param_null_cond(&mut self, cond: &Expr, p: &str, when: bool) -> Result<String, String> {
+        // A `_cursor`'s array has no address the code can test: it is the
+        // ghost value of `*p`. The pointer the source tests is, and it has
+        // to be that address for the guard to be the one it opens.
+        if !self.params.contains(p)
+            && let Some((v, _)) = Self::null_tested(cond)
+        {
+            let name: Rc<IdentT> = Rc::from(v.as_str());
+            let e = ExprT::Var(name.with_loc(cond.loc.clone())).with_loc(cond.loc.clone());
+            let current = self.rvalue(&e)?;
+            self.lines
+                .push(format!("assert (pure ({} == reveal var_{}));", current, p));
+            return Ok(Self::null_cond(&current, when));
+        }
         let name: Rc<IdentT> = Rc::from(p);
         let e = ExprT::Var(name.with_loc(cond.loc.clone())).with_loc(cond.loc.clone());
         // An addressable parameter may have changed. Use its incoming address
@@ -25020,8 +25253,7 @@ impl<'a> Body<'a> {
                     } else {
                         (&mut els, &mut then)
                     };
-                    live.lines
-                        .insert(0, format!("elim_unless_null var_{} ({});", p, payload));
+                    live.lines.splice(0..0, self.open_guard(p, &payload));
                     if !live.returned && !live.diverged {
                         let payload = self.nullable_payload(p, &live.out_params);
                         live.lines
@@ -25333,7 +25565,10 @@ impl<'a> Body<'a> {
                 } if may_exit(then_branch)
                     || may_exit(else_branch)
                     || (ensures.is_empty()
-                        && (has_loop(then_branch) || has_loop(else_branch))
+                        && (has_loop(then_branch)
+                            || has_loop(else_branch)
+                            || self.writes_walked(then_branch)
+                            || self.writes_walked(else_branch))
                         && copyable_tail(then_branch, else_branch, &stmts[i + 1..])) =>
                 {
                     self.active.clear();
@@ -25412,14 +25647,7 @@ impl<'a> Body<'a> {
                     let close = |b: &mut Self, live: bool, lines: &mut Vec<String>| {
                         if let Some((p, _)) = pt.as_ref().filter(|_| live) {
                             b.unguarded.pop();
-                            lines.insert(
-                                0,
-                                format!(
-                                    "elim_unless_null var_{} ({});",
-                                    p,
-                                    pt_payload.as_ref().unwrap()
-                                ),
-                            );
+                            lines.splice(0..0, b.open_guard(p, pt_payload.as_ref().unwrap()));
                         } else if !live {
                             lines.splice(0..0, pt_null_lines.iter().cloned());
                         }
@@ -27219,6 +27447,16 @@ fn returned_arg(env: &Env, g: &Ident) -> Option<usize> {
 /// `0` when `cur` is the array's base. The plain `0` keeps an index through
 /// the base the same term as a contract's (`Seq.index s k`, not
 /// `Seq.index s (walk_idx e a a + k)`), which quantifier triggers need.
+/// Whether `t` names the identifier `id`, or a primed version of it, as a
+/// whole word rather than as part of a longer name.
+fn mentions_ident(t: &str, id: &str) -> bool {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    t.match_indices(id).any(|(i, _)| {
+        !t[..i].chars().next_back().is_some_and(word)
+            && !t[i + id.len()..].chars().next().is_some_and(word)
+    })
+}
+
 fn walk_pos(esize: &str, addr: &str, cur: &str) -> String {
     if cur == addr {
         "0".to_string()
@@ -27341,6 +27579,17 @@ fn walk_map(
     ) -> Option<(Vec<String>, bool)> {
         match &strip_vattr(e).val {
             ExprT::Var(v) => Some((vec![v.val.to_string()], false)),
+            // `*p` of a `_cursor` parameter is the base of the array the
+            // contract owns as `p__arr`. Of anything else it is a name that
+            // is not an array, which makes it unknown below.
+            ExprT::Deref(x) => match &strip_vattr(x).val {
+                ExprT::Var(v) => Some((vec![format!("{}__arr", v.val)], false)),
+                _ => None,
+            },
+            // A null pointer points into no array, and adds none: an access
+            // through the pointer still has to prove it is in one
+            // (`walk_ok`), which a null pointer never is.
+            ExprT::IntLit(n, _) if **n == BigInt::ZERO => Some((vec![], false)),
             ExprT::Cast(x, _) => sources(x, returned),
             ExprT::BinOp(BinOp::Add, l, r) => sources(l, returned)
                 .filter(|_| !matches!(strip_vattr(l).val, ExprT::IntLit(..)))
@@ -28295,6 +28544,41 @@ fn emit_body(
                 known_len: false,
             },
         );
+    }
+    // The array a `_cursor` parameter points at is an array parameter in all
+    // but name (see `emit_fn`): `p__arr`, at the incoming `*p`, behind its
+    // nullness guard. A pointer read out of `*p` is walked through it.
+    if sig.contract {
+        for a in &defn.decl.args {
+            let (Some(name), Some(pt)) = (a.name.as_ref(), cursor_pointee(tds, &a.ty)) else {
+                continue;
+            };
+            let base = format!("{}__arr", name.val);
+            if !sig.null_payload.contains_key(&base) {
+                continue;
+            }
+            let Some(et) = pointee(tds, peel(tds, pt)) else {
+                continue;
+            };
+            let (Some(pn), Some(esize), Some(fty)) = (
+                palow_name(tds, et),
+                palow_sizeof(tds, et),
+                fstar_type(tds, et),
+            ) else {
+                continue;
+            };
+            arrays.insert(
+                base.clone(),
+                ArrayParam {
+                    pn,
+                    fty,
+                    esize: format!("{}sz", esize),
+                    addr: format!("var_{}", base),
+                    maybe: false,
+                    known_len: false,
+                },
+            );
+        }
     }
 
     let walks = walk_map(&defn.body, &arrays.keys().cloned().collect(), &|g| {
