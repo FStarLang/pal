@@ -1645,7 +1645,7 @@ pub struct PalowModule {
 /// contract is assumed` is a declaration with no body in the first place, and
 /// `is not an F* definition` is a `_let` the model passes through; neither
 /// weakens anything.
-pub fn weakenings(module: &PalowModule) -> Vec<String> {
+pub fn weakenings(module: &PalowModule) -> Vec<(String, Option<Location>)> {
     let mut out = Vec::new();
     for line in module.code.lines() {
         let t = line.trim_start();
@@ -1667,14 +1667,85 @@ pub fn weakenings(module: &PalowModule) -> Vec<String> {
         } else {
             continue;
         };
-        out.push(
-            said.trim_end()
-                .trim_end_matches("*)")
-                .trim_end()
-                .to_string(),
-        );
+        let said = said.trim_end().trim_end_matches("*)").trim_end();
+        out.push(split_loc_tag(said));
     }
     out
+}
+
+/// The marker a contract error carries to say where in the source the
+/// offending clause is: the diagnostic for a dropped contract is otherwise
+/// reported at the function, which may be far from the prototype that holds
+/// the contract.
+const LOC_TAG: &str = " @at ";
+
+fn loc_tag(e: &Expr) -> String {
+    let l = e.loc.location();
+    format!(
+        "{}{}:{}:{}:{}:{}",
+        LOC_TAG,
+        l.range.start.line,
+        l.range.start.character,
+        l.range.end.line,
+        l.range.end.character,
+        l.file_name
+    )
+}
+
+/// `why`, tagged with where `e` is unless something inside already tagged it.
+fn with_loc_tag(why: String, e: &Expr) -> String {
+    if why.contains(LOC_TAG) {
+        why
+    } else {
+        format!("{}{}", why, loc_tag(e))
+    }
+}
+
+/// The offending expression as the source has it, after an error message
+/// that would otherwise only say what kind of expression it is.
+fn shown_at(e: &Expr) -> String {
+    // The reason ends up in an F* comment, which `(*` would reopen and `*)`
+    // would close.
+    let text = e
+        .val
+        .to_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("(*", "( *")
+        .replace("*)", "* )");
+    format!(": `{}`{}", text, loc_tag(e))
+}
+
+fn split_loc_tag(said: &str) -> (String, Option<Location>) {
+    let Some((msg, tag)) = said.rsplit_once(LOC_TAG) else {
+        return (said.to_string(), None);
+    };
+    let mut parts = tag.splitn(5, ':');
+    let mut num = || parts.next().and_then(|n| n.parse::<u32>().ok());
+    let (Some(sl), Some(sc), Some(el), Some(ec)) = (num(), num(), num(), num()) else {
+        return (said.to_string(), None);
+    };
+    let Some(file) = parts.next() else {
+        return (said.to_string(), None);
+    };
+    let range = Range {
+        start: Position {
+            line: sl,
+            character: sc,
+        },
+        end: Position {
+            line: el,
+            character: ec,
+        },
+    };
+    (
+        msg.to_string(),
+        Some(Location {
+            file_name: file.into(),
+            range,
+        }),
+    )
 }
 
 /// The C declaration a generated module stands for.
@@ -2334,6 +2405,8 @@ struct RetBlock {
     /// pointer left as `PTR_HOLE`. The caller names it to get past its own
     /// nullness test; a non-nullable return has nothing to get past.
     guarded: Option<String>,
+    /// Whether the block is an array (`_allocated _nullable _array T *`).
+    array: bool,
 }
 
 /// The Palow type name of what an `_allocated` return type points at, when the
@@ -3216,7 +3289,7 @@ impl<'a> Spec<'a> {
                 if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
                     Ok(format!("({} == true)", self.value(e, w)?))
                 } else {
-                    Err(format!("{} in a contract", contract_expr(e)))
+                    Err(format!("{} in a contract{}", expr_kind(e), shown_at(e)))
                 }
             }
         }
@@ -3533,6 +3606,30 @@ impl<'a> Spec<'a> {
         Ok((pl, pr))
     }
 
+    /// The element type of array `owner` and the pointee type of `p`, when
+    /// `p` views the array at the other signedness of the same width.
+    fn sign_view_of(&self, p: &Expr, owner: &str) -> Option<(Type, Type)> {
+        let ot = self.env.local_type(owner)?;
+        let oel = pointee(self.tds, peel(self.tds, &ot))?.clone();
+        let pt = self.ty_of(p).ok()?;
+        let pel = pointee(self.tds, peel(self.tds, &pt))?.clone();
+        match (&self.tds.resolve(&oel).val, &self.tds.resolve(&pel).val) {
+            (
+                TypeT::Int {
+                    width: a,
+                    signed: x,
+                },
+                TypeT::Int {
+                    width: b,
+                    signed: y,
+                },
+            ) if a == b && x != y => {
+                Some((peel(self.tds, &oel).clone(), peel(self.tds, &pel).clone()))
+            }
+            _ => None,
+        }
+    }
+
     fn pointee_at(&self, base: &Expr, idx: Option<&Expr>, w: When) -> Result<String, String> {
         self.pointee_at_in(base, idx, w, w)
     }
@@ -3606,7 +3703,14 @@ impl<'a> Spec<'a> {
             } else {
                 format!("0 <= {} /\\ {} < Seq.length {}", i, i, term)
             });
-            return Ok(format!("(Seq.index {} {})", term, i));
+            let cell = format!("(Seq.index {} {})", term, i);
+            // A pointer viewing the array at the other signedness of its
+            // element type (`const unsigned char *l = (const void *)l0;`)
+            // reads the same byte at its own type, as the body's read does.
+            if let Some((oel, pel)) = self.sign_view_of(base, &owner) {
+                return convert(&oel, &pel, &cell, self.tds.ptr_bytes).map(|c| format!("({})", c));
+            }
+            return Ok(cell);
         }
         let Some((pre, post)) = self.pointees.get(&*v.val) else {
             return Err(format!("`*{}` in a contract", v.val));
@@ -4357,8 +4461,8 @@ impl<'a> Spec<'a> {
     }
 
     fn value(&self, e: &Expr, w: When) -> Result<String, String> {
-        // `p._length` is a `_specint`, so its value is the number itself,
-        // wherever it appears: `p._length - k` as much as `(_specint) p._length`.
+        // `_length` is a `_specint`, so it may be an operand of specification
+        // arithmetic (`s._length - k`) as well as of a comparison.
         if let Some(l) = self.length_of(e, w) {
             return l;
         }
@@ -4950,7 +5054,7 @@ impl<'a> Spec<'a> {
                 }
                 Ok(format!("({{ {} }})", record_fields(vals, false)))
             }
-            _ => Err(format!("{} in a contract", contract_expr(e))),
+            _ => Err(format!("{} in a contract{}", expr_kind(e), shown_at(e))),
         }
     }
 }
@@ -6072,6 +6176,8 @@ fn emit_fn(
     // keep.
     let mut ret_guard: Option<(String, String, Vec<String>)> = None;
     let mut ret_block: Option<RetBlock> = None;
+    // Whether that block is an array, which a caller cannot take over yet.
+    let mut ret_array = false;
     // Ownership the author wrote on the return type in their own Pulse, which
     // `_allocated` is only the commonest case of. A constructor that hands back
     // a validated object says so with a `_refine` or a `_refine_value` on the
@@ -6131,6 +6237,7 @@ fn emit_fn(
                 pn: String::new(),
                 raw: true,
                 guarded: None,
+                array: false,
             });
         } else if let Some(freeable) = alloc {
             let pt = pointee(tds, &decl.ret_type).unwrap();
@@ -6175,6 +6282,33 @@ fn emit_fn(
                     );
                     ret_guard = Some((pn, binders, inner));
                 }
+                // An array the callee allocated: what the caller gets is the
+                // sequence the block holds and the right to free it, and the
+                // size the right is for is the sequence's, since nothing else
+                // records how many elements the allocation asked for. Only
+                // `_nullable`: the allocators that hand back arrays are
+                // `malloc`'s, and `malloc` may fail.
+                (Some(pn), Some(vty), Some(Extent::Array))
+                    if is_nullable(tds, &decl.ret_type) && palow_sizeof(tds, pt).is_some() =>
+                {
+                    let esize = palow_sizeof(tds, pt).unwrap();
+                    let binders = format!("(val_return: Seq.seq {}) (n_return: SizeT.t)", vty);
+                    let inner = vec![
+                        format!(
+                            "array_pts_to {pn}_repr {esize} (SizeT.v {pn}_alignof) {PTR_HOLE} \
+                             1.0R val_return"
+                        ),
+                        format!("freeable {} n_return", PTR_HOLE),
+                        format!(
+                            "pure (SizeT.v n_return == {} * Seq.length val_return)",
+                            esize
+                        ),
+                    ];
+                    pointees.insert("return".to_string(), (None, Some("val_return".to_string())));
+                    arrays.insert("return".to_string());
+                    ret_array = true;
+                    ret_guard = Some((pn, binders, inner));
+                }
                 (Some(pn), Some(vty), Some(Extent::One)) => {
                     fresh.push((
                         "val_return".to_string(),
@@ -6205,6 +6339,7 @@ fn emit_fn(
                         pn,
                         raw: false,
                         guarded: None,
+                        array: false,
                     });
                     refines_struct.extend(
                         struct_refines(pt)
@@ -6259,7 +6394,7 @@ fn emit_fn(
         es.iter()
             .map(|e| {
                 spec.guards.borrow_mut().clear();
-                let p = spec.prop(e, w)?;
+                let p = spec.prop(e, w).map_err(|why| with_loc_tag(why, e))?;
                 let guards = spec.guards.borrow();
                 Ok(if guards.is_empty() {
                     p
@@ -7122,6 +7257,7 @@ fn emit_fn(
                 pn,
                 raw: false,
                 guarded: Some(guard),
+                array: ret_array,
             });
         }
     }
@@ -7254,6 +7390,7 @@ fn emit_fn(
             pn: String::new(),
             raw: true,
             guarded: None,
+            array: false,
         });
     }
 
@@ -14791,6 +14928,13 @@ struct Body<'a> {
     post_valid: &'a HashSet<String>,
     /// Whether the return's ownership is spliced; see `FnSurface`.
     ret_spliced: bool,
+    /// Whether the function hands its caller an `_allocated _nullable
+    /// _array` block, which leaves in the initialised view.
+    ret_array: bool,
+    /// Set by `call` when the call was a `memcpy` into a heap block, whose
+    /// value is the destination pointer itself: binding it to a fresh name
+    /// would hide from Pulse that a `return memcpy(d, ...)` returns `d`.
+    copied_call: bool,
     /// The labels in scope, innermost last, each with the statements that run
     /// when control reaches it. A `goto` is translated by translating its
     /// label's continuation there and then: Pulse has no jump, and every path
@@ -20729,7 +20873,12 @@ impl<'a> Body<'a> {
                 let outer_close = std::mem::take(&mut self.pending_close);
                 let outer_own = std::mem::take(&mut self.own_open);
                 let call = self.call(name, args)?;
-                self.lines.push(format!("let {} = {};", t, call));
+                let t = if std::mem::take(&mut self.copied_call) {
+                    call
+                } else {
+                    self.lines.push(format!("let {} = {};", t, call));
+                    t
+                };
                 if self
                     .callees
                     .get(&*name.val.to_string())
@@ -21007,6 +21156,59 @@ impl<'a> Body<'a> {
 
     /// The F* application for a call to an already-emitted function. Every
     /// argument is translated first, since translating one may emit reads.
+    /// `memcpy(d, s, n)` into a heap array that has not been filled yet --
+    /// `d = malloc(n); memcpy(d, s, n);`, the body of every `strdup`. A
+    /// callee's `_array` parameter wants an initialised array, which fresh
+    /// storage is not, so the call cannot go through `memcpy`'s contract.
+    /// `memcpy` is a reserved name whose meaning C fixes, as `malloc`'s is,
+    /// and that meaning is a byte copy: `array_copy_maybe` performs it with
+    /// the machine `memcpy` and leaves the copied cells holding the source's
+    /// values. Only byte-sized elements of the same type, so that the byte
+    /// count is the element count; anything else takes the ordinary path.
+    fn copy_into_block(&mut self, name: &Ident, args: &Exprs) -> Result<Option<String>, String> {
+        if *name.val != *"memcpy" || args.len() != 3 {
+            return Ok(None);
+        }
+        let ExprT::Var(d) = &strip_casts(&args[0]).val else {
+            return Ok(None);
+        };
+        let d = self.array_alias(&d.val.to_string());
+        if !self.blocks.iter().any(|b| {
+            b.var == d && b.checked && !b.freed && b.array.as_ref().is_some_and(|a| !a.filled)
+        }) {
+            return Ok(None);
+        }
+        let dst = self.array_place(strip_casts(&args[0]))?;
+        let src = self.array_place(strip_casts(&args[1]))?;
+        if dst.esize != "1sz"
+            || src.esize != "1sz"
+            || dst.pn != src.pn
+            || src.maybe
+            || dst.walk.is_some()
+            || src.walk.is_some()
+            || dst.base != 0
+            || src.base != 0
+            || !dst.close_read.is_empty()
+            || !src.close_read.is_empty()
+        {
+            return Err(
+                "a `memcpy` into an unfilled heap array from anything but an array of the \
+                 same byte-sized type"
+                    .to_string(),
+            );
+        }
+        let n = self.rvalue(&args[2])?;
+        self.lines.push(format!(
+            "array_copy_maybe {pn}_repr {} {} 1sz {pn}_alignof ({n}) ({n});",
+            dst.addr,
+            src.addr,
+            pn = dst.pn,
+            n = n
+        ));
+        self.copied_call = true;
+        Ok(Some(dst.addr))
+    }
+
     fn call(&mut self, name: &Ident, args: &Exprs) -> Result<String, String> {
         let c = self
             .callees
@@ -21016,6 +21218,9 @@ impl<'a> Body<'a> {
             && self.self_rec.as_deref() != Some(&*name.val.to_string())
         {
             return Err(format!("`{}`, which is recursive", name.val));
+        }
+        if let Some(v) = self.copy_into_block(name, args)? {
+            return Ok(v);
         }
         self.uses.insert(name.val.to_string());
         // Divergence is contagious: calling a function that may not terminate
@@ -22235,6 +22440,13 @@ impl<'a> Body<'a> {
         let Some(rb) = self.allocating_call(init) else {
             return Ok(());
         };
+        if rb.array {
+            return Err(
+                "a call returning an `_allocated` array, which a caller cannot take \
+                        over yet"
+                    .to_string(),
+            );
+        }
         if self.in_branch && !self.tail_branch {
             return Err("a call returning a block inside a branch".to_string());
         }
@@ -23569,11 +23781,26 @@ impl<'a> Body<'a> {
             .map(|n| (n.clone(), format!("var_{}", n)))
             .collect();
         let mut arrays: HashSet<String> = self.arrays.keys().cloned().collect();
+        let mut maybes: HashSet<String> = HashSet::new();
         for s in &self.slots {
             if s.global && s.array.is_some() {
                 let b = format!("inv_{}", s.name);
                 pointees.insert(s.name.clone(), (Some(b.clone()), Some(b)));
                 arrays.insert(s.name.clone());
+            } else if s.array.is_some()
+                && let Some(b) = locals.get(&s.name)
+            {
+                // A local array is its contents, as an array parameter is:
+                // `bs[i]` in an invariant reads the sequence the frame
+                // binds for the array's current value.
+                // One declared without an initializer is held in the
+                // `option` view until it is handed off whole, and a clause
+                // reading a cell of it claims the cell was written.
+                pointees.insert(s.name.clone(), (Some(b.clone()), Some(b.clone())));
+                arrays.insert(s.name.clone());
+                if s.array.as_ref().is_some_and(|a| a.1) {
+                    maybes.insert(s.name.clone());
+                }
             }
         }
         for o in self.owned {
@@ -23646,7 +23873,6 @@ impl<'a> Body<'a> {
         // binds is the `option` view: a cell the loop has not written yet
         // holds `None`, and a clause that reads a cell claims it is written.
         // The length is the caller's, and does not change.
-        let mut maybes: HashSet<String> = HashSet::new();
         let mut out_arrays: Vec<(String, ArrayParam)> = self
             .arrays
             .iter()
@@ -24924,6 +25150,9 @@ impl<'a> Body<'a> {
                     let void = callee.is_some_and(|c| c.void);
                     let noreturn = callee.is_some_and(|c| c.noreturn);
                     let call = self.call(name, args)?;
+                    if std::mem::take(&mut self.copied_call) {
+                        return Ok(());
+                    }
                     if void {
                         self.lines.push(format!("{};", call));
                     } else {
@@ -25384,6 +25613,14 @@ impl<'a> Body<'a> {
                 self.lines.extend(else_pre.iter().map(|l| indent(l)));
                 self.lines.extend(els.lines.iter().map(|l| indent(l)));
                 self.lines.push("};".to_string());
+                // Pulse refuses an annotated `if` in tail position under an
+                // expected postcondition -- the end of an enclosing annotated
+                // `if`'s arm, or of a loop body -- as two postconditions for
+                // one statement. A unit after it is the tail instead, checked
+                // against the outer expectation from the `if`'s own.
+                if pure_join || states_own {
+                    self.lines.push("();".to_string());
+                }
                 for (addr, key) in fps {
                     self.seeded
                         .push((addr, "_".to_string(), "_".to_string(), key));
@@ -26016,6 +26253,24 @@ impl<'a> Body<'a> {
                         a.pn, a.addr, a.esize, a.pn
                     )
                 });
+            }
+        }
+        // A heap array handed back to the caller leaves as a value, like an
+        // `_out` array: `array_somes` asks that every cell was written.
+        if mark == 0 && self.ret_array {
+            for b in &self.blocks {
+                if let Some(a) = &b.array
+                    && b.checked
+                    && !b.freed
+                    && !a.filled
+                {
+                    self.lines.push(format!(
+                        "array_somes {pn}_repr {} {} {pn}_alignof;",
+                        b.tmp,
+                        a.esize,
+                        pn = b.pn
+                    ));
+                }
             }
         }
         for i in (mark..self.slots.len()).rev() {
@@ -28505,6 +28760,8 @@ fn emit_body(
         witness_results: HashSet::new(),
         post_valid: &sig.post_valid,
         ret_spliced: sig.ret_spliced,
+        ret_array: sig.ret_block.as_ref().is_some_and(|r| r.array),
+        copied_call: false,
         gotos: Vec::new(),
         in_loop: false,
         pending_close: Vec::new(),
@@ -29304,27 +29561,6 @@ fn stmt_kind(s: &Stmt) -> &'static str {
         StmtT::DeclStackArray { .. } => "a stack array",
         StmtT::Error => "an ill-formed statement",
         StmtT::Decl(..) | StmtT::Let(..) | StmtT::Assign(..) => "this statement",
-    }
-}
-
-/// What a contract could not translate, said so the author can find it: the
-/// expression itself and where it is, when its kind alone says nothing.
-fn contract_expr(e: &Expr) -> String {
-    match expr_kind(e) {
-        "this expression" => {
-            // The reason ends up in an F* comment, which `(*` would reopen.
-            let text = e
-                .val
-                .to_string()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .replace("(*", "( *")
-                .replace("*)", "* )");
-            let line = e.loc.location().range.start.line;
-            format!("`{}` (line {})", text, line)
-        }
-        k => k.to_string(),
     }
 }
 

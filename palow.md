@@ -7525,3 +7525,62 @@ Limitations:
     through the same path as `_assert` (`stmt_assertion`), falling back to
     reading the clause as a contract over the current frame
     (`test/label_array_ensures`, modelled on musl's `strlcpy`).
+76. **`_length` in contract arithmetic; dropped clauses say where.**
+    `1 <= s._length - k` was dropped as "this expression in a contract"
+    (issue #449): `_length` is a `_specint`, and specification arithmetic
+    translates its operands with `value`, which only knew `_length` under a
+    `(_specint)` cast. `value` now reads `_length` itself, so the
+    difference is the mathematical one (`test/spec_length_sub`,
+    `test/spec_length_sub_bad`). The diagnostic for a dropped contract was
+    reported at the function definition and named only the kind of
+    expression. A clause's error now carries the location of the clause, or
+    of the offending subexpression where one is known, and the expression's
+    text; `weakenings` reads that location back so the error points into the
+    prototype (`test/spec_dropped_at`).
+77. **Local arrays in contracts.** `bs[0]` for a local array
+    `size_t bs[4]` in an `_invariant`, `_assert` or `if`/label `_ensures`
+    was "`*bs` in a contract": the frame bound the array's contents
+    (`inv_bs`) as a local value, but only global arrays were registered as
+    pointees. `frame()` now registers a local array as a pointee bound to
+    that sequence, so `bs[i]` is `Seq.index inv_bs i` under the usual index
+    guard. An array declared without an initializer is held in the
+    `option` view until it is handed off whole, and is entered in `maybes`:
+    reading a cell is `Some?.v` and claims `Some?`, as for an `_out` array
+    being filled (`test/local_array_spec`, `test/local_array_spec_bad`;
+    musl's `strspn`/`strcspn` byte sets).
+78. **An annotated `if` at the end of an annotated block.** An `if` with
+    `_ensures` that ended an arm of another annotated `if`, or a loop
+    body, was in tail position under an expected postcondition, and Pulse
+    refused it as "Multiple annotated postconditions" (musl's `strlcpy`,
+    where the outer `if` precedes the byte loop). Every annotated `if` is
+    now followed by `();`, which takes the tail position and is checked
+    against the outer expectation from the inner `if`'s postcondition
+    (`test/if_ensures_tail`).
+79. **Sign views in invariants.** A subscript of a local viewing a `char`
+    array as `unsigned char` (`l[i]` with `const unsigned char *l =
+    (const void *)l0`) in an `_invariant` or `_assert` was `Seq.index` of
+    the `char` sequence used at `UInt8`, which does not typecheck (musl's
+    `strverscmp`). The contract read now converts the cell to the view's
+    type, the conversion the body's read makes (`test/sign_view_spec`,
+    `test/sign_view_spec_bad`).
+80. **Current contents of a walked parameter, from its entry position.**
+    No new mechanism: a `_specint` subscript of a walked pointer is
+    already read at `pos + k` with `0 <= pos + k` as its well-formedness,
+    so `d[k - (d - _old(d))]` is the current element `k` of the array
+    `d` was walked through, and musl's `__stpcpy` byte loop states what it
+    has copied with it (`test/array_walk_relative`).
+81. **Fresh heap arrays as return values.** `_allocated _nullable _array
+    T *` on a return was rejected; the contract now returns
+    `unless_null ret (exists* val_return n_return. array_pts_to ...
+    val_return ** freeable ret n_return ** pure (n_return == esize *
+    len val_return))`, with `return[k]` / `return._length` read off
+    `val_return` under the guard. In the body a `char`-sized `malloc(n)`
+    is an `n`-element array block (as `malloc(n * sizeof(T))` already
+    was), and `memcpy(d, s, n)` into such an unfilled block is the byte
+    copy `array_copy_maybe` (machine `memcpy` between the `option` view of
+    `d` and the source's representation), whose value is `d` itself,
+    unbound, so `return memcpy(d, ...)` hands back the block. At the
+    return `array_somes` moves the block to the plain view, which needs
+    every cell written (musl's `strdup`/`strndup`; `test/alloc_array_return`,
+    `test/alloc_array_return_bad`). Callers cannot take over a returned
+    array yet, and `wmemcpy` into a block (`wcsdup`) is not handled.
