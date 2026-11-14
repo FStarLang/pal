@@ -303,6 +303,7 @@ impl<'a> Ctx<'a> {
                 name: builder.name,
                 fields: builder.fields,
                 overlay: builder.overlay,
+                owning: builder.owning,
             }),
         })
     }
@@ -579,6 +580,7 @@ struct DeclBuilder {
     decreases: Option<Rc<Expr>>,
     eager_unfold_pred: bool,
     overlay: bool,
+    owning: Vec<Rc<Ident>>,
 }
 
 impl DeclBuilder {
@@ -600,6 +602,7 @@ impl DeclBuilder {
             decreases: None,
             eager_unfold_pred: false,
             overlay: false,
+            owning: vec![],
         }
     }
 
@@ -677,6 +680,9 @@ impl DeclBuilder {
     }
     fn set_overlay(&mut self) {
         self.overlay = true;
+    }
+    fn set_owning(&mut self, field: Rc<Ident>) {
+        self.owning.push(field);
     }
     fn decreases(&mut self, p: Rc<Expr>) {
         self.decreases = Some(p);

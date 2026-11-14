@@ -532,6 +532,9 @@ pub struct UnionDefn {
     /// `_overlay`: the members are views of one object rather than
     /// alternatives, and the value is the object's bytes. See palow.md.
     pub overlay: bool,
+    /// The `_owning` members of an `_overlay` union: the views whose pointer
+    /// fields own what they point at. See palow.md.
+    pub owning: Vec<Rc<Ident>>,
 }
 
 impl UnionDefn {

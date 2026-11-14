@@ -1,0 +1,4 @@
+# Expected translation diagnostic substrings
+`_owning` is only for a member of an `_overlay` union
+more than one member is `_owning`
+`_owning` member `raw` is not a struct
