@@ -315,7 +315,14 @@ When a function won't verify, **localize before you theorize**:
    `pts_to`, an existential keyed on the wrong name, or a quantified
    invariant with a bad trigger. Only after ruling those out, raise the budget —
    prefer a *target-specific* `--z3rlimit_factor` over a global bump, and
-   keep it as low as still passes.
+   keep it as low as still passes. Note that `--z3rlimit` does not bound
+   wall time: a matching loop can run for hours while using only a few rlimit
+   units. Pass `Z3_TIMEOUT_MS=<ms>` to `make` (handled by `test/verify.mk`,
+   which adds `--z3cliopt timeout=<ms>`) to cancel any single Z3 query after
+   that long; F* then reports an ordinary Error 19 ("The SMT query timed
+   out") and continues with the rest of the module. The bound is per
+   check-sat (fuel retries multiply it) and depends on machine load, so use
+   it as a safety net, not as a proof budget.
 6. **Flaky (passes sometimes)?** The proof is unstable — usually an
    under-constrained quantifier or a fragile trigger. Measure with `--quake 5`
    (or `--retry`), then stabilize: name intermediate facts with `assert pure
