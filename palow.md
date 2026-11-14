@@ -7690,7 +7690,7 @@ Limitations:
     position counts the array's elements, so it would have been a byte
     count where C means words (`test/ptr_word_step`,
     `test/ptr_word_step_bad`, `test/ptr_word_diff_diag`).
-86. **A flexible struct as a union member, and wide struct views.** A struct
+88. **A flexible struct as a union member, and wide struct views.** A struct
     ending in a flexible array member was not a union member: it has no
     size, and an arm needs one. In a union, the tail takes the room the
     union leaves it -- `(sizeof(union) - offsetof(tail)) / sizeof(elem)`
