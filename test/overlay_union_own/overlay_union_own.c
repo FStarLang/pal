@@ -20,10 +20,17 @@ struct params {
     struct pair last;
 };
 
+/* A union of pointers, as BOSS's perf-event slot is. */
+union ev {
+    struct pair *pair;
+    uint64_t raw;
+};
+
 struct header {
     uint64_t opaque;
     uint32_t status;
     uint32_t flags;
+    union ev ev;
 };
 
 /* The other members' layer sees the whole object as an overlay union of its
@@ -54,6 +61,22 @@ uint32_t flags_then_count(union req *r, uint32_t f)
     r->header.flags = f;
     r->header.status = 0;
     r->params.seq = 7;
+    return r->params.ctx->count;
+}
+
+/* A whole union in another member is stored as bytes, like a scalar. */
+uint32_t clear_ev_then_count(union req *r)
+{
+    union ev e = {0};
+    r->header.ev = e;
+    return r->params.ctx->count;
+}
+
+/* The same through `&r->base`, as a macro handed the other member writes. */
+uint32_t clear_base_ev_then_count(union req *r)
+{
+    union ev e = {0};
+    (&r->base)->header.ev = e;
     return r->params.ctx->count;
 }
 
