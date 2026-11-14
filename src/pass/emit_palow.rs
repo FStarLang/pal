@@ -8906,8 +8906,9 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
     c += &format!(
         "let {un}_repr (u: {un}) (b: bytes) : prop =\n  \
          len b == SizeT.v {un}_sizeof /\\\n  \
-         (len b == SizeT.v {un}_sizeof ==>\n    (match u with\n",
-        un = un
+         (len b == {size} ==>\n    (match u with\n",
+        un = un,
+        size = ui.size
     );
     for m in &ui.members {
         c += &format!(
@@ -10013,12 +10014,17 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
 
     // The representation pins the fields and says nothing about the padding,
     // which is exactly what C guarantees: the gaps hold unspecified values,
-    // and two objects with equal fields may differ there.
+    // and two objects with equal fields may differ there. The guard states the
+    // length as a literal: each field's `slice` bound is then plain linear
+    // arithmetic, where `SizeT.v {sn}_sizeof` made Z3 re-derive the size for
+    // every bound in a context that grows with each field, and time out on
+    // large structs.
     let mut c = format!(
         "let {sn}_repr (x: {sn}) (b: bytes) : prop =\n  \
          len b == SizeT.v {sn}_sizeof /\\\n  \
-         (len b == SizeT.v {sn}_sizeof ==>\n",
-        sn = sn
+         (len b == {size} ==>\n",
+        sn = sn,
+        size = si.size
     );
     let conj: Vec<String> = si
         .fields
@@ -10212,14 +10218,46 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         slices = slices.join(" /\\\n           "),
         proof = slice_proof
     );
-    r += &format!(
-        "  {}_bytes_slices {};\n",
-        sn,
-        (0..regions.len())
-            .map(|k| format!("r{}", k))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
+    let pieces = (0..regions.len())
+        .map(|k| format!("r{}", k))
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Assembling the representation from the pieces is a pure step, and in
+    // the ownership context it is not a small one: there Z3 has every field's
+    // representation and every join in scope, and on a large struct it times
+    // out. A lemma takes only the field facts it needs. A zero-size field's
+    // fact is about the reveal's own slice rather than a piece, so a struct
+    // with one keeps the calculation inline.
+    if si.fields.iter().all(|f| f.size > 0) {
+        let fields = regions
+            .iter()
+            .enumerate()
+            .filter_map(|(j, reg)| match reg {
+                Region::Field(f) => {
+                    Some(repr_of(f, &format!("x.fld_{}", f.name), &format!("r{}", j)))
+                }
+                Region::Gap(..) => None,
+            })
+            .collect::<Vec<_>>();
+        c += &format!(
+            "let {sn}_sizeof_v (_: unit) : Lemma (SizeT.v {sn}_sizeof == {size}) = ()\n\n\
+             let {sn}_repr_of_pieces (x: {sn})\n  {args}\n  \
+             : Lemma (requires {req})\n          (ensures {sn}_repr x {acc})\n  \
+             = {sn}_sizeof_v ();\n    {sn}_bytes_slices {pieces}\n\n",
+            sn = sn,
+            size = si.size,
+            args = slice_args,
+            req = match fields.is_empty() {
+                true => "True".to_string(),
+                false => fields.join(" /\\\n                    "),
+            },
+            acc = accs[regions.len() - 1],
+            pieces = pieces
+        );
+        r += &format!("  {}_repr_of_pieces x {};\n", sn, pieces);
+    } else {
+        r += &format!("  {}_bytes_slices {};\n", sn, pieces);
+    }
     r += &format!(
         "  assert (pure ({sn}_repr x {acc}));\n",
         sn = sn,
