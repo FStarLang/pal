@@ -3489,8 +3489,16 @@ public:
           while (auto *cs = dyn_cast_or_null<CompoundStmt>(last))
             last = cs->body_empty() ? nullptr : cs->body_back();
           bool isBreak = last && isa<BreakStmt>(last);
-          if (!last ||
-              !(isBreak || isa<ReturnStmt>(last) || isa<GotoStmt>(last))) {
+          // The last case falls out of the switch, which is what a `break`
+          // would do, so it need not end in one.
+          bool fallsOut = &group == &groups.back();
+          // The chain ends in the default's body, so it has to come last.
+          if (group.isDefault && !fallsOut) {
+            chain = false;
+            break;
+          }
+          if (!fallsOut && (!last || !(isBreak || isa<ReturnStmt>(last) ||
+                                       isa<GotoStmt>(last)))) {
             chain = false;
             break;
           }
