@@ -21911,6 +21911,17 @@ impl<'a> Body<'a> {
         for e in own_clauses.iter() {
             spliced_names(e, &mut stated);
         }
+        // The values the clause reads, `$(x)` in a fragment or `x` in C. Only
+        // these need a slot the author states to be bound at its value.
+        let mut read: HashSet<String> = HashSet::new();
+        for e in own_clauses.iter() {
+            spliced_reads(e, &mut read);
+        }
+        {
+            let mut t = Touched::default();
+            touch_exprs(&prop_clauses, &mut t);
+            read.extend(t.vars);
+        }
         // An author's ownership clause binds a fresh name for what a slot
         // holds, so a function-pointer validity that was seeded at a concrete
         // address is no longer spelled that way once the clause has been
@@ -21957,9 +21968,14 @@ impl<'a> Body<'a> {
             if explicitly_owned {
                 // The author states the slot's ownership, but a slot the
                 // statement cannot write still holds what it holds now, and
-                // `$(x)` elsewhere in the clause means that value.
+                // `$(x)` elsewhere in the clause means that value. A clause
+                // that does not read the value may state the slot some other
+                // way -- uninitialized, or folded into a predicate -- and a
+                // `*p` slot's value is never what `$(p)` names.
                 if s.init
                     && s.array.is_none()
+                    && touch == s.name
+                    && read.contains(&s.name)
                     && let Some((_, w)) = &self.join_written
                     && !w.contains(touch)
                 {
