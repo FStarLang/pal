@@ -3191,7 +3191,7 @@ impl<'a> Spec<'a> {
                 if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
                     Ok(format!("({} == true)", self.value(e, w)?))
                 } else {
-                    Err(format!("{} in a contract", expr_kind(e)))
+                    Err(format!("{} in a contract", contract_expr(e)))
                 }
             }
         }
@@ -4332,6 +4332,11 @@ impl<'a> Spec<'a> {
     }
 
     fn value(&self, e: &Expr, w: When) -> Result<String, String> {
+        // `p._length` is a `_specint`, so its value is the number itself,
+        // wherever it appears: `p._length - k` as much as `(_specint) p._length`.
+        if let Some(l) = self.length_of(e, w) {
+            return l;
+        }
         match &e.val {
             ExprT::Old(inner) => self.value(inner, When::Old),
             ExprT::Cast(..) if let Some(c) = self.cast_bits(e) => self.value(&c, w),
@@ -4920,7 +4925,7 @@ impl<'a> Spec<'a> {
                 }
                 Ok(format!("({{ {} }})", record_fields(vals, false)))
             }
-            _ => Err(format!("{} in a contract", expr_kind(e))),
+            _ => Err(format!("{} in a contract", contract_expr(e))),
         }
     }
 }
@@ -28915,6 +28920,27 @@ fn stmt_kind(s: &Stmt) -> &'static str {
         StmtT::DeclStackArray { .. } => "a stack array",
         StmtT::Error => "an ill-formed statement",
         StmtT::Decl(..) | StmtT::Let(..) | StmtT::Assign(..) => "this statement",
+    }
+}
+
+/// What a contract could not translate, said so the author can find it: the
+/// expression itself and where it is, when its kind alone says nothing.
+fn contract_expr(e: &Expr) -> String {
+    match expr_kind(e) {
+        "this expression" => {
+            // The reason ends up in an F* comment, which `(*` would reopen.
+            let text = e
+                .val
+                .to_string()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .replace("(*", "( *")
+                .replace("*)", "* )");
+            let line = e.loc.location().range.start.line;
+            format!("`{}` (line {})", text, line)
+        }
+        k => k.to_string(),
     }
 }
 

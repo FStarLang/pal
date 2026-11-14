@@ -1,0 +1,2 @@
+# Expected translation diagnostic substrings
+`x` (line 5) in a contract
