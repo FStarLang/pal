@@ -1,0 +1,2 @@
+# Expected translation diagnostic substrings
+contract_expr_bad.c:5: its contract is weakened: this expression in a contract: `x`

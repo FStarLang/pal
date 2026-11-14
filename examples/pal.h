@@ -57,6 +57,11 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
    value is its bytes, and a store through one member changes only the bytes
    of the field it writes. See palow.md, "Overlay unions". */
 #define _overlay __attribute__((annotate("pal-overlay")))
+/* Marks the member of an `_overlay` union whose pointer fields own what they
+   point at. The union's ownership is that member's, read from the union's
+   bytes, so it survives a store through any member that leaves the bytes of
+   those pointers alone. See palow.md, "Ownership through an overlay". */
+#define _owning __attribute__((annotate("pal-owning")))
 /* Marks a platform wrapper around `memset(p, 0, n)` -- zero_memory,
    RtlZeroMemory, bzero -- so that calls of the form `f(ptr, sizeof(*ptr))`
    translate to the same whole-object zeroing that a direct memset does. An
@@ -121,6 +126,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _pulse_eager_unfold_predicate
 #define _pointer_view
 #define _overlay
+#define _owning
 #define _memset_zero
 #define _decreases(p)
 

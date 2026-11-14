@@ -1355,6 +1355,31 @@ struct UnionInfo {
     /// For an overlay union, the islands among its leaves that are loaded and
     /// stored whole (`union_X_union_I_read`/`_write`), by their C names.
     islands: Vec<String>,
+    /// For an overlay union with an `_owning` member, the deep ownership that
+    /// member's pointers carry. See `UnionOwn`.
+    own: Option<UnionOwn>,
+}
+
+/// The deep ownership of an overlay union, held through its one `_owning`
+/// member: the `_own` of that member's struct, at the member's view of the
+/// union's bytes. It is keyed on the bytes the owned pointers live in and on
+/// nothing else, so a write through any member that leaves those bytes alone
+/// leaves it in place.
+struct UnionOwn {
+    /// The member's name.
+    arm: String,
+    /// The member's struct, by C name.
+    sn: String,
+    /// The byte ranges of the member's fields that its struct's ownership
+    /// reads, as `(start, end)` in the union: what a write must not touch for
+    /// the ownership to follow it.
+    reads: Vec<(u64, u64)>,
+    /// The owned pointers themselves, by their offset in the union and the
+    /// term the member's ownership has each at, over a binder `x` of the
+    /// member's struct. Their bytes have to read as a pointer for the body to
+    /// load one, and a load has to come back as that term for the ownership
+    /// to be found by it.
+    ptrs: Vec<(u64, String)>,
 }
 
 struct Typedefs<'a> {
@@ -1679,8 +1704,16 @@ fn with_loc_tag(why: String, e: &Expr) -> String {
 /// The offending expression as the source has it, after an error message
 /// that would otherwise only say what kind of expression it is.
 fn shown_at(e: &Expr) -> String {
-    let text = e.val.to_string();
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    // The reason ends up in an F* comment, which `(*` would reopen and `*)`
+    // would close.
+    let text = e
+        .val
+        .to_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("(*", "( *")
+        .replace("*)", "* )");
     format!(": `{}`{}", text, loc_tag(e))
 }
 
@@ -5518,6 +5551,19 @@ fn emit_fn(
     // is as often on the typedef that names it, and a `_refine` wrapper must
     // not hide the struct underneath.
     let own_for = |ty: &Type| -> Option<(String, String)> {
+        // An overlay union carries the deep ownership of its `_owning` member.
+        if let TypeT::TypeRef(TypeRefKind::Union(n)) = &peel(tds, ty).val {
+            return tds
+                .unions
+                .get(&*n.val.to_string())
+                .filter(|ui| ui.own.is_some())
+                .map(|_| {
+                    (
+                        format!("union_{}", n.val),
+                        format!("union_{}_own_spec", n.val),
+                    )
+                });
+        }
         let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
             return None;
         };
@@ -8506,6 +8552,7 @@ fn collect_union(
             overlay: false,
             ints: Vec::new(),
             islands: Vec::new(),
+            own: None,
         },
     );
     Chunk {
@@ -8928,6 +8975,7 @@ fn collect_island(
             overlay: true,
             ints: Vec::new(),
             islands: Vec::new(),
+            own: None,
         },
     );
     let mut code = emit_overlay_union(tds, &name);
@@ -9154,6 +9202,10 @@ fn collect_overlay_union(
         .into_iter()
         .filter(|u| island_member(tds, u).is_some() && align % tds.unions[u.as_str()].align == 0)
         .collect();
+    let own = match overlay_union_own(tds, ud, &members) {
+        Ok(o) => o,
+        Err(why) => return skip(why),
+    };
     tds.unions.insert(
         name.clone(),
         UnionInfo {
@@ -9163,12 +9215,182 @@ fn collect_overlay_union(
             overlay: true,
             ints,
             islands,
+            own,
         },
     );
     Chunk {
         module: format!("Union_{}", name),
-        code: emit_overlay_union(tds, &name),
+        code: emit_overlay_union(tds, &name) + &emit_overlay_own(tds, &name),
         origin: None,
+    }
+}
+
+/// The deep ownership of an overlay union with an `_owning` member `m` of
+/// struct type `S`: `S`'s own, at `_get_m u`, with the owned pointers' bytes
+/// readable as pointers. Keyed on the union's value like a struct's, with a
+/// `_follow` that moves it to a new value that has the same bytes where `S`'s
+/// ownership reads -- so a store through any member that misses those bytes
+/// keeps it, and one that hits them does not.
+fn emit_overlay_own(tds: &Typedefs, name: &str) -> String {
+    let Some(o) = &tds.unions[name].own else {
+        return String::new();
+    };
+    let un = format!("union_{}", name);
+    let sn = format!("struct_{}", o.sn);
+    let arm = &o.arm;
+    let conj = |v: Vec<String>| match v.is_empty() {
+        true => "True".to_string(),
+        false => v.join(" /\\ "),
+    };
+    let ok = conj(
+        o.ptrs
+            .iter()
+            .map(|(a, _)| format!("ptr_view_ok (slice u {} {})", a, a + tds.ptr_bytes))
+            .collect(),
+    );
+    let same = conj(
+        o.reads
+            .iter()
+            .map(|(a, b)| format!("slice u {a} {b} == slice y {a} {b}"))
+            .collect(),
+    );
+    let rw: String = tds.structs[&o.sn]
+        .fields
+        .iter()
+        .filter(|f| {
+            tds.structs[&o.sn]
+                .own
+                .iter()
+                .any(|i| i.at.contains(&format!("(x).fld_{})", f.name)))
+        })
+        .map(|f| {
+            format!(
+                "  rewrite each ({un}_get_{arm} u).fld_{f} as ({un}_get_{arm} y).fld_{f};\n",
+                f = f.name
+            )
+        })
+        .collect();
+    // A load of an owned pointer that comes back as the term the ownership
+    // is at, so that what it points to is found by it.
+    let readers: String = o
+        .ptrs
+        .iter()
+        .map(|(a, at)| {
+            let key = at.replace("(x)", &format!("({un}_get_{arm} u)"));
+            format!(
+                "fn {un}_own_at_{a}_read (r: ptr) (#p: perm) (#u: erased {un})\n\
+                 \x20 preserves {un}_pts_to r p u\n\
+                 \x20 requires pure ({un}_own_ok u)\n\
+                 \x20 returns  y : ptr\n\
+                 \x20 ensures  rewrites_to y {key}\n\
+                 {{\n  let y = {un}_ptr_read r {a}sz;\n  y\n}}\n\n"
+            )
+        })
+        .collect();
+    format!(
+        "(* The deep ownership member `{arm}` is `_owning` for: what its pointers\n   \
+         reach, while the bytes they are in still hold them. *)\n\
+         let {un}_own_spec : Type = {sn}_own_spec\n\n\
+         let {un}_own_ok (u: {un}) : prop = {ok}\n\n\
+         let {un}_own ([@@@mkey] u: {un}) (p: perm) (s: {un}_own_spec) : slprop =\n  \
+         pure ({un}_own_ok u) ** {sn}_own ({un}_get_{arm} u) p s\n\n\
+         ghost fn {un}_own_scatter (u: {un}) (#p: perm) (#s: {un}_own_spec)\n\
+         \x20 requires {un}_own u p s\n\
+         \x20 ensures  {sn}_own ({un}_get_{arm} u) p s ** pure ({un}_own_ok u)\n\
+         {{\n  unfold {un}_own u p s;\n}}\n\n\
+         ghost fn {un}_own_gather (u: {un}) (#p: perm) (#s: {un}_own_spec)\n\
+         \x20 requires {sn}_own ({un}_get_{arm} u) p s ** pure ({un}_own_ok u)\n\
+         \x20 ensures  {un}_own u p s\n\
+         {{\n  fold {un}_own u p s;\n}}\n\n\
+         (* The bytes the ownership is keyed on. *)\n\
+         let {un}_own_same (u y: {un}) : prop = {same}\n\n\
+         ghost fn {un}_own_follow (a: ptr) (u: {un}) (#p #q: perm) (#y: {un}) (#s: {un}_own_spec)\n\
+         \x20 requires {un}_pts_to a p y ** {un}_own u q s ** pure ({un}_own_same u y)\n\
+         \x20 ensures  {un}_pts_to a p y ** {un}_own y q s\n\
+         {{\n  unfold {un}_own u q s;\n  \
+         unfold {sn}_own ({un}_get_{arm} u) q s;\n\
+         {rw}  fold {sn}_own ({un}_get_{arm} y) q s;\n  \
+         fold {un}_own y q s;\n}}\n\n"
+    ) + &readers
+}
+
+/// The ownership an overlay union carries through its `_owning` member, if
+/// it has one.
+///
+/// An overlay union has no tag, so nothing in the bytes says which member's
+/// pointers are live; the annotation is the author saying that this one's
+/// are, whatever else the bytes are also read as. One member at most: two
+/// would be two claims on whatever both their pointers' bytes reach.
+fn overlay_union_own(
+    tds: &Typedefs,
+    ud: &crate::ir::UnionDefn,
+    members: &[UnionMember],
+) -> Result<Option<UnionOwn>, String> {
+    let mut owning = ud.owning.iter().map(|i| i.val.to_string());
+    let Some(arm) = owning.next() else {
+        return Ok(None);
+    };
+    if owning.next().is_some() {
+        return Err("more than one member is `_owning`".to_string());
+    }
+    let Some(m) = members.iter().find(|m| m.name == arm) else {
+        return Err(format!("`_owning` member `{}` is not a member", arm));
+    };
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, &m.ty).val else {
+        return Err(format!(
+            "`_owning` member `{}` is not a struct; only a struct's pointer fields own",
+            arm
+        ));
+    };
+    let sn = n.val.to_string();
+    let si = &tds.structs[&sn];
+    if si.own.is_empty() {
+        return Err(format!(
+            "`_owning` member `{}` is a struct `{}` that owns nothing",
+            arm, sn
+        ));
+    }
+    let reads = si
+        .fields
+        .iter()
+        .filter(|f| {
+            si.own
+                .iter()
+                .any(|i| i.at.contains(&format!("(x).fld_{})", f.name)))
+        })
+        .map(|f| (f.offset, f.offset + f.size))
+        .collect();
+    let mut ptrs = Vec::new();
+    owned_ptr_offsets(tds, &sn, 0, "x", &mut ptrs);
+    Ok(Some(UnionOwn {
+        arm,
+        sn,
+        reads,
+        ptrs,
+    }))
+}
+
+/// The pointer fields a struct's ownership is directly at, through the
+/// structs it embeds: their offsets from `base`, and their terms with `x`
+/// standing for `outer`.
+fn owned_ptr_offsets(
+    tds: &Typedefs,
+    sn: &str,
+    base: u64,
+    outer: &str,
+    out: &mut Vec<(u64, String)>,
+) {
+    let si = &tds.structs[sn];
+    for f in &si.fields {
+        let at = format!("((x).fld_{})", f.name);
+        let here = format!("(({}).fld_{})", outer, f.name);
+        for i in si.own.iter().filter(|i| i.at == at) {
+            if !i.embedded {
+                out.push((base + f.offset, here.clone()));
+            } else if let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, &f.ty).val {
+                owned_ptr_offsets(tds, &n.val, base + f.offset, &here, out);
+            }
+        }
     }
 }
 
@@ -14678,6 +14900,10 @@ struct Callee {
 struct OwnPath {
     root: Rc<Expr>,
     root_sn: String,
+    /// For ownership held through an overlay union's `_owning` member, the
+    /// union and the member: `root` is then the union, and `root_sn` the
+    /// member's struct.
+    union: Option<(String, String)>,
     fields: Vec<(String, String)>,
 }
 
@@ -14691,7 +14917,27 @@ impl OwnPath {
 struct OwnRoot {
     at: Option<String>,
     sn: String,
+    union: Option<(String, String)>,
     value: String,
+}
+
+impl OwnRoot {
+    /// The points-to the root's value is read off.
+    fn pts_to(&self) -> String {
+        match &self.union {
+            Some((u, _)) => format!("union_{}_pts_to", u),
+            None => format!("struct_{}_pts_to", self.sn),
+        }
+    }
+
+    /// The root struct's value, given the root's: the owning member's view
+    /// when the root is an overlay union.
+    fn struct_value(&self, v: &str) -> String {
+        match &self.union {
+            Some((u, arm)) => format!("(union_{}_get_{} ({}))", u, arm, v),
+            None => v.to_string(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -14699,6 +14945,8 @@ struct OpenOwn {
     root: Rc<OwnRoot>,
     fields: Vec<String>,
     sn: String,
+    /// The union's own ownership, scattered into its member's.
+    union_level: bool,
 }
 
 /// Cloneable so that a speculative attempt can be rolled back *in full*
@@ -15678,6 +15926,76 @@ impl<'a> Body<'a> {
             .unwrap_or_default()
     }
 
+    /// `(*p).m`, where `p` is an owned parameter pointing at an overlay union
+    /// whose `_owning` member is `m`: the root of the ownership `m` holds.
+    fn own_union_root(&self, base: &Expr, m: &str, sn: &str) -> Option<OwnPath> {
+        let ty = self.ty_of(base).ok()?;
+        let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(self.tds, &ty).val else {
+            return None;
+        };
+        let own = self.tds.unions.get(&*u.val)?.own.as_ref()?;
+        if own.arm != m || own.sn != sn {
+            return None;
+        }
+        let ExprT::Deref(root) = &strip_vattr(base).val else {
+            return None;
+        };
+        let ExprT::Var(v) = &strip_vattr(root).val else {
+            return None;
+        };
+        let p = v.val.to_string();
+        if !self.params.contains(&p) || !self.owned_here(&p) {
+            return None;
+        }
+        Some(OwnPath {
+            root: Rc::new(base.clone()),
+            root_sn: sn.to_string(),
+            union: Some((u.val.to_string(), m.to_string())),
+            fields: Vec::new(),
+        })
+    }
+
+    /// A store through an overlay union whose ownership is held through its
+    /// `_owning` member. When the bytes stored to are none of the ones that
+    /// ownership reads, it is the same ownership afterwards and `follow_own`
+    /// moves it to the new value; when they are, it stays where it was.
+    fn union_own_before_write(&mut self, lhs: &Expr) -> Option<(String, String, String)> {
+        let pn = palow_name(self.tds, &*self.ty_of(lhs).ok()?)?;
+        let n = ov_leaf(self.tds, &pn)?.size;
+        let (root, uname, o) = overlay_path(self.tds, &|x| self.ty_of(x).ok(), lhs)
+            .ok()?
+            .root?;
+        let own = self.tds.unions.get(&uname)?.own.as_ref()?;
+        if own.reads.iter().any(|&(a, b)| o < b && a < o + n) {
+            return None;
+        }
+        let ExprT::Deref(r) = &strip_vattr(&root).val else {
+            return None;
+        };
+        let ExprT::Var(v) = &strip_vattr(r).val else {
+            return None;
+        };
+        let p = v.val.to_string();
+        if !self.owned_here(&p) || !self.params.contains(&p) {
+            return None;
+        }
+        let at = format!("var_{}", p);
+        if self
+            .own_open
+            .iter()
+            .any(|o| o.root.at.as_deref() == Some(at.as_str()))
+        {
+            return None;
+        }
+        let un = format!("union_{}", uname);
+        let w = self.fresh("own_value");
+        self.lines.push(format!(
+            "with {}. assert ({}_pts_to {} _ {});",
+            w, un, at, w
+        ));
+        Some((un, at, w))
+    }
+
     /// Owned containers from a parameter down through its embedded structs.
     fn own_path(&self, e: &Expr) -> Option<OwnPath> {
         let ty = self.ty_of(e).ok()?;
@@ -15700,15 +16018,20 @@ impl<'a> Body<'a> {
                 Some(OwnPath {
                     root: Rc::new(e.clone()),
                     root_sn: sn,
+                    union: None,
                     fields: Vec::new(),
                 })
             }
             ExprT::Var(v) if self.params.contains(&*v.val.to_string()) => Some(OwnPath {
                 root: Rc::new(e.clone()),
                 root_sn: sn,
+                union: None,
                 fields: Vec::new(),
             }),
             ExprT::Member(base, f) => {
+                if let Some(p) = self.own_union_root(base, &f.val, &sn) {
+                    return Some(p);
+                }
                 let mut path = self.own_path(base)?;
                 self.own_items_of(path.struct_name())
                     .iter()
@@ -15728,6 +16051,9 @@ impl<'a> Body<'a> {
     /// the ownership does read is not followed, since the ownership then
     /// really is about something else.
     fn own_before_write(&mut self, lhs: &Expr) -> Option<(String, String, String)> {
+        if let Some(b) = self.union_own_before_write(lhs) {
+            return Some(b);
+        }
         let ExprT::Member(base, f) = &strip_vattr(lhs).val else {
             return None;
         };
@@ -15812,6 +16138,7 @@ impl<'a> Body<'a> {
         };
         let root = match self.own_open.iter().find(|o| {
             o.root.sn == path.root_sn
+                && o.root.union == path.union
                 && o.root.at == at
                 && value.as_ref().is_none_or(|v| o.root.value == *v)
         }) {
@@ -15821,10 +16148,14 @@ impl<'a> Body<'a> {
                     Some(v) => v,
                     None => {
                         let v = self.fresh("own_value");
+                        let pts = match &path.union {
+                            Some((u, _)) => format!("union_{}", u),
+                            None => format!("struct_{}", path.root_sn),
+                        };
                         self.lines.push(format!(
-                            "with {}. assert (struct_{}_pts_to {} _ {});",
+                            "with {}. assert ({}_pts_to {} _ {});",
                             v,
-                            path.root_sn,
+                            pts,
                             at.as_ref().unwrap(),
                             v
                         ));
@@ -15834,12 +16165,28 @@ impl<'a> Body<'a> {
                 Rc::new(OwnRoot {
                     at,
                     sn: path.root_sn.clone(),
+                    union: path.union.clone(),
                     value,
                 })
             }
         };
         let mut fields = Vec::new();
-        let mut value = root.value.clone();
+        if let Some((u, _)) = &root.union
+            && !self
+                .own_open
+                .iter()
+                .any(|o| Rc::ptr_eq(&o.root, &root) && o.union_level)
+        {
+            self.lines
+                .push(format!("union_{}_own_scatter {};", u, root.value));
+            self.own_open.push(OpenOwn {
+                root: root.clone(),
+                fields: Vec::new(),
+                sn: u.clone(),
+                union_level: true,
+            });
+        }
+        let mut value = root.struct_value(&root.value);
         for (field, sn) in std::iter::once((None, &path.root_sn))
             .chain(path.fields.iter().map(|(f, sn)| (Some(f), sn)))
         {
@@ -15850,7 +16197,7 @@ impl<'a> Body<'a> {
             if self
                 .own_open
                 .iter()
-                .any(|o| Rc::ptr_eq(&o.root, &root) && o.fields == fields)
+                .any(|o| Rc::ptr_eq(&o.root, &root) && o.fields == fields && !o.union_level)
             {
                 continue;
             }
@@ -15860,6 +16207,7 @@ impl<'a> Body<'a> {
                 root: root.clone(),
                 fields: fields.clone(),
                 sn: sn.clone(),
+                union_level: false,
             });
         }
         Ok(())
@@ -15879,8 +16227,11 @@ impl<'a> Body<'a> {
                         Some(at) => {
                             let v = self.fresh("own_value");
                             self.lines.push(format!(
-                                "with {}. assert (struct_{}_pts_to {} _ {});",
-                                v, o.root.sn, at, v
+                                "with {}. assert ({} {} _ {});",
+                                v,
+                                o.root.pts_to(),
+                                at,
+                                v
                             ));
                             v
                         }
@@ -15890,6 +16241,12 @@ impl<'a> Body<'a> {
                     v
                 }
             };
+            if o.union_level {
+                self.lines
+                    .push(format!("union_{}_own_gather {};", o.sn, value));
+                continue;
+            }
+            value = o.root.struct_value(&value);
             for f in &o.fields {
                 value = format!("(({}).fld_{})", value, f);
             }
@@ -16634,6 +16991,41 @@ impl<'a> Body<'a> {
             ));
         }
         let un = format!("union_{}", uname);
+        // A load of a pointer the union's `_owning` member owns comes back as
+        // the term its ownership is at, which needs that ownership open.
+        if !writing
+            && island.is_none()
+            && pn == "ptr"
+            && let Some(own) = &ui.own
+            && own.ptrs.iter().any(|(at, _)| *at == o)
+            && let Some(path) = {
+                let mut base = &e;
+                while let ExprT::Member(b, _) = &strip_vattr(base).val {
+                    if same_lvalue(b, &root) {
+                        break;
+                    }
+                    base = b;
+                }
+                match &strip_vattr(base).val {
+                    ExprT::Member(b, m) => self.own_union_root(b, &m.val, &own.sn),
+                    _ => None,
+                }
+            }
+        {
+            self.open_own_path(&path)?;
+            let (a, close_read, close_write) = self.base_addr(&root, writing)?;
+            return Ok(Some(Focus {
+                at: a,
+                pn: format!("{}_own_at_{}", un, o),
+                bits: None,
+                write_fn: String::new(),
+                unaligned: false,
+                open_read: Vec::new(),
+                open_write: Vec::new(),
+                close_read,
+                close_write,
+            }));
+        }
         let (a, close_read, close_write) = self.base_addr(&root, writing)?;
         Ok(Some(Focus {
             at: format!("{} {}sz", a, o),
