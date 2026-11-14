@@ -66,17 +66,17 @@ open Pulse.Lib.C.Palow.Ptr
    `pre`/`post` may `reveal` the witness internally; it stays un-revealed at the
    outer `pre x y`/`post x y` application, so higher-order unification sees a
    genuine Miller pattern (`?pre` applied to plain variables). *)
-val valid (#a #b #c: Type0) (f: ptr) (div: bool)
+val valid (#a #b: Type0) (#c: Type u#w) (f: ptr) (div: bool)
   (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop) : prop
 
-let is_valid (#a #b #c: Type0) ([@@@mkey] f: ptr) (div: bool)
+let is_valid (#a #b: Type0) (#c: Type u#w) ([@@@mkey] f: ptr) (div: bool)
   (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop) : slprop =
   pure (valid f div pre post)
 
 (* Drop a surplus `is_valid` back to `emp` (it is persistent). Proven, not
    axiomatized: `is_valid` unfolds to `pure`. `f` is `[@@@mkey]`, so the resource
    in context is matched by the pointer and `div`/`pre`/`post` are inferred. *)
-ghost fn drop_is_valid (#a #b #c: Type0) (#div: bool) (f: ptr)
+ghost fn drop_is_valid u#w (#a #b: Type0) (#c: Type u#w) (#div: bool) (f: ptr)
   (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
   requires is_valid f div pre post
   ensures emp
@@ -87,7 +87,7 @@ ghost fn drop_is_valid (#a #b #c: Type0) (#div: bool) (f: ptr)
 (* Move `is_valid` across a provable address equality `f == g`. Needed to call
    through a pointer read back from a slot, where the read value is only
    provably (not syntactically) equal to the stored `of_fn ..`. *)
-ghost fn valid_cast (#a #b #c: Type0) (#div: bool)
+ghost fn valid_cast u#w (#a #b: Type0) (#c: Type u#w) (#div: bool)
   (#pre: a -> erased c -> slprop) (#post: a -> erased c -> b -> slprop)
   (f g: ptr)
   requires is_valid f div pre post ** pure (f == g)
@@ -103,42 +103,42 @@ ghost fn valid_cast (#a #b #c: Type0) (#div: bool)
    these projectors name that pre/post without a separate `let`. `pulse_eager_unfold`
    reduces `pre_of f` back to that lambda so slprop matching still connects. *)
 [@@pulse_eager_unfold]
-unfold let pre_of (#a #b #c: Type0) (#pre: a -> erased c -> slprop) (#post: a -> erased c -> b -> slprop)
+unfold let pre_of (#a #b: Type0) (#c: Type u#w) (#pre: a -> erased c -> slprop) (#post: a -> erased c -> b -> slprop)
   (f: (x:a -> y:erased c -> stt_div b (pre x y) (fun r -> post x y r))) : (a -> erased c -> slprop) = pre
 [@@pulse_eager_unfold]
-unfold let post_of (#a #b #c: Type0) (#pre: a -> erased c -> slprop) (#post: a -> erased c -> b -> slprop)
+unfold let post_of (#a #b: Type0) (#c: Type u#w) (#pre: a -> erased c -> slprop) (#post: a -> erased c -> b -> slprop)
   (f: (x:a -> y:erased c -> stt_div b (pre x y) (fun r -> post x y r))) : (a -> erased c -> b -> slprop) = post
 [@@pulse_eager_unfold]
-unfold let pre_of_tot (#a #b #c: Type0) (#pre: a -> erased c -> slprop) (#post: a -> erased c -> b -> slprop)
+unfold let pre_of_tot (#a #b: Type0) (#c: Type u#w) (#pre: a -> erased c -> slprop) (#post: a -> erased c -> b -> slprop)
   (f: (x:a -> y:erased c -> stt b (pre x y) (fun r -> post x y r))) : (a -> erased c -> slprop) = pre
 [@@pulse_eager_unfold]
-unfold let post_of_tot (#a #b #c: Type0) (#pre: a -> erased c -> slprop) (#post: a -> erased c -> b -> slprop)
+unfold let post_of_tot (#a #b: Type0) (#c: Type u#w) (#pre: a -> erased c -> slprop) (#post: a -> erased c -> b -> slprop)
   (f: (x:a -> y:erased c -> stt b (pre x y) (fun r -> post x y r))) : (a -> erased c -> b -> slprop) = post
 
 (* Reflect a concrete TOTAL Pulse function as an address. pre/post are explicit
    to avoid higher-order-unification failures. *)
-val of_fn (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
+val of_fn (#a #b: Type0) (#c: Type u#w) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
   (f: (x:a -> y:erased c -> stt b (pre x y) (fun r -> post x y r))) : ptr
 
 (* Ghost step yielding `is_valid (of_fn ..) false ..`. *)
-val of_fn_valid (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
+val of_fn_valid (#a #b: Type0) (#c: Type u#w) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
   (f: (x:a -> y:erased c -> stt b (pre x y) (fun r -> post x y r)))
   : stt_ghost unit emp_inames emp (fun _ -> is_valid (of_fn pre post f) false pre post)
 
 (* Reflect a concrete POSSIBLY-DIVERGENT Pulse function as an address. *)
-val of_fn_div (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
+val of_fn_div (#a #b: Type0) (#c: Type u#w) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
   (f: (x:a -> y:erased c -> stt_div b (pre x y) (fun r -> post x y r))) : ptr
 
 (* Ghost step yielding `is_valid (of_fn_div ..) true ..`. *)
-val of_fn_div_valid (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
+val of_fn_div_valid (#a #b: Type0) (#c: Type u#w) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
   (f: (x:a -> y:erased c -> stt_div b (pre x y) (fun r -> post x y r)))
   : stt_ghost unit emp_inames emp (fun _ -> is_valid (of_fn_div pre post f) true pre post)
 
 (* A reflected function is not null: it is the address of code that exists. *)
-val of_fn_not_null (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
+val of_fn_not_null (#a #b: Type0) (#c: Type u#w) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
   (f: (x:a -> y:erased c -> stt b (pre x y) (fun r -> post x y r)))
   : squash (~ (of_fn pre post f == null))
-val of_fn_div_not_null (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
+val of_fn_div_not_null (#a #b: Type0) (#c: Type u#w) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
   (f: (x:a -> y:erased c -> stt_div b (pre x y) (fun r -> post x y r)))
   : squash (~ (of_fn_div pre post f == null))
 
@@ -150,7 +150,7 @@ val of_fn_div_not_null (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a
    specification quantifies over its own witnesses and says which of the
    original's each of them stands for. A weakening that keeps the witness
    passes the identity. *)
-val weaken (#a #b #c #c': Type0) (f: ptr)
+val weaken (#a #b: Type0) (#c: Type u#w) (#c': Type u#w2) (f: ptr)
   (div: bool) (div': bool { div ==> div' })
   (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
   (pre': a -> erased c' -> slprop) (post': a -> erased c' -> b -> slprop)
@@ -167,7 +167,7 @@ val weaken (#a #b #c #c': Type0) (f: ptr)
    and the post. Unlike `weaken`'s two independent coercions, this one carries
    the resource across the call. It transfers validity only: ownership of the
    frame is wanted at the call, not at this ghost step. *)
-val frame (#a #b #c: Type0) (f: ptr) (div: bool)
+val frame (#a #b: Type0) (#c: Type u#w) (f: ptr) (div: bool)
   (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
   (resource: a -> erased c -> slprop)
   : stt_ghost unit emp_inames
@@ -181,13 +181,13 @@ val frame (#a #b #c: Type0) (f: ptr) (div: bool)
    metavariables); the caller supplies the witness `w` explicitly. The post also
    RETURNS the `is_valid` (validity is persistent), so a caller can thread it
    across the call. Returns `stt`, so it is usable from any context. *)
-val call (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
+val call (#a #b: Type0) (#c: Type u#w) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
   (f: ptr) (x: a) (w: erased c)
   : stt b (is_valid f false pre post ** pre x w) (fun r -> is_valid f false pre post ** post x w r)
 
 (* Indirect call of a POSSIBLY-DIVERGENT pointer: as `call`, but keyed on
    `is_valid f true ..` and returning `stt_div`. *)
-val call_div (#a #b #c: Type0) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
+val call_div (#a #b: Type0) (#c: Type u#w) (pre: a -> erased c -> slprop) (post: a -> erased c -> b -> slprop)
   (f: ptr) (x: a) (w: erased c)
   : stt_div b (is_valid f true pre post ** pre x w) (fun r -> is_valid f true pre post ** post x w r)
 
