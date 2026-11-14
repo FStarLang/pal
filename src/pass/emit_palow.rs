@@ -19927,8 +19927,13 @@ impl<'a> Body<'a> {
                 );
             }
             // Passing the address of an object that holds a code pointer
-            // hands the validity along with it.
-            if let Some(slot) = self.slots.iter().find(|s| s.addr == v) {
+            // hands the validity along with it -- unless the parameter is
+            // `_plain` and the callee states no ownership of its own: then
+            // nothing is handed over, the validity stays as it was seeded,
+            // and it is put down at its own spelling. (Put down by inference
+            // instead, two or more of them cannot be told apart.)
+            let hands_over = plain_ptrs.get(i) != Some(&true) || callee_spliced;
+            if hands_over && let Some(slot) = self.slots.iter().find(|s| s.addr == v) {
                 let held: Vec<String> = slot.holds_fn.values().cloned().collect();
                 self.laundered.extend(held);
             }
