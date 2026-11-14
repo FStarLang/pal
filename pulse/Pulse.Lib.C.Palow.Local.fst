@@ -95,3 +95,29 @@ fn value_copy (#t: Type0) (x: t)
 {
   x
 }
+
+(* ---------------------------------------------------------------------------
+   A fact carried across the join of an `if`
+
+   Pulse joins an `if` by itself, keeping what the arms own but not what they
+   proved about it: a value each arm stored with a known bound is a fresh
+   value after the join, about which nothing is known. Held as a resource the
+   fact is part of what the arms own, so the join keeps it -- stated at the
+   same existential as the points-to it is about -- and it is put back into
+   the context right after.
+   --------------------------------------------------------------------------- *)
+let if_fact (p: prop) : slprop = pure p
+
+ghost fn intro_if_fact (p: prop)
+  requires pure p
+  ensures if_fact p
+{
+  fold (if_fact p);
+}
+
+ghost fn elim_if_fact (p: prop)
+  requires if_fact p
+  ensures pure p
+{
+  unfold (if_fact p);
+}

@@ -4655,9 +4655,9 @@ fn states_ownership(tds: &Typedefs, e: &Expr) -> bool {
     refine_states_own(tds, e)
 }
 
-/// Whether a clause says anything beyond which objects are live: a fact
-/// about their values, say. `_live(x)` alone is what any frame says anyway.
-fn states_facts(tds: &Typedefs, e: &Expr) -> bool {
+/// The conjuncts of a clause that state a fact: not ownership, and not merely
+/// that an object is live, which any frame says anyway.
+fn fact_conjuncts(tds: &Typedefs, e: &Expr) -> Exprs {
     fn live_only(e: &Expr) -> bool {
         match &strip_vattr(e).val {
             ExprT::Live(_) => true,
@@ -4671,15 +4671,11 @@ fn states_facts(tds: &Typedefs, e: &Expr) -> bool {
     }
     let (mut own, mut props) = (Vec::new(), Vec::new());
     split_refine(tds, e, &mut own, &mut props);
-    props.iter().any(|p| !live_only(p))
-}
-
-/// Whether an `if` carries its `_ensures` as the join: when it states
-/// ownership, or a fact Pulse's own join would not keep.
-fn annotated_join(tds: &Typedefs, ensures: &Exprs) -> bool {
-    ensures
-        .iter()
-        .any(|e| states_ownership(tds, e) || states_facts(tds, e))
+    props
+        .into_iter()
+        .filter(|p| !live_only(p))
+        .map(|p| Rc::new(p.clone()))
+        .collect()
 }
 
 /// A clause as its `&&` conjuncts if any of them states ownership, and
@@ -13829,6 +13825,8 @@ struct BranchResult {
     union_values: HashMap<String, String>,
     out_params: Vec<String>,
     asserted_uninit: HashSet<(String, String)>,
+    /// Whether the arm ends holding the `_ensures` facts as a resource.
+    fact: bool,
 }
 
 fn indent(line: &str) -> String {
@@ -14042,6 +14040,9 @@ struct Body<'a> {
     /// either. The slot holds the value the call passed in for the whole
     /// body, so a frame states it at `var_p` rather than at a fresh binder.
     fixed_params: HashSet<String>,
+    /// The facts an `if`'s `_ensures` states, for the arm about to be
+    /// translated to end by holding; see the `If` case of `stmt`.
+    arm_facts: Exprs,
     /// Whether the emitted precondition can supply bounds and overflow facts.
     /// These may be explicit pure clauses, type refinements, or facts hidden
     /// inside a successfully translated separation-logic precondition.
@@ -23447,18 +23448,30 @@ impl<'a> Body<'a> {
                 // arms need not agree, so nothing survives the join.
                 self.active.clear();
                 // A `_ensures` that says only what is live needs no
-                // translation: Pulse computes the join of an `if` itself. One
-                // that states *ownership* is different. The two arms may have
-                // established it in different words -- a function pointer
-                // weakened from two different callees is the case that
-                // matters -- and then only the author's own words name the
-                // shape they have in common. So is one that states a fact:
-                // Pulse's join keeps what the arms own, not what they proved
-                // about it, so a fact the arms established about a value they
-                // computed -- `m <= 8` after `m = min(a, 8)` -- is gone after
-                // the `if` unless the annotation is the join.
+                // translation: Pulse computes the join of an `if` itself, so
+                // the annotation exists to be checked and not to make the code
+                // typecheck. One that states *ownership* is different. The two
+                // arms may have established it in different words -- a
+                // function pointer weakened from two different callees is the
+                // case that matters -- and then only the author's own words
+                // name the shape they have in common.
+                //
+                // A `_ensures` that states a fact and no ownership is not the
+                // join, which would then have to be the whole state. But
+                // Pulse's join keeps what the arms own and not what they
+                // proved about it, so a fact about a value the arms computed
+                // -- `m <= 8` after `m = min(a, 8)` -- would be gone. Each arm
+                // ends by holding the fact as a resource, which the join
+                // keeps, and it is put back into the context after the `if`.
                 let states_own = ensures.iter().any(|e| states_ownership(self.tds, e));
-                let joined = annotated_join(self.tds, ensures);
+                let facts: Exprs = if states_own {
+                    Vec::new()
+                } else {
+                    ensures
+                        .iter()
+                        .flat_map(|e| fact_conjuncts(self.tds, e))
+                        .collect()
+                };
                 let mut fps: Vec<(String, String)> = Vec::new();
                 let nt = self.null_test(cond);
                 let pt = if nt.is_none() {
@@ -23528,6 +23541,7 @@ impl<'a> Body<'a> {
                     self.unguarded.push(p.clone());
                 }
                 let outer_own_join = std::mem::replace(&mut self.own_join, states_own);
+                self.arm_facts = facts.clone();
                 let then = self.branch(then_branch);
                 if pt.is_some() && pt_live_then {
                     self.unguarded.pop();
@@ -23546,6 +23560,7 @@ impl<'a> Body<'a> {
                 if let Some((p, _)) = pt.as_ref().filter(|_| !pt_live_then) {
                     self.unguarded.push(p.clone());
                 }
+                self.arm_facts = facts.clone();
                 let els = self.branch(else_branch);
                 self.own_join = outer_own_join;
                 if pt.is_some() && !pt_live_then {
@@ -23700,14 +23715,12 @@ impl<'a> Body<'a> {
                     None => (Vec::new(), Vec::new()),
                 };
                 self.lines.push(format!("if ({})", c));
-                if joined {
+                if states_own {
                     // Pulse does not frame an `if`'s annotation, so it has to
                     // be the whole state at the join: the author's ownership
-                    // and facts plus everything they did not speak for.
+                    // plus everything they did not speak for.
                     let join = self.frame_slprop(ensures, "an `if`", "    ")?;
                     self.lines.push(format!("  ensures {}", join));
-                }
-                if states_own {
                     // Validity is not carried by any points-to -- the bytes of
                     // a code pointer say where the code is, not what it does --
                     // so a clause that speaks for a function-pointer local is
@@ -23742,6 +23755,14 @@ impl<'a> Body<'a> {
                 self.lines.extend(else_pre.iter().map(|l| indent(l)));
                 self.lines.extend(els.lines.iter().map(|l| indent(l)));
                 self.lines.push("};".to_string());
+                if then.fact || els.fact {
+                    let f = self.fresh("if_fact");
+                    self.lines.push(format!(
+                        "with {f}. assert (Pulse.Lib.C.Palow.Local.if_fact {f});"
+                    ));
+                    self.lines
+                        .push(format!("Pulse.Lib.C.Palow.Local.elim_if_fact {f};"));
+                }
                 for (addr, key) in fps {
                     self.seeded
                         .push((addr, "_".to_string(), "_".to_string(), key));
@@ -24115,6 +24136,7 @@ impl<'a> Body<'a> {
         let outer_in_branch = std::mem::replace(&mut self.in_branch, true);
         let outer_tail_branch = std::mem::replace(&mut self.tail_branch, false);
         let outer_diverged = std::mem::replace(&mut self.diverged, false);
+        let facts = std::mem::take(&mut self.arm_facts);
 
         let result = (|| -> Result<bool, String> {
             for s in stmts.iter() {
@@ -24172,7 +24194,29 @@ impl<'a> Body<'a> {
             // frame it is still holding; releasing them would be emitting
             // steps after the program has stopped.
             let returned = result?;
+            let mut fact = false;
             if !returned && !diverged {
+                // The `_ensures` facts, stated about what the slots hold now
+                // and held as a resource so that the join keeps them. An arm
+                // that jumps away has nothing to join.
+                if !facts.is_empty()
+                    && !stmts.last().is_some_and(|l| {
+                        matches!(l.val, StmtT::Break | StmtT::Continue | StmtT::Goto(_))
+                    })
+                {
+                    let was = std::mem::replace(&mut self.keep_reads, true);
+                    let ps: Result<Vec<String>, String> =
+                        facts.iter().map(|f| self.prop(f)).collect();
+                    self.keep_reads = was;
+                    let p = ps?
+                        .iter()
+                        .map(|p| format!("({})", p))
+                        .collect::<Vec<_>>()
+                        .join(r" /\ ");
+                    self.lines
+                        .push(format!("Pulse.Lib.C.Palow.Local.intro_if_fact ({});", p));
+                    fact = true;
+                }
                 // Validity seeded inside the arm is the arm's to put down:
                 // only the function's own frame (`mark == 0`) releases seeds,
                 // and restoring the outer list below would otherwise forget
@@ -24191,7 +24235,9 @@ impl<'a> Body<'a> {
                 // to the one expected.
                 if self.lines.last().is_some_and(|l| l == "};")
                     && stmts.last().is_some_and(|l| match &l.val {
-                        StmtT::If { ensures, .. } => annotated_join(self.tds, ensures),
+                        StmtT::If { ensures, .. } => {
+                            ensures.iter().any(|e| states_ownership(self.tds, e))
+                        }
                         _ => false,
                     })
                 {
@@ -24222,6 +24268,7 @@ impl<'a> Body<'a> {
                 union_values: self.union_values.clone(),
                 out_params: std::mem::take(&mut self.out_params),
                 asserted_uninit: std::mem::take(&mut self.asserted_uninit),
+                fact,
             })
         })();
 
@@ -26246,6 +26293,7 @@ fn emit_body(
             .collect(),
         old_params: HashSet::new(),
         fixed_params: HashSet::new(),
+        arm_facts: Vec::new(),
     };
 
     // A parameter whose address the body takes needs storage, and it needs it
