@@ -16480,7 +16480,9 @@ impl<'a> Body<'a> {
             })?),
         };
         let unaligned = self.unaligned_field(&ff.sn, &ff.field);
-        if !writing {
+        // A field that already holds a value is overwritten like any other,
+        // even though the object around it is not finished yet.
+        if !writing || self.scattered_set(target).contains(&*f.val) {
             if !self.scattered_set(target).contains(&*f.val) {
                 return None;
             }
