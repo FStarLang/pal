@@ -1590,14 +1590,31 @@ A contract on a `union req *` states `union_req_own` next to
 - A store through any member to bytes the ownership does not read
   (`header.flags`, `header.status`, `params.seq`) is followed by
   `_own_follow`: the ownership is the same afterwards.
+- A store of a struct-typed field of the owning member (`params.last = *v`)
+  goes through a focus on that member, so its bytes are not a scalar's.
+  It is followed by `_own_follow_view`, which needs the member live in the
+  new value and each owned field read through it unchanged: the member's
+  view says so of every field the store did not name.
 - A store that touches those bytes (`header.opaque`, which is where `ctx`
   is) is not followed: the ownership stays keyed to the value before the
   store, and a later dereference of `params.ctx` finds nothing it may use
   (`overlay_union_own_clobber_bad`).
+- Passing `&r->m` to a callee, for any member `m`, lends the member's bytes.
+  The union's value before the call is named, and `_own_follow` is tried
+  after it. It holds when the callee's contract says the bytes the
+  ownership reads come back: `_ensures(_unchanged(b->header.opaque))` gives
+  `Overlay.range_unchanged`, which `Overlay.range_unchanged_overlay` carries
+  through the overlay of the callee's result onto the union. A callee that
+  promises nothing loses the ownership (`overlay_union_own_lend_bad`).
+  A `const` parameter needs no promise: a nested overlay union lent to one
+  is focused with `_focus_read_m`/`_unfocus_read_m`, which give the union
+  back as the very term it was, so the ownership is not touched.
 
 At most one member may be `_owning`, and it has to be a struct whose `_own`
 is not empty; otherwise the union is skipped with the reason.
-Tests: `overlay_union_own`, `overlay_union_own_clobber_bad`.
+Tests: `overlay_union_own` (including `set_last`, `call_then_count` and
+the `const` lends `peek_flags`, `peek_then_count`, `peek_only`),
+`overlay_union_own_clobber_bad`, `overlay_union_own_lend_bad`.
 
 Limitations:
 
@@ -7400,3 +7417,16 @@ Limitations:
     `Seq.index xs (walk_idx e a q + 0)`; `array_focus_here`,
     `array_unfocus_here` and `array_unfocus_read_here` state the `i == 0`
     case with `walk_idx e a q`, the term a contract writes.
+66. **A flexible struct as a union member, and wide struct views.** A struct
+    ending in a flexible array member was not a union member: it has no
+    size, and an arm needs one. In a union, the tail takes the room the
+    union leaves it -- `(sizeof(union) - offsetof(tail)) / sizeof(elem)`
+    whole elements -- so the arm is given a synthetic struct `S__fill<k>`
+    with a `k`-element array in place of the tail. Reads, writes and
+    contracts through the arm see a fixed-length array, and a subscript
+    past `k` fails its bound (`union_flex_fill`, `union_flex_fill_oob_bad`).
+    Separately, `_reveal`/`_conceal` of a struct with many nested struct or
+    union fields had the solver unfold every nested `_repr`. Those proofs
+    need only congruence, so each is checked under `--using_facts_from`
+    that hides the nested `_repr` definitions; a zero-size field's is left
+    visible, since its proof is the definition.

@@ -9,9 +9,15 @@ struct ctx {
     uint32_t count;
 };
 
+struct pair {
+    uint32_t lo;
+    uint32_t hi;
+};
+
 struct params {
     struct ctx *ctx;
     uint32_t seq;
+    struct pair last;
 };
 
 struct header {
@@ -20,9 +26,16 @@ struct header {
     uint32_t flags;
 };
 
+/* The other members' layer sees the whole object as an overlay union of its
+   own, as BOSS's requests do. */
+union _overlay base {
+    struct header header;
+};
+
 union _overlay req {
     _owning struct params params;
     struct header header;
+    union base base;
 };
 
 uint32_t get_count(union req *r)
@@ -42,6 +55,48 @@ uint32_t flags_then_count(union req *r, uint32_t f)
     r->header.status = 0;
     r->params.seq = 7;
     return r->params.ctx->count;
+}
+
+/* A struct-typed field of the owning member is stored through a focus on it,
+   and its view says `ctx` is still there. */
+uint32_t set_last(union req *r, struct pair *v)
+    _requires(r->params._active)
+{
+    r->params.last = *v;
+    return r->params.ctx->count;
+}
+
+/* A callee handed the other member promises the bytes `ctx` is in back
+   unchanged, so the ownership is still there after the call. */
+void set_flags(union base *b, uint32_t f)
+    _ensures(_unchanged(b->header.opaque))
+{
+    b->header.flags = f;
+}
+
+uint32_t call_then_count(union req *r, uint32_t f)
+{
+    set_flags(&r->base, f);
+    return r->params.ctx->count;
+}
+
+/* A read-only callee leaves the union, and the ownership, as they were. */
+uint32_t get_flags(const union base *b);
+
+uint32_t peek_flags(const union req *r)
+{
+    return get_flags(&r->base);
+}
+
+uint32_t peek_then_count(union req *r)
+{
+    uint32_t f = get_flags(&r->base);
+    return f + r->params.ctx->count;
+}
+
+void peek_only(union req *r)
+{
+    get_flags(&r->base);
 }
 
 /* A read through the other member leaves everything as it was. */

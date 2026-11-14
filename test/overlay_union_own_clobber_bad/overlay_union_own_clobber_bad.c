@@ -20,9 +20,16 @@ struct header {
     uint32_t flags;
 };
 
+/* The other members' layer sees the whole object as an overlay union of its
+   own, as BOSS's requests do. */
+union _overlay base {
+    struct header header;
+};
+
 union _overlay req {
     _owning struct params params;
     struct header header;
+    union base base;
 };
 
 uint32_t clobber(union req *r)
@@ -30,3 +37,5 @@ uint32_t clobber(union req *r)
     r->header.opaque = 0;
     return r->params.ctx->count;
 }
+
+/* A callee handed the other member makes no promise about `opaque`. */
