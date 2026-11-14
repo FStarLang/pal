@@ -240,6 +240,7 @@ mod crate::clang {
         fn return_type(&mut self, Rc<Type>);
         fn arg(&mut self, Rc<Ident>, Rc<Type>, ParamMode);
         fn arg_anon(&mut self, Rc<Type>, ParamMode);
+        fn unowned(&mut self);
         fn field(&mut self, Rc<Ident>, Rc<Type>);
         fn field_bitfield(&mut self, Rc<Ident>, Rc<Type>, u32);
         fn refines(&mut self, Rc<Type>);

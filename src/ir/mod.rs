@@ -612,6 +612,9 @@ pub struct FnArg {
     pub name: Option<Rc<Ident>>,
     pub ty: Rc<Type>,
     pub mode: ParamMode,
+    /// `_unowned`: whatever the contract says about this parameter, it does
+    /// not hold the deep ownership (`_own`) of the struct it points at.
+    pub unowned: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]

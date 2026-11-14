@@ -39,6 +39,11 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
    so this is how a declaration using such a typedef opts out. */
 #define _mutable __attribute((annotate("pal-mutable")))
 #define _consumes __attribute__((annotate("pal-consumes")))
+/* On a pointer parameter whose hand-written contract holds the struct it
+   points at but not that struct's deep ownership (`_own`) -- lent elsewhere,
+   or not yet built. A write to one of its fields then leaves no `_own` to
+   follow to the struct's new value. */
+#define _unowned __attribute__((annotate("pal-unowned")))
 #define _out __attribute__((annotate("pal-out")))
 #define _array __attribute((annotate("pal-array")))
 #define _arrayptr __attribute((annotate("pal-arrayptr")))
@@ -105,6 +110,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _nullable
 #define _mutable
 #define _consumes
+#define _unowned
 #define _out
 #define _array
 #define _arrayptr

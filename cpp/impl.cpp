@@ -4201,6 +4201,8 @@ public:
         } else {
           builder.arg_anon(std::move(ty), std::move(mode));
         }
+        if (hasAnnotation(param, "pal-unowned"))
+          builder.unowned();
       }
       builder.return_type(trTypeAttrs(
           FD->getAttrs(),

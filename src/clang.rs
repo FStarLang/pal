@@ -608,6 +608,7 @@ impl DeclBuilder {
             name: Some(name),
             ty,
             mode,
+            unowned: false,
         })
     }
     fn arg_anon(&mut self, ty: Rc<Type>, mode: ParamMode) {
@@ -620,7 +621,15 @@ impl DeclBuilder {
             name: Some(name),
             ty,
             mode,
+            unowned: false,
         })
+    }
+
+    /// Marks the parameter added last as `_unowned`.
+    fn unowned(&mut self) {
+        if let Some(a) = self.args.last_mut() {
+            a.unowned = true;
+        }
     }
 
     fn field(&mut self, name: Rc<Ident>, ty: Rc<Type>) {

@@ -14103,6 +14103,9 @@ struct Body<'a> {
     granted: &'a HashSet<String>,
     /// See `FnSurface::spliced_own`.
     spliced_own: bool,
+    /// `_unowned` parameters: the contract may hold their pointee, but not
+    /// its `_own`, so there is no ownership to open or to follow.
+    unowned: HashSet<String>,
     /// Parameters whose struct pointee the contract owns field by field. See
     /// `FnSurface::pieces`.
     pieces: &'a HashSet<String>,
@@ -15021,7 +15024,7 @@ impl<'a> Body<'a> {
                     return None;
                 };
                 let p = v.val.to_string();
-                if !self.params.contains(&p) || !self.owned_here(&p) {
+                if !self.params.contains(&p) || !self.owned_here(&p) || self.unowned.contains(&p) {
                     return None;
                 }
                 Some(OwnPath {
@@ -15076,7 +15079,7 @@ impl<'a> Body<'a> {
             return None;
         };
         let p = v.val.to_string();
-        if !self.owned_here(&p) || !self.params.contains(&p) {
+        if !self.owned_here(&p) || !self.params.contains(&p) || self.unowned.contains(&p) {
             return None;
         }
         let ty = self.ty_of(base).ok()?;
@@ -26367,6 +26370,13 @@ fn emit_body(
         outs: &sig.outs,
         granted: &sig.granted,
         spliced_own: sig.spliced_own,
+        unowned: defn
+            .decl
+            .args
+            .iter()
+            .filter(|a| a.unowned)
+            .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
+            .collect(),
         pieces: &sig.pieces,
         piece_types: &sig.piece_types,
         asserted_pieces: HashSet::new(),

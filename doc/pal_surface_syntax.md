@@ -115,6 +115,7 @@ fn func_f (var_x: ptr) (#val_x: erased T)
 | `const T _mutable *x`     | as `T *x`: the declaration opts out of the const reading, e.g. for a `_nullable` input that should be held at full permission |
 | `_plain T *x`             | nothing: `x` is a bare address; the user supplies any ownership in `_requires` / `_ensures` |
 | `_plain T x` (a value)    | nothing: for a struct, neither the `_own` of its pointer fields nor its type's or fields' `_refine`s; only refinements written on the parameter itself are stated |
+| `_plain _unowned T *x`    | as `_plain`, and the hand-written contract is taken not to hold the `_own` of the struct `x` points at (lent elsewhere, say, with only the struct's points-to kept). A write to a field of `*x` then leaves no `_own` behind to follow to the struct's new value. Without it, a hand-written contract is assumed to hold the `_own`. See `test/unowned_field_write` |
 | `_consumes T *x`          | `T_pts_to` in `requires` only — not returned |
 | `_out T *x`               | `T_pts_to_uninit var_x` in `requires`, `T_pts_to` in `ensures` |
 | `_nullable T *x`          | `unless_null var_x (T_pts_to var_x 1.0R val_x)` at both ends |
