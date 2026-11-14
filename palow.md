@@ -1557,6 +1557,51 @@ one-byte bit-field structs);
 `overlay_union_unchanged_2d_bad` (the same, for a row of a two-dimensional
 array), `overlay_union_unchanged_reject`.
 
+#### Ownership through an overlay
+
+An overlay union has no tag, so nothing in its bytes says which member's
+pointers are live. `_owning` on one member says that member's are: a pointer
+to the union then carries the deep ownership of that member's struct
+(`_own`), at the member's view of the union's bytes.
+
+```c
+union _overlay req {
+    _owning struct params params;   /* struct params { struct ctx *ctx; uint32_t seq; } */
+    struct header header;           /* struct header { uint64_t opaque; uint32_t status, flags; } */
+};
+```
+
+generates, beside the union's `_pts_to`:
+
+- `union_req_own u p s = pure (union_req_own_ok u) ** struct_params_own (union_req_get_params u) p s`,
+  where `_own_ok` says the bytes of each owned pointer read as a pointer;
+- `_own_scatter`/`_own_gather`, between that and the member's `_own`;
+- `_own_same u y`: equality of `u` and `y` on the byte ranges of the fields
+  the member's ownership reads, and `_own_follow`, which moves the ownership
+  from `u` to any `y` the union now holds with `_own_same u y`;
+- per owned pointer at offset `o`, `_own_at_o_read`, a load of it that comes
+  back as the term the ownership is at, so that what it points to is found.
+
+A contract on a `union req *` states `union_req_own` next to
+`union_req_pts_to`, as for a struct with an `_own`. In a body:
+
+- A read through any member, and a load through `params.ctx`, open and close
+  the ownership around the statement; ownership is unchanged.
+- A store through any member to bytes the ownership does not read
+  (`header.flags`, `header.status`, `params.seq`) is followed by
+  `_own_follow`: the ownership is the same afterwards.
+- A store that touches those bytes (`header.opaque`, which is where `ctx`
+  is) is not followed: the ownership stays keyed to the value before the
+  store, and a later dereference of `params.ctx` finds nothing it may use
+  (`overlay_union_own_clobber_bad`).
+
+At most one member may be `_owning`, and it has to be a struct whose `_own`
+is not empty; otherwise the union is skipped with the reason. `_owning`
+anywhere else (a struct field, a member of a union that is not `_overlay`)
+is reported rather than ignored.
+Tests: `overlay_union_own`, `overlay_union_own_clobber_bad`,
+`overlay_union_owning_reject`.
+
 Limitations:
 
 - Floats are not leaves; a field of floating type has no view.

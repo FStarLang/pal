@@ -697,18 +697,25 @@ public:
       }
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/false);
+        if (hasAnnotation(f, "pal-owning"))
+          reportUnsupported(f->getSourceRange(), getRange(f->getSourceRange()),
+                            "`_owning` is only for a member of an `_overlay` "
+                            "union",
+                            "");
       }
       recordTypeLayout(kLayoutStruct, toStringRef(ident_name(ident)),
                        typeForDecl(*astCtx, decl));
       recordFieldOffsets(kLayoutStruct, toStringRef(ident_name(ident)), decl);
       ctx.add_struct(std::move(builder));
     } else if (decl->getTagKind() == TagTypeKind::Union) {
+      bool overlay = false;
       if (decl->hasAttrs()) {
         for (auto *attr : decl->getAttrs()) {
           if (auto *ann = dyn_cast<AnnotateAttr>(attr)) {
             if (ann->getAnnotation() == "pal-overlay" &&
                 ann->args_size() == 0) {
               builder.set_overlay();
+              overlay = true;
             }
           }
         }
@@ -727,6 +734,14 @@ public:
       }
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/true);
+        if (hasAnnotation(f, "pal-owning") && !overlay)
+          reportUnsupported(f->getSourceRange(), getRange(f->getSourceRange()),
+                            "`_owning` is only for a member of an `_overlay` "
+                            "union",
+                            "");
+        else if (hasAnnotation(f, "pal-owning"))
+          builder.set_owning(ctx.mk_ident(toStr(fieldNameStr(f)),
+                                          getRange(f->getSourceRange())));
       }
       recordTypeLayout(kLayoutUnion, toStringRef(ident_name(ident)),
                        typeForDecl(*astCtx, decl));
