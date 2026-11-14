@@ -3660,12 +3660,18 @@ impl<'a> Spec<'a> {
         };
         let lt = self.ty_of(l).ok()?;
         let rt = self.ty_of(r).ok()?;
-        pointee(self.tds, peel(self.tds, &lt))?;
+        let lp = pointee(self.tds, peel(self.tds, &lt))?;
         pointee(self.tds, peel(self.tds, &rt))?;
-        Some(
-            self.ptr_positions(l, r, w)
-                .and_then(|(pl, pr)| Ok(pos_op(&pl, BinOp::Sub, &pr))),
-        )
+        Some(self.ptr_positions(l, r, w).and_then(|(pl, pr)| {
+            // Positions count the array's elements, C's difference those of
+            // the pointers' own type: a word pointer walked over a byte
+            // array is not one element further for each byte.
+            let (ol, _) = self.ptr_pos(l, w).unwrap()?;
+            if palow_sizeof(self.tds, lp) != self.owner_elem_size(&ol) {
+                return Err(diff_at_other_size());
+            }
+            Ok(pos_op(&pl, BinOp::Sub, &pr))
+        }))
     }
 
     /// The positions of two pointers into one array parameter.
@@ -19415,7 +19421,24 @@ impl<'a> Body<'a> {
                 "an assertion that subtracts pointers into different arrays".to_string(),
             ));
         }
+        // As in a contract: positions count the array's elements, C's
+        // difference those of the pointers' own type.
+        let lt = self.ty_of(l).ok()?;
+        let lsz = palow_sizeof(self.tds, pointee(self.tds, peel(self.tds, &lt))?);
+        if lsz != self.owner_esize(&ol) {
+            return Some(Err(diff_at_other_size()));
+        }
         Some(Ok(pos_op(&pl, BinOp::Sub, &pr)))
+    }
+
+    /// The element size of the array parameter `owner`, in bytes.
+    fn owner_esize(&self, owner: &str) -> Option<u64> {
+        self.arrays
+            .get(owner)?
+            .esize
+            .strip_suffix("sz")?
+            .parse()
+            .ok()
     }
 
     /// Where a pointer into an array parameter points, as an element index
@@ -19456,7 +19479,21 @@ impl<'a> Body<'a> {
                     Ok(x) => x,
                     Err(e) => return Some(Err(e)),
                 };
-                Some(self.num(r).map(|n| (owner, pos_op(&pos, *op, &n))))
+                // A step of a pointer to something wider (a word through a
+                // byte array) is that many of the array's elements.
+                let lt = self.ty_of(l).ok()?;
+                let lsz = palow_sizeof(self.tds, pointee(self.tds, peel(self.tds, &lt))?)?;
+                let osz = self.owner_esize(&owner)?;
+                if osz == 0 || lsz % osz != 0 {
+                    return None;
+                }
+                Some(self.num(r).map(|n| {
+                    let n = match lsz / osz {
+                        1 => n,
+                        k => format!("({} * {})", k, n),
+                    };
+                    (owner, pos_op(&pos, *op, &n))
+                }))
             }
             ExprT::Cast(inner, to) => {
                 let it = self.ty_of(inner).ok()?;
@@ -27526,6 +27563,12 @@ fn witness_let(tds: &Typedefs, ty: &Type, bound: &str, wv: &str, body: &str) -> 
     Some(format!(
         r"(let {wit} : int = {wv} in {range} /\ (let {bound} : {fty} = {conv} in {body}))"
     ))
+}
+
+fn diff_at_other_size() -> String {
+    "a difference of pointers whose element type is not their array's: cast both to \
+     the array's element type"
+        .to_string()
 }
 
 fn strip_vattr(e: &Expr) -> &Expr {

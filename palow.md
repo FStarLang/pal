@@ -7616,4 +7616,10 @@ Limitations:
     `(char *)wd - d0` for a view `wd` walked over a `char` array is a
     position difference; a pointer difference whose positions are unknown
     is now an error instead of an ill-typed subtraction
-    (`test/invariant_clauses`, `test/invariant_clauses_bad`).
+    (`test/invariant_clauses`, `test/invariant_clauses_bad`). A body
+    assertion's `w + n` steps `n` of `w`'s own elements, as a contract's
+    does, and `p - q` between pointers whose element type is not their
+    array's (`wd - w0` for words over bytes) is refused in both: a
+    position counts the array's elements, so it would have been a byte
+    count where C means words (`test/ptr_word_step`,
+    `test/ptr_word_step_bad`, `test/ptr_word_diff_diag`).

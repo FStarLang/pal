@@ -1,0 +1,3 @@
+# Expected translation diagnostic substrings
+`Func_f`: its body is not translated: a difference of pointers whose element type is not their array's
+`Func_g`: its body is not translated: a difference of pointers whose element type is not their array's
