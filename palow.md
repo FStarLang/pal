@@ -7648,3 +7648,17 @@ Limitations:
     goals succeed (18 s and 54 s) and checking goes on to the later
     queries, which take long enough that the run did not finish within
     the measurement bound.
+87. **Wall-clock bound per Z3 query.** `test/verify.mk` takes an
+    optional `Z3_TIMEOUT_MS` (`make Z3_TIMEOUT_MS=300000 ...`) and passes
+    it to Z3 as `--z3cliopt timeout=<ms>`. Item 86 showed that Z3's
+    rlimit does not bound wall time: a matching loop ran for hours on a
+    few F* rlimit units, and a test (Fermat's n = 3 with
+    `--z3rlimit 1000000`) used about 11 units in 5 s. With the option, Z3
+    cancels such a query, and F* reports an ordinary Error 19 ("The SMT
+    query timed out", query stats `unknown because canceled`) and goes on
+    with the rest of the module. The bound applies to each check-sat, so
+    fuel/ifuel retries multiply it, and a bound so small that Z3 cancels
+    its own setup surfaces as Error 276 ("Unexpected output from Z3"),
+    which is also a failure. Since wall time depends on load, the option
+    is a safety net against runaway queries, not a proof budget; it is
+    unset by default, and test results don't depend on it.
