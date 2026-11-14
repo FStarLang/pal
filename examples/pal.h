@@ -42,6 +42,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _out __attribute__((annotate("pal-out")))
 #define _array __attribute((annotate("pal-array")))
 #define _arrayptr __attribute((annotate("pal-arrayptr")))
+#define _cursor __attribute((annotate("pal-cursor")))
 #define _pure __attribute((annotate("pal-pure")))
 #define _total __attribute((annotate("pal-total")))
 #define _pal_ignore __attribute__((annotate("pal-ignore")))
@@ -114,6 +115,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _out
 #define _array
 #define _arrayptr
+#define _cursor
 #define _pure
 #define _total
 #define _pal_ignore

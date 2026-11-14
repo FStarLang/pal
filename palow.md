@@ -7583,4 +7583,88 @@ Limitations:
     return `array_somes` moves the block to the plain view, which needs
     every cell written (musl's `strdup`/`strndup`; `test/alloc_array_return`,
     `test/alloc_array_return_bad`). Callers cannot take over a returned
-    array yet, and `wmemcpy` into a block (`wcsdup`) is not handled.
+    array yet; `wmemcpy` into a block (`wcsdup`) is item 83.
+82. **`_cursor` out-parameters.** `strsep(char **str, ...)` reads a
+    position `*str` into a terminated array, splits a token off it and
+    stores back a pointer into the same array, or null. `_cursor T **p`
+    makes the pointee `_nullable _array T *`, and the contract owns the
+    array under a virtual parameter `p__arr`: `ptr_pts_to var_p 1.0R
+    var_p__arr ** unless_null var_p__arr (array_pts_to ... var_p__arr
+    1.0R val_p__arr)` on entry, the same at the entry base with fresh
+    `var_p__arr'`/`val_p__arr'` on exit. Contract `*p` is `var_p__arr`
+    (`var_p__arr'` in an `_ensures`), `(*p)[k]` reads `val_p__arr`,
+    `_old(*p)[k]` reads `val_p__arr'`, and `*p - _old(*p)` is
+    `walk_idx esize var_p__arr var_p__arr'`. In the body `p__arr` is an
+    array parameter whose base is the erased `var_p__arr`: a local read
+    from `*p` walks it, and its null test asserts it equals `var_p__arr`
+    and opens the guard (`elim_unless_null` plus `array_fits` and
+    `array_walk_base`) in the live arm. Storing a walked pointer or null
+    back into `*p` is a plain pointer store. Two fixes came with it: a
+    `_nullable _array` parameter's contents may be named in a contract,
+    each such clause read under `not (is_null var_a)`; and reading a local
+    that only aliases an array parameter (`char *s = a; return s;`) emitted
+    the unbound `var_s` instead of `var_a`. An `if` whose arm writes an
+    element through a walked pointer (`if (*end) *end++ = 0; else end =
+    0;`) now has its copyable tail copied into both arms, as an `if` with a
+    loop already did: Pulse types the arm's `Seq.upd` at the join, outside
+    the facts that bound the position. Callers of `_cursor` functions are
+    refused for now (musl's `strsep`; `test/cursor_strsep`,
+    `test/cursor_strsep_bad`, `test/cursor_diag`). `strtok_r` is not
+    covered: its token pointer comes from either `s` or `*p`, i.e. two
+    different arrays, depending on the path.
+83. **`wmemcpy` into a fresh heap array.** `wcsdup` copies with
+    `wmemcpy(d, s, l + 1)` into `malloc((l + 1) * sizeof(wchar_t))`. Like
+    `memcpy` (item 81) it is a reserved name with a fixed meaning, the
+    copy of `n` wide chars, so it goes to `array_copy_maybe` with the
+    element size and `n * esize` bytes instead of through a contract that
+    wants an initialised destination. Source and destination must have
+    the same element type (musl's `wcsdup`; `test/alloc_wide_return`,
+    `test/alloc_wide_return_bad`).
+84. **Existential witnesses.** A callee's existential precondition (musl's
+    `strncasecmp` wants some `i < n` where the strings end or differ) is
+    proved by Z3 only if it can guess the instance, and a witness that is
+    a computed term (`t - (h - _old(h))`, `n - 1`) it rarely guesses in a
+    heavy context. `_exists(T i = w, p)` is parser sugar for `_exists(T i,
+    i == w && p)`, and the emitter turns any existential with a top-level
+    conjunct `i == w` (`w` free of `i`, and the comparison reading `i` as
+    its plain number, checked by translating both and comparing) into
+    `let i_wit : int = w in range /\ (let i : T = conv i_wit in p)`:
+    `0 <= w /\ SizeT.fits w` with `SizeT.uint_to_t` for `size_t`,
+    `pow2` bounds with `uint_to_t`/`int_to_t` for fixed-width integers,
+    nothing for `_specint` (`0 <= w` for `_nat`). Contract equality
+    compares numbers, so this is the same proposition as the `exists`,
+    in hypotheses as well as goals; other types keep the `exists`. Both
+    the contract translator and the body assertion translator do this
+    (`test/exists_witness`, `test/exists_witness_bad`).
+85. **Invariant re-establishment per conjunct (`--split-invariants`).**
+    musl's long loop invariants (`strlcpy`'s word loop, `strncat`) make
+    one large query of the invariant check at the end of the body, which
+    times out or is flaky, and a failure does not say which clause broke;
+    this F* has no `--split_queries`. With the flag, where the body falls
+    through to its closing brace (no `_requires` on the loop, the body not
+    always leaving), every conjunct of the invariant -- each `_invariant`
+    clause split at top-level `&&`, under the `_Bool` conversion a clause
+    carries -- is first emitted as its own body assertion
+    (`stmt_assertion`, against the loop head's scope and slots, so a body
+    local cannot capture a name), in order, so later conjuncts have the
+    earlier ones as hypotheses (`s[i - 1]` after `0 < i`). Ownership
+    clauses are skipped; the first conjunct that cannot be written as an
+    assertion ends the list. Pulse's own check of the invariant follows.
+    Measured on musl: `strlcpy` goes from 27 to 53 assertions and reports
+    its one failing clause (`ws - s + n + 1 == _old(n)`) where the whole
+    check reported an earlier alignment clause; `strncat` (24 to 33)
+    reports the quantified clause that fails. It is not on by default: a
+    quantified clause asserted alone can time out where the whole check
+    passes (`test/exists_witness`'s `scan`). Two body-assertion gaps it exposed
+    are fixed for every `_assert`: `p <= q` on pointers into one array
+    compares positions (it was an ill-typed `ptr` comparison), and
+    `(char *)wd - d0` for a view `wd` walked over a `char` array is a
+    position difference; a pointer difference whose positions are unknown
+    is now an error instead of an ill-typed subtraction
+    (`test/invariant_clauses`, `test/invariant_clauses_bad`). A body
+    assertion's `w + n` steps `n` of `w`'s own elements, as a contract's
+    does, and `p - q` between pointers whose element type is not their
+    array's (`wd - w0` for words over bytes) is refused in both: a
+    position counts the array's elements, so it would have been a byte
+    count where C means words (`test/ptr_word_step`,
+    `test/ptr_word_step_bad`, `test/ptr_word_diff_diag`).
