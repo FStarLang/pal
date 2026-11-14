@@ -380,8 +380,9 @@ fn main() {
     // comments and the count back.
     if !cli.palow_permissive {
         for module in &modules {
-            for why in pass::emit_palow::weakenings(module) {
+            for (why, at) in pass::emit_palow::weakenings(module) {
                 let loc = match &module.origin {
+                    _ if let Some(at) = at => at,
                     Some(o) => Location {
                         file_name: o.file.clone(),
                         range: o.range,

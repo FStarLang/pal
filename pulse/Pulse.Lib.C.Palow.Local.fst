@@ -95,3 +95,54 @@ fn value_copy (#t: Type0) (x: t)
 {
   x
 }
+
+(* An array's bytes, read at the `option` view: every element holds the value
+   it held. *)
+let array_repr_somes (#t: Type0) (t_repr: t -> bytes -> prop) (esize: nat)
+                     (xs: Seq.seq t) (b: bytes)
+  : Lemma (requires array_repr t_repr esize xs b)
+          (ensures  array_repr (maybe_repr t_repr esize) esize (somes xs) b)
+  = ()
+
+(* `memcpy` of the first `k` elements of an array into storage that may not
+   have been written yet -- what `memcpy(d, s, n)` does to a fresh `malloc`
+   block. The bytes are copied as bytes, by the machine `memcpy`, so nothing
+   about the element type is assumed; what comes out is that the copied cells
+   hold `Some` of the source's values and the rest are as they were. *)
+fn array_copy_maybe (#t: Type0) (t_repr: t -> bytes -> prop) (dst src: ptr)
+                    (esize: SZ.t) (ealign: SZ.t) (k: SZ.t) (nbytes: SZ.t)
+                    (#p: perm) (#xs: erased (Seq.seq t)) (#ys: erased (Seq.seq (option t)))
+  requires array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) (SZ.v ealign) dst 1.0R ys
+  preserves array_pts_to t_repr (SZ.v esize) (SZ.v ealign) src p xs
+  requires pure (SZ.v k <= Seq.length xs /\ SZ.v k <= Seq.length ys /\
+                 SZ.v nbytes == SZ.v esize * SZ.v k)
+  ensures  exists* (zs: Seq.seq (option t)).
+             array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) (SZ.v ealign) dst 1.0R zs **
+             pure (Seq.length zs == Seq.length ys /\ SZ.v k <= Seq.length xs /\
+                   (forall (i: nat). {:pattern Seq.index zs i}
+                     i < Seq.length zs ==>
+                     Seq.index zs i == (if i < SZ.v k then Some (Seq.index xs i)
+                                        else Seq.index ys i)))
+{
+  array_split (maybe_repr t_repr (SZ.v esize)) dst esize ealign #1.0R #ys k nbytes;
+  array_split t_repr src esize ealign #p #xs k nbytes;
+  unfold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) (SZ.v ealign) dst 1.0R
+                      (Seq.slice ys 0 (SZ.v k));
+  unfold array_pts_to t_repr (SZ.v esize) (SZ.v ealign) src p (Seq.slice xs 0 (SZ.v k));
+  with bs. assert (mem_pts_to src p bs);
+  memcpy dst src nbytes;
+  array_repr_somes t_repr (SZ.v esize) (Seq.slice xs 0 (SZ.v k)) bs;
+  fold array_pts_to t_repr (SZ.v esize) (SZ.v ealign) src p (Seq.slice xs 0 (SZ.v k));
+  fold array_pts_to (maybe_repr t_repr (SZ.v esize)) (SZ.v esize) (SZ.v ealign) dst 1.0R
+                    (somes (Seq.slice xs 0 (SZ.v k)));
+  array_join t_repr src esize ealign nbytes #p #(Seq.slice xs 0 (SZ.v k))
+             #(Seq.slice xs (SZ.v k) (Seq.length xs));
+  Seq.lemma_split xs (SZ.v k);
+  rewrite (array_pts_to t_repr (SZ.v esize) (SZ.v ealign) src p
+                        (Seq.append (Seq.slice xs 0 (SZ.v k))
+                                    (Seq.slice xs (SZ.v k) (Seq.length xs))))
+       as (array_pts_to t_repr (SZ.v esize) (SZ.v ealign) src p xs);
+  array_join (maybe_repr t_repr (SZ.v esize)) dst esize ealign nbytes #1.0R
+             #(somes (Seq.slice xs 0 (SZ.v k)))
+             #(Seq.slice ys (SZ.v k) (Seq.length ys));
+}

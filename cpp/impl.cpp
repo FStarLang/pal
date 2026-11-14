@@ -697,18 +697,25 @@ public:
       }
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/false);
+        if (hasAnnotation(f, "pal-owning"))
+          reportUnsupported(f->getSourceRange(), getRange(f->getSourceRange()),
+                            "`_owning` is only for a member of an `_overlay` "
+                            "union",
+                            "");
       }
       recordTypeLayout(kLayoutStruct, toStringRef(ident_name(ident)),
                        typeForDecl(*astCtx, decl));
       recordFieldOffsets(kLayoutStruct, toStringRef(ident_name(ident)), decl);
       ctx.add_struct(std::move(builder));
     } else if (decl->getTagKind() == TagTypeKind::Union) {
+      bool overlay = false;
       if (decl->hasAttrs()) {
         for (auto *attr : decl->getAttrs()) {
           if (auto *ann = dyn_cast<AnnotateAttr>(attr)) {
             if (ann->getAnnotation() == "pal-overlay" &&
                 ann->args_size() == 0) {
               builder.set_overlay();
+              overlay = true;
             }
           }
         }
@@ -727,7 +734,12 @@ public:
       }
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/true);
-        if (hasAnnotation(f, "pal-owning"))
+        if (hasAnnotation(f, "pal-owning") && !overlay)
+          reportUnsupported(f->getSourceRange(), getRange(f->getSourceRange()),
+                            "`_owning` is only for a member of an `_overlay` "
+                            "union",
+                            "");
+        else if (hasAnnotation(f, "pal-owning"))
           builder.set_owning(ctx.mk_ident(toStr(fieldNameStr(f)),
                                           getRange(f->getSourceRange())));
       }
@@ -1702,6 +1714,16 @@ public:
                                            std::move(countExpr));
                   }
                 }
+              }
+              // A byte array: `char *d = malloc(n)`. The count is in bytes,
+              // which for an element of size 1 is the number of elements, so
+              // there is no `sizeof` factor to find.
+              auto pointeeQt = ic->getType()->getPointeeType();
+              if (!pointeeQt.isNull() && pointeeQt->isCharType()) {
+                auto allocTy = trQualType(pointeeQt.getUnqualifiedType(),
+                                          ic->getSourceRange());
+                return mk_malloc_array(std::move(loc), std::move(allocTy),
+                                       trRValue(arg));
               }
             }
             // Detect calloc(n, sizeof(T)) and calloc(1, n * sizeof(T))
@@ -3917,6 +3939,17 @@ public:
                               std::move(thenStmts), std::move(elseStmts),
                               Vec<Rc<ir::Expr>>::new_()));
     } else if (dyn_cast<NullStmt>(stmt) || dyn_cast<IntegerLiteral>(stmt)) {
+      return rust::Unit();
+    } else if (auto *as = dyn_cast<GCCAsmStmt>(stmt);
+               as && as->getAsmString()->getString().empty() &&
+               as->getNumOutputs() == 0 && as->getNumLabels() == 0) {
+      // An empty template executes no instructions, and without outputs or
+      // labels it cannot change a C variable or jump: it is a compiler
+      // barrier (`__asm__ volatile ("" : : "r"(p) : "memory")`, as in
+      // explicit_bzero), so only its inputs' side effects remain.
+      for (unsigned i = 0; i < as->getNumInputs(); i++) {
+        trStmt(stmts, as->getInputExpr(i));
+      }
       return rust::Unit();
     }
 

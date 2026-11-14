@@ -1611,10 +1611,13 @@ A contract on a `union req *` states `union_req_own` next to
   back as the very term it was, so the ownership is not touched.
 
 At most one member may be `_owning`, and it has to be a struct whose `_own`
-is not empty; otherwise the union is skipped with the reason.
+is not empty; otherwise the union is skipped with the reason. `_owning`
+anywhere else (a struct field, a member of a union that is not `_overlay`)
+is reported rather than ignored.
 Tests: `overlay_union_own` (including `set_last`, `call_then_count` and
 the `const` lends `peek_flags`, `peek_then_count`, `peek_only`),
-`overlay_union_own_clobber_bad`, `overlay_union_own_lend_bad`.
+`overlay_union_own_clobber_bad`, `overlay_union_own_lend_bad`,
+`overlay_union_owning_reject`.
 
 Limitations:
 
@@ -7417,7 +7420,188 @@ Limitations:
     `Seq.index xs (walk_idx e a q + 0)`; `array_focus_here`,
     `array_unfocus_here` and `array_unfocus_read_here` state the `i == 0`
     case with `walk_idx e a q`, the term a contract writes.
-66. **A flexible struct as a union member, and wide struct views.** A struct
+65. **`char` arrays as bytes.** An `_array void *` parameter is an array of
+    `uint8_t`, so passing a `char` array (`int8_t`) to it failed with
+    `seq Int8.t <: seq UInt8.t` (musl's `strrchr` calling `__memrchr`).
+    `array_retype` (`Pulse.Lib.C.Palow.Array`) turns an
+    `array_pts_to t_repr ... xs` into an `array_pts_to u_repr ...
+    (seq_map f xs)` whenever every `t_repr x b` is `u_repr (f x) b`;
+    `array_int8_as_uint8` and `array_uint8_as_int8`
+    (`Pulse.Lib.C.Palow.Word`) are its instances for `int8_to_uint8` and
+    its inverse, which keep the byte. `call` brackets the call with the two
+    (the second after the callee's post-state is rejoined), and the
+    callee's sequence is `seq_map int8_to_uint8` of the caller's, so its
+    `((unsigned char *)p)[k]` is the caller's `(unsigned char)s[k]` and a
+    byte it writes comes back as the `char` with that representation. A
+    pointer the callee returns into the array is a walked pointer of the
+    `char` array (`strnlen` calling `memchr`). Wider element types are
+    refused for now (`test/array_char_as_bytes`,
+    `test/array_wide_as_bytes`).
+66. **`_specint` subscripts carry their guard.** Item 60 dropped the offset
+    from `a[k]` on the array's base, and with it the `0 <= walk_idx + k`
+    guard, leaving `Seq.index xs k` with `k: int`, which needs a `nat`; an
+    invariant `_forall(_specint k, d - a <= k && k < a._length ==> ...)`
+    no longer typechecked. A subscript that may be negative (`_specint`,
+    `ptrdiff_t`, a signed type) is guarded by `0 <= k /\ k < Seq.length xs`
+    again (`test/spec_index_guard`).
+67. **Unsigned contract arithmetic is a number.** In musl's `wcsncat` the
+    postcondition `_exists(size_t m, ... _forall(size_t k, ... d[m + k]
+    ...))` timed out. `m + k` was the machine integer `m `add_wrap` k`
+    (`SizeT.add` where `size_t` does not wrap). Z3 picks `SizeT.v k`-style
+    triggers for the unannotated quantifiers, and every instance made
+    another `size_t` term, `add_wrap m k`, whose typing and equation axioms
+    gave another `SizeT.v` to trigger on: tens of thousands of instances
+    per hypothesis. `Spec::num` now reads unsigned `+`, `-`, `*` as the
+    mathematical result reduced modulo the type's range,
+    `spec_to_unsigned m (v a + v b)`, the form item 59 gives casts. A
+    partial operator adds its definedness guard instead and is the plain
+    sum. Either way the term is an integer and creates nothing to trigger
+    on, and the value is unchanged (`test/spec_unsigned_index`).
+    That alone does not make `wcsncat` verify. Its final `_assert`, the
+    `_ensures` verbatim, seemed to verify while the identical postcondition
+    failed, but Pulse discharges `assert (pure p)` obligations after the
+    statements that follow, so the failing return hid it: with the return
+    admitted the `_assert` times out the same way. The goal is an
+    `exists`/`forall` alternation proved from seven others of that shape,
+    each a refinement hypothesis whose `iff` encoding Z3 keeps instantiating
+    on every `size_t` term in scope.
+68. **Joins PAL supplies for an `if`.** Pulse's own join after an `if`
+    whose arm moves a walked pointer (musl `memchr`: a word loop inside
+    the arm) abstracts the pointer's value and keeps no fact about it, so
+    the next loop's invariant failed on the arm that did not move it. An
+    `if` without `_ensures` that writes locals and is directly followed by a
+    loop with pure invariants now takes those invariants as its `_ensures`
+    (the pure join), which is exactly what the loop needs on
+    entry (`loop_entry_joins`, `test/if_loop_join`). And when an arm has a
+    loop and the `if` is followed only by straight-line code ending in
+    `return` (musl `wmemmove`, a copy loop in each arm), Pulse could not
+    eliminate the `match cond with true -> exists* ... | false -> exists*
+    ...` it built for the join; that tail is now copied into both arms, as
+    `rest` already did for arms that return (`copyable_tail`,
+    `test/if_loops_tail`).
+69. **Bitwise operators in contracts.** `&`, `|`, `^`, `~`, `<<`, `>>` on
+    unsigned operands are `FStar.UInt.logand #w` etc. over the operands'
+    numbers (`~x` is `2^w - 1 - x`, as in the body), `w` the operand's
+    width (pointer width for `size_t`), so body
+    facts about machine words relate to them by the machine operations'
+    specifications. A shift's amount is guarded `0 <= s /\ s < w`; an
+    integer cast on the amount is dropped under that guard. A `_specint`
+    on the left of a shift has no width and is rejected
+    (`test/spec_bitwise`).
+70. **Sign-changing views of local aliases.** A local initialised from an
+    `_array` at the other signedness of its byte element
+    (`const char *src = _src;` on an `_array void *`, musl's `swab`;
+    `const unsigned char *l = (const void *)l0;` on a `char` array,
+    musl's `strverscmp`) was refused with "cannot subscript". The
+    elaborator now sees through pointer casts when it records a local as
+    another name for an array (`strip_ptr_casts`), and an element access
+    through such a local (`place_sign_view`) focuses the array at its own
+    element type and converts: a read is `int8_to_uint8`/`uint8_to_int8` of
+    the element, a write stores the converted value, which is the same
+    byte (`int8_to_uint8_value`, `uint8_to_int8_value` in
+    `Pulse.Lib.C.Palow.Word`). The same conversion makes a write through a
+    walked pointer at the other signedness work, which item 56's
+    `test/array_walk_followups_bad` refused; that case moved to
+    `test/sign_view_alias`.
+71. **Contract casts between machine integers.** `(size_t)n` of an
+    `ssize_t` in a contract was the machine conversion
+    `sizet_of_int64 n`, whose typing needs `n` to be a valid `size_t`
+    already, so `n <= 0 || (size_t)n <= len` did not typecheck. A cast
+    between C integer types is now the source's number when the target
+    holds all its values, and `spec_to_unsigned`/`spec_to_signed` of it
+    (item 59) otherwise.
+72. **The offset bound as a fact.** `array_offset_fits_at` also ensures
+    the bound it requires, `walk_ok a q /\ walk_idx a q + i < length`.
+    The `array_focus_at` that follows needs exactly that as a refinement,
+    and in a loop with quantified invariants (musl's `swab`) re-deriving it
+    for the second call timed out where finding it as a hypothesis does
+    not.
+73. **A loop body ending in an exiting `if` releases on the other arm.**
+    With item 61 the rest of a loop body after `if (c) return ...;` is the
+    `if`'s else arm, but the body's cleanup (releasing its locals) still
+    came after the `if`, so Pulse joined the arms first. Its join forgets
+    the falling-through arm's pure facts (`c == false`) when that arm has
+    a nested `if` of its own (musl's `strverscmp`:
+    `if (!c) return 0; if (...) dp = i+1;`), and the invariant then failed.
+    When the body's last statement is an `if` without `_ensures` exactly one
+    of whose arms exits, the cleanup now goes at the end of the other arm,
+    so the `if` is the body's tail and each arm is checked against the
+    invariant without a join (`test/sign_view_alias`).
+74. **Empty `asm` statements.** `__asm__ __volatile__ ("" : : "r"(d) :
+    "memory")` (musl's `explicit_bzero`) executes no instruction; it only
+    keeps the compiler from dropping the stores before it. An `asm`
+    statement with an empty template, no outputs and no `goto` labels is
+    translated as its input expressions, evaluated for their side
+    effects; clobbers are irrelevant to the model. Any other `asm` is still
+    refused (`test/asm_barrier`, `test/asm_reject`).
+75. **A label's `_ensures` is an assertion like `_assert`.** At each
+    `goto` (and at the fall-through into the label) the label's
+    `_ensures` was translated by the plain statement-assertion path, which
+    loads every object it mentions, so `_length`, quantifiers over array
+    contents, `_old(p)[k]` and `_old(p[k])` were refused. It now goes
+    through the same path as `_assert` (`stmt_assertion`), falling back to
+    reading the clause as a contract over the current frame
+    (`test/label_array_ensures`, modelled on musl's `strlcpy`).
+76. **`_length` in contract arithmetic; dropped clauses say where.**
+    `1 <= s._length - k` was dropped as "this expression in a contract"
+    (issue #449): `_length` is a `_specint`, and specification arithmetic
+    translates its operands with `value`, which only knew `_length` under a
+    `(_specint)` cast. `value` now reads `_length` itself, so the
+    difference is the mathematical one (`test/spec_length_sub`,
+    `test/spec_length_sub_bad`). The diagnostic for a dropped contract was
+    reported at the function definition and named only the kind of
+    expression. A clause's error now carries the location of the clause, or
+    of the offending subexpression where one is known, and the expression's
+    text; `weakenings` reads that location back so the error points into the
+    prototype (`test/spec_dropped_at`).
+77. **Local arrays in contracts.** `bs[0]` for a local array
+    `size_t bs[4]` in an `_invariant`, `_assert` or `if`/label `_ensures`
+    was "`*bs` in a contract": the frame bound the array's contents
+    (`inv_bs`) as a local value, but only global arrays were registered as
+    pointees. `frame()` now registers a local array as a pointee bound to
+    that sequence, so `bs[i]` is `Seq.index inv_bs i` under the usual index
+    guard. An array declared without an initializer is held in the
+    `option` view until it is handed off whole, and is entered in `maybes`:
+    reading a cell is `Some?.v` and claims `Some?`, as for an `_out` array
+    being filled (`test/local_array_spec`, `test/local_array_spec_bad`;
+    musl's `strspn`/`strcspn` byte sets).
+78. **An annotated `if` at the end of an annotated block.** An `if` with
+    `_ensures` that ended an arm of another annotated `if`, or a loop
+    body, was in tail position under an expected postcondition, and Pulse
+    refused it as "Multiple annotated postconditions" (musl's `strlcpy`,
+    where the outer `if` precedes the byte loop). Every annotated `if` is
+    now followed by `();`, which takes the tail position and is checked
+    against the outer expectation from the inner `if`'s postcondition
+    (`test/if_ensures_tail`).
+79. **Sign views in invariants.** A subscript of a local viewing a `char`
+    array as `unsigned char` (`l[i]` with `const unsigned char *l =
+    (const void *)l0`) in an `_invariant` or `_assert` was `Seq.index` of
+    the `char` sequence used at `UInt8`, which does not typecheck (musl's
+    `strverscmp`). The contract read now converts the cell to the view's
+    type, the conversion the body's read makes (`test/sign_view_spec`,
+    `test/sign_view_spec_bad`).
+80. **Current contents of a walked parameter, from its entry position.**
+    No new mechanism: a `_specint` subscript of a walked pointer is
+    already read at `pos + k` with `0 <= pos + k` as its well-formedness,
+    so `d[k - (d - _old(d))]` is the current element `k` of the array
+    `d` was walked through, and musl's `__stpcpy` byte loop states what it
+    has copied with it (`test/array_walk_relative`).
+81. **Fresh heap arrays as return values.** `_allocated _nullable _array
+    T *` on a return was rejected; the contract now returns
+    `unless_null ret (exists* val_return n_return. array_pts_to ...
+    val_return ** freeable ret n_return ** pure (n_return == esize *
+    len val_return))`, with `return[k]` / `return._length` read off
+    `val_return` under the guard. In the body a `char`-sized `malloc(n)`
+    is an `n`-element array block (as `malloc(n * sizeof(T))` already
+    was), and `memcpy(d, s, n)` into such an unfilled block is the byte
+    copy `array_copy_maybe` (machine `memcpy` between the `option` view of
+    `d` and the source's representation), whose value is `d` itself,
+    unbound, so `return memcpy(d, ...)` hands back the block. At the
+    return `array_somes` moves the block to the plain view, which needs
+    every cell written (musl's `strdup`/`strndup`; `test/alloc_array_return`,
+    `test/alloc_array_return_bad`). Callers cannot take over a returned
+    array yet, and `wmemcpy` into a block (`wcsdup`) is not handled.
+82. **A flexible struct as a union member, and wide struct views.** A struct
     ending in a flexible array member was not a union member: it has no
     size, and an arm needs one. In a union, the tail takes the room the
     union leaves it -- `(sizeof(union) - offsetof(tail)) / sizeof(elem)`
