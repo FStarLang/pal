@@ -146,6 +146,7 @@ ghost fn mem_carve (a: ptr) (#p: perm) (#b: bytes) (o: SZ.t)
   mem_split (a +! o) n;
   Seq.slice_slice b (SZ.v o) (len b) 0 (SZ.v n);
   Seq.slice_slice b (SZ.v o) (len b) (SZ.v n) (len b - SZ.v o);
+  add_add a o n;
   rewrite (mem_pts_to (a +! o) p (slice (slice b (SZ.v o) (len b)) 0 (SZ.v n)))
        as (mem_pts_to (a +! o) p (slice b (SZ.v o) (SZ.v o + SZ.v n)));
   rewrite (mem_pts_to ((a +! o) +! n) p
@@ -162,6 +163,7 @@ ghost fn mem_uncarve (a: ptr) (#p: perm) (#b: bytes) (o: SZ.t)
   ensures  mem_pts_to a p (overlay b 0 c (SZ.v o))
 {
   unfold (carve_rest a p b o n);
+  add_add a o n;
   rewrite (mem_pts_to (a +! SZ.add o n) p (slice b (SZ.v o + SZ.v n) (len b)))
        as (mem_pts_to ((a +! o) +! n) p (slice b (SZ.v o + SZ.v n) (len b)));
   mem_join (a +! o) #p #c #(slice b (SZ.v o + SZ.v n) (len b)) n;

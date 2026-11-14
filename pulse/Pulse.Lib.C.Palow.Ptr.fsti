@@ -76,8 +76,13 @@ val prov_of_add (a: ptr) (n: SZ.t)
           [SMTPat (prov_of (a +! n))]
 
 (* Offsetting by zero is the identity, and offsets compose. Both follow from
-   `ptr_ext` but are stated here with patterns because every aggregate
-   split/join proof needs them. *)
+   `ptr_ext`. `add_zero` has a pattern because every aggregate split/join
+   proof needs it. `add_add` has none: `(a +! m) +! n` matches across every
+   pointer equality in the context (a walked pointer, an array lent at an
+   offset), and each instance adds an equation and a fresh `SZ.fits` term, on
+   which `FStar.SizeT.fits_lte` fires pairwise. On musl's `wcscat` that was
+   millions of instances, minutes per query, and almost none of it counted
+   against the rlimit. Call it where the composition is needed. *)
 val add_zero (a: ptr)
   : Lemma (a +! 0sz == a)
           [SMTPat (a +! 0sz)]
@@ -85,7 +90,6 @@ val add_zero (a: ptr)
 val add_add (a: ptr) (m n: SZ.t)
   : Lemma (requires SZ.fits (SZ.v m + SZ.v n))
           (ensures  (a +! m) +! n == a +! SZ.add m n)
-          [SMTPat ((a +! m) +! n)]
 
 (* ---------------------------------------------------------------------------
    Alignment

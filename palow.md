@@ -6023,8 +6023,8 @@ Limitations:
 
     The resulting bodies are the C, transliterated: `pool_alloc` is two reads,
     a comparison, one pointer sum, one write, and two ghost steps (`mem_split`,
-    and a `rewrite` that makes Pulse's syntactic matcher use the `add_add` SMT
-    pattern). `test/pool_flex` verifies `pool_new`, `pool_alloc` and
+    and a `rewrite` that makes Pulse's syntactic matcher use `add_add`, which
+    since item 86 is called explicitly). `test/pool_flex` verifies `pool_new`, `pool_alloc` and
     `pool_free`.
 
     Translating the program also turned up a frontend bug worth recording:
@@ -7617,3 +7617,34 @@ Limitations:
     position difference; a pointer difference whose positions are unknown
     is now an error instead of an ill-typed subtraction
     (`test/invariant_clauses`, `test/invariant_clauses_bad`).
+86. **`add_add` has no SMT pattern.** `(a +! m) +! n == a +! SZ.add m n`
+    was keyed on `(a +! m) +! n`, which E-matching finds across every
+    pointer equality in a query: a walked pointer and the base it is
+    lent at (`array_lend_at`/`array_return_at`), `tmp +! 1sz` chains of
+    a loop. On musl's `wcscat` (logged query, Z3 5.3.0) it was
+    instantiated 9-18k times, each instance a new equation and a new
+    `SZ.fits (v m + v n)` term, on which `FStar.SizeT.fits_lte` (a
+    two-pattern `SMTPat` on `fits x; fits y`) fires pairwise: 6.3M
+    instances in 70 s, and the goal did not finish in 300 s; without
+    the axiom all nine goals were unsat in 1.3 s. Z3's rlimit barely
+    counts this work (90 s was about 6 F* rlimit units), so
+    `--z3rlimit` did not bound it either. The lemma is now an ordinary
+    one: `Pun.mem_carve`/`mem_uncarve`, `Aggregate` and the two pool
+    tests' `rewrite each` call it. No generated proof relied on it.
+    The other pointer patterns were checked for the same shape: those
+    on `addr_of (a +! n)`, `prov_of (a +! n)`, `a +! 0sz`,
+    `(a +! n) -? n` and `(a -? n) +! n` produce no new `+!` term, and
+    `walk_is_add`/`walk_is_elem` produce one `a +! d` / `elem_ptr`
+    term per `walk_ok` fact. The `elem_ptr` one is again a `walk_ok`
+    (`elem_ptr_walk`), but it is equal to the pointer it came from as
+    soon as its offset fits, which closes the cycle by congruence; the
+    profile of `wcscat` named only `add_add` and `fits_lte`. Measured
+    with the musl verify flow on a loaded machine (before -> after):
+    `wcscat` 3745 s, failing -> 282 s, verified; `strcat` 197 s ->
+    195 s; `strlcpy` (2447 s -> 2512 s) and `strncat` (3017 s ->
+    2462 s) fail the same way in both (proof gaps in the current
+    annotations, unrelated). `strspn` failed after 2852 s before, with
+    two goals of its 135th query running out of rlimit; afterwards those
+    goals succeed (18 s and 54 s) and checking goes on to the later
+    queries, which take long enough that the run did not finish within
+    the measurement bound.

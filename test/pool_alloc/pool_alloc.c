@@ -99,6 +99,7 @@ void pool_take2(_plain uint8_t *a, size_t rest)
   /* The tail is at `(a + 4) + 4`, and the contract says `a + 8`. `add_add`
      makes the two equal; `rewrite each` is what says so to the matcher, which
      compares addresses syntactically. */
+  _ghost_stmt(add_add $(a) 4sz 4sz);
   _ghost_stmt(rewrite each (($(a) +! 4sz) +! 4sz) as ($(a) +! 8sz));
 }
 
