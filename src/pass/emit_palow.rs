@@ -4655,6 +4655,33 @@ fn states_ownership(tds: &Typedefs, e: &Expr) -> bool {
     refine_states_own(tds, e)
 }
 
+/// Whether a clause says anything beyond which objects are live: a fact
+/// about their values, say. `_live(x)` alone is what any frame says anyway.
+fn states_facts(tds: &Typedefs, e: &Expr) -> bool {
+    fn live_only(e: &Expr) -> bool {
+        match &strip_vattr(e).val {
+            ExprT::Live(_) => true,
+            ExprT::Cast(x, _) => live_only(x),
+            ExprT::BinOp(BinOp::LogAnd, l, r) => live_only(l) && live_only(r),
+            ExprT::BinOp(BinOp::Eq, l, r) if matches!(&strip_vattr(r).val, ExprT::BoolLit(true)) => {
+                live_only(l)
+            }
+            _ => false,
+        }
+    }
+    let (mut own, mut props) = (Vec::new(), Vec::new());
+    split_refine(tds, e, &mut own, &mut props);
+    props.iter().any(|p| !live_only(p))
+}
+
+/// Whether an `if` carries its `_ensures` as the join: when it states
+/// ownership, or a fact Pulse's own join would not keep.
+fn annotated_join(tds: &Typedefs, ensures: &Exprs) -> bool {
+    ensures
+        .iter()
+        .any(|e| states_ownership(tds, e) || states_facts(tds, e))
+}
+
 /// A clause as its `&&` conjuncts if any of them states ownership, and
 /// whole otherwise.
 fn own_conjuncts(tds: &Typedefs, e: &Rc<Expr>) -> Exprs {
@@ -23420,14 +23447,18 @@ impl<'a> Body<'a> {
                 // arms need not agree, so nothing survives the join.
                 self.active.clear();
                 // A `_ensures` that says only what is live needs no
-                // translation: Pulse computes the join of an `if` itself, so
-                // the annotation exists to be checked and not to make the code
-                // typecheck. One that states *ownership* is different. The two
-                // arms may have established it in different words -- a
-                // function pointer weakened from two different callees is the
-                // case that matters -- and then only the author's own words
-                // name the shape they have in common.
+                // translation: Pulse computes the join of an `if` itself. One
+                // that states *ownership* is different. The two arms may have
+                // established it in different words -- a function pointer
+                // weakened from two different callees is the case that
+                // matters -- and then only the author's own words name the
+                // shape they have in common. So is one that states a fact:
+                // Pulse's join keeps what the arms own, not what they proved
+                // about it, so a fact the arms established about a value they
+                // computed -- `m <= 8` after `m = min(a, 8)` -- is gone after
+                // the `if` unless the annotation is the join.
                 let states_own = ensures.iter().any(|e| states_ownership(self.tds, e));
+                let joined = annotated_join(self.tds, ensures);
                 let mut fps: Vec<(String, String)> = Vec::new();
                 let nt = self.null_test(cond);
                 let pt = if nt.is_none() {
@@ -23669,12 +23700,14 @@ impl<'a> Body<'a> {
                     None => (Vec::new(), Vec::new()),
                 };
                 self.lines.push(format!("if ({})", c));
-                if states_own {
+                if joined {
                     // Pulse does not frame an `if`'s annotation, so it has to
                     // be the whole state at the join: the author's ownership
-                    // plus everything they did not speak for.
+                    // and facts plus everything they did not speak for.
                     let join = self.frame_slprop(ensures, "an `if`", "    ")?;
                     self.lines.push(format!("  ensures {}", join));
+                }
+                if states_own {
                     // Validity is not carried by any points-to -- the bytes of
                     // a code pointer say where the code is, not what it does --
                     // so a clause that speaks for a function-pointer local is
@@ -24158,9 +24191,7 @@ impl<'a> Body<'a> {
                 // to the one expected.
                 if self.lines.last().is_some_and(|l| l == "};")
                     && stmts.last().is_some_and(|l| match &l.val {
-                        StmtT::If { ensures, .. } => {
-                            ensures.iter().any(|e| states_ownership(self.tds, e))
-                        }
+                        StmtT::If { ensures, .. } => annotated_join(self.tds, ensures),
                         _ => false,
                     })
                 {
