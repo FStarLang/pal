@@ -148,8 +148,9 @@ void *pool_alloc(_plain pool *p, size_t n)
     _ghost_stmt(fold P.pad (($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) $(n));
     p->begin += m;
     /* The chunk handed out sits at `(data + b) + n`, and the contract says
-       `data + (b + n)`. The SMT pattern proves them equal; the rewrite is
-       what makes the syntactic matcher in Pulse use it. */
+       `data + (b + n)`. `add_add` proves them equal; the rewrite is what
+       makes the syntactic matcher in Pulse use it. */
+    _ghost_stmt(add_add ($(p) +! struct_pool_anon_1_offsetof_data) $(b) $(m));
     _ghost_stmt(rewrite each ((($(p) +! struct_pool_anon_1_offsetof_data) +! $(b)) +! $(m))
                 as (($(p) +! struct_pool_anon_1_offsetof_data) +! ($(b) `Pulse.Lib.C.SizeT.add_wrap` $(m))));
     return x;
