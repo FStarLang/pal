@@ -1589,7 +1589,11 @@ A contract on a `union req *` states `union_req_own` next to
   the ownership around the statement; ownership is unchanged.
 - A store through any member to bytes the ownership does not read
   (`header.flags`, `header.status`, `params.seq`) is followed by
-  `_own_follow`: the ownership is the same afterwards.
+  `_own_follow`: the ownership is the same afterwards. A whole union value
+  stored into another member (`header.ev = e`, an island) is bytes too, and
+  so is followed the same way -- also when it is written through
+  `(&r->base)->...`, as a macro handed `&r->base` does: the ownership is
+  found on the enclosing union.
 - A store of a struct-typed field of the owning member (`params.last = *v`)
   goes through a focus on that member, so its bytes are not a scalar's.
   It is followed by `_own_follow_view`, which needs the member live in the
@@ -1612,7 +1616,8 @@ A contract on a `union req *` states `union_req_own` next to
 
 At most one member may be `_owning`, and it has to be a struct whose `_own`
 is not empty; otherwise the union is skipped with the reason.
-Tests: `overlay_union_own` (including `set_last`, `call_then_count` and
+Tests: `overlay_union_own` (including `set_last`, `clear_ev_then_count`,
+`clear_base_ev_then_count`, `call_then_count` and
 the `const` lends `peek_flags`, `peek_then_count`, `peek_only`),
 `overlay_union_own_clobber_bad`, `overlay_union_own_lend_bad`.
 

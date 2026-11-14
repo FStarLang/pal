@@ -15619,13 +15619,46 @@ impl<'a> Body<'a> {
     fn union_own_before_write(&mut self, lhs: &Expr) -> Option<(String, String, String)> {
         let ty = self.ty_of(lhs).ok()?;
         let leaf = palow_name(self.tds, &ty).and_then(|pn| ov_leaf(self.tds, &pn));
-        let n = match &leaf {
-            Some(l) => l.size,
-            None => palow_sizeof(self.tds, &ty)?,
+        // An island is stored whole, as bytes, like a scalar (`overlay_leaf`).
+        let island = match &peel(self.tds, &ty).val {
+            TypeT::TypeRef(TypeRefKind::Union(u)) => u
+                .val
+                .strip_suffix("__island")
+                .filter(|o| island_member(self.tds, o).is_some())
+                .map(|o| self.tds.unions[o].size),
+            _ => None,
         };
-        let (root, uname, o) = overlay_path(self.tds, &|x| self.ty_of(x).ok(), lhs)
+        let n = match (&leaf, island) {
+            (Some(l), _) => l.size,
+            (None, Some(n)) => n,
+            (None, None) => palow_sizeof(self.tds, &ty)?,
+        };
+        let (mut root, mut uname, o) = overlay_path(self.tds, &|x| self.ty_of(x).ok(), lhs)
             .ok()?
             .root?;
+        // `(&r->m)->...`, as a macro handed `&r->m` writes: the overlay root
+        // is `m`'s union, but the ownership may be held by `r`'s, of which `m`
+        // is a member at byte 0.
+        while self.tds.unions.get(&uname)?.own.is_none() {
+            let ExprT::Deref(a) = &strip_vattr(&root).val else {
+                return None;
+            };
+            let ExprT::Ref(m) = &strip_vattr(a).val else {
+                return None;
+            };
+            let ExprT::Member(b, _) = &strip_vattr(m).val else {
+                return None;
+            };
+            let bt = self.ty_of(b).ok()?;
+            let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(self.tds, &bt).val else {
+                return None;
+            };
+            if !is_overlay(self.tds, &u.val) {
+                return None;
+            }
+            uname = u.val.to_string();
+            root = (**b).clone();
+        }
         let own = self.tds.unions.get(&uname)?.own.as_ref()?;
         if own.reads.iter().any(|&(a, b)| o < b && a < o + n) {
             return None;
@@ -15633,7 +15666,7 @@ impl<'a> Body<'a> {
         // A scalar is stored into the union's bytes; anything larger goes
         // through a focus on its member, which only the owning member's view
         // can say leaves the owned pointers alone.
-        let follow = if leaf.is_some() {
+        let follow = if leaf.is_some() || island.is_some() {
             "own_follow"
         } else {
             let mut e = strip_vattr(lhs);
