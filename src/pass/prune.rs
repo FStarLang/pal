@@ -413,6 +413,23 @@ fn decl_name(decl: &Decl) -> DeclName {
     }
 }
 
+/// The struct a `_plain` typedef names, if `ty` is one's body.
+fn plain_struct_name(ty: &Type) -> Option<Rc<str>> {
+    fn go(ty: &Type, plain: bool) -> Option<Rc<str>> {
+        match &ty.val {
+            TypeT::Plain(t) => go(t, true),
+            TypeT::Refine(t, _)
+            | TypeT::RefineAlways(t, _)
+            | TypeT::RefineUninit(t, _)
+            | TypeT::RefineValue(t, ..)
+            | TypeT::Nullable(t) => go(t, plain),
+            TypeT::TypeRef(TypeRefKind::Struct(n)) if plain => Some(n.val.clone()),
+            _ => None,
+        }
+    }
+    go(ty, false)
+}
+
 fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
     fn scan_fn_decl(
         ds: &mut HashSet<DeclName>,
@@ -460,7 +477,17 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
                 name: _,
                 body,
                 is_pointer_view: _,
-            }) => scan_type(deps.deps_for(n), body),
+            }) => {
+                // A `_plain` typedef of a struct makes the struct plain
+                // (emit_palow's plain_structs) wherever the struct is used,
+                // though nothing need name the typedef: keep it with the
+                // struct, or one in a header is pruned and the struct gets
+                // its ownership back.
+                if let Some(s) = plain_struct_name(body) {
+                    deps.deps_for(DeclName::Struct(s)).insert(n.clone());
+                }
+                scan_type(deps.deps_for(n), body)
+            }
             DeclT::StructDefn(StructDefn {
                 name: _,
                 refines,
