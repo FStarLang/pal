@@ -14010,6 +14010,11 @@ struct Body<'a> {
     /// gives it a slot of its own, unless a local declared under the same name
     /// shadows it somewhere.
     old_params: HashSet<String>,
+    /// Parameters given a slot that the body never rebinds: no `p = ...`, no
+    /// `p++`, no `&p`, and, for one that is not a pointer, no store into it
+    /// either. The slot holds the value the call passed in for the whole
+    /// body, so a frame states it at `var_p` rather than at a fresh binder.
+    fixed_params: HashSet<String>,
     /// Whether the emitted precondition can supply bounds and overflow facts.
     /// These may be explicit pure clauses, type refinements, or facts hidden
     /// inside a successfully translated separation-logic precondition.
@@ -21938,6 +21943,17 @@ impl<'a> Body<'a> {
                 locals.insert(s.name.clone(), value);
                 continue;
             }
+            // A parameter nothing rebinds still holds what the call passed
+            // in. A binder in its place would be equal to it only as a pure
+            // fact, which slprop matching never consults, so anything stated
+            // at the parameter -- a postcondition, a handler's token -- would
+            // stop matching after the join.
+            if self.fixed_params.contains(&s.name) && s.array.is_none() {
+                let v = format!("var_{}", s.name);
+                owns.push(s.pts_to(&v));
+                locals.insert(s.name.clone(), v);
+                continue;
+            }
             let b = format!("inv_{}", touch);
             binders.push(format!("({}: {})", b, s.fstar_ty));
             owns.push(s.pts_to(&b));
@@ -26198,6 +26214,7 @@ fn emit_body(
             .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
             .collect(),
         old_params: HashSet::new(),
+        fixed_params: HashSet::new(),
     };
 
     // A parameter whose address the body takes needs storage, and it needs it
@@ -26267,6 +26284,14 @@ fn emit_body(
         // somewhere the translation gives up on anyway, and where it does not
         // the ordinary path reports it with the same words.
         let _ = b.give_storage(&n, &a.ty);
+        if b.old_params.contains(&n)
+            && !b.out_params.contains(&n)
+            && !b.arrays.contains_key(&n)
+            && !touched.rebound.contains_key(&n)
+            && (matches!(peel(tds, &a.ty).val, TypeT::Pointer(..)) || !touched.written.contains(&n))
+        {
+            b.fixed_params.insert(n);
+        }
     }
 
     b.rest(&defn.body)?;
