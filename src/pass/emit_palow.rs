@@ -16092,16 +16092,21 @@ impl<'a> Body<'a> {
         // active the union holds something, which is what the slot's release
         // has to know.
         let mut uninit_suffix = "";
+        // A union that is a field of an object still being filled is, once
+        // written, one more field of that object done -- possibly the last.
+        let mut enclosing = Vec::new();
         if writing {
             self.active.insert(a.clone(), f.val.to_string());
             if let Some(i) = self.slots.iter().rposition(|s| s.addr == a && !s.init) {
                 uninit_suffix = "_uninit";
                 self.slots[i].init = true;
+                self.gather_enclosing(&a, &mut enclosing);
             }
         }
         let focus = vec![format!("{}_focus_{} {};", un, f.val, a)];
         let close = |mut base: Vec<String>| {
             let mut v = vec![format!("{}_unfocus_{} {};", un, f.val, a)];
+            v.extend(enclosing.iter().cloned());
             v.append(&mut base);
             v
         };
@@ -16733,7 +16738,13 @@ impl<'a> Body<'a> {
         let (Some(pn), Some(fsty)) = (palow_name(self.tds, fty), fstar_type(self.tds, fty)) else {
             return Ok(None);
         };
-        if self.scatter_fields(&pn).is_none() {
+        // A union is not filled field by field: writing a member makes the
+        // whole of it, so its storage needs only its own uninitialised view.
+        let is_union = matches!(
+            &peel(self.tds, fty).val,
+            TypeT::TypeRef(TypeRefKind::Union(_))
+        );
+        if !is_union && self.scatter_fields(&pn).is_none() {
             return Err(format!(
                 "a field of `{}`, which is being filled one field at a time and has no \
                  uninitialised view",
@@ -16922,7 +16933,7 @@ impl<'a> Body<'a> {
             // named, and which of the two it is changes nothing about that.
             if matches!(
                 &peel(self.tds, &fty).val,
-                TypeT::TypeRef(TypeRefKind::Struct(_))
+                TypeT::TypeRef(TypeRefKind::Struct(_) | TypeRefKind::Union(_))
             ) && !self.in_pieces(b2)
                 && let Some(r) = self.nested_scatter_base(b2, f2, &fty, writing)?
             {
