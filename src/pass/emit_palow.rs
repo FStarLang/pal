@@ -24472,13 +24472,26 @@ impl<'a> Body<'a> {
         self.release_from(0);
     }
 
+    /// Put down a laundered validity: its address is no longer spelled as it
+    /// was seeded, so that is left to inference. Its contract still is, when
+    /// it belongs to a known function, and naming it fixes the witness type --
+    /// and with it the universe, which inference does not solve when validities
+    /// with witnesses of different universes are held at once.
+    fn drop_laundered(g: &str, pre: &str, post: &str) -> String {
+        if g.starts_with('$') {
+            "drop_is_valid _ _ _;".to_string()
+        } else {
+            format!("drop_is_valid _ {} {};", pre, post)
+        }
+    }
+
     /// Put down every validity seeded since `mark`. `is_valid` is a `pure`
     /// fact, but it is `pure` behind a definition, so Pulse will not absorb it
     /// on its own.
     fn drop_seeded(&mut self, mark: usize) {
         for (addr, pre, post, g) in self.seeded.split_off(mark) {
             self.lines.push(if self.laundered.contains(&g) {
-                "drop_is_valid _ _ _;".to_string()
+                Self::drop_laundered(&g, &pre, &post)
             } else {
                 format!("drop_is_valid {} {} {};", addr, pre, post)
             });
@@ -24566,7 +24579,7 @@ impl<'a> Body<'a> {
                     continue;
                 }
                 self.lines.push(if self.laundered.contains(&g) {
-                    "drop_is_valid _ _ _;".to_string()
+                    Self::drop_laundered(&g, &pre, &post)
                 } else {
                     format!("drop_is_valid {} {} {};", addr, pre, post)
                 });
