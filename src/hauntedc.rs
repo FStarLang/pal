@@ -748,20 +748,43 @@ fn expr_parser<
             type_name
                 .clone()
                 .then(ident.clone())
+                .then(
+                    punct(Punct::Eq)
+                        .ignore_then(assignment_expression.clone())
+                        .or_not(),
+                )
                 .then_ignore(punct(Punct::Comma))
                 .then(assignment_expression.clone())
                 .delimited_by(punct(Punct::LParen), punct(Punct::RParen)),
         )
-        .map_with(|(is_forall, ((ty, var), body)): (bool, _), extra| -> Expr {
-            let loc = sift.resolve_source_info(&extra.span());
-            let body: Expr = body;
-            let body_rv = body.to_rvalue();
-            if is_forall {
-                ExprT::Forall(var, ty, body_rv).with_loc(loc).into()
-            } else {
-                ExprT::Exists(var, ty, body_rv).with_loc(loc).into()
-            }
-        })
+        .try_map(
+            |(is_forall, (((ty, var), witness), body)): (bool, _), span| {
+                let loc = sift.resolve_source_info(&span);
+                let body: Expr = body;
+                // `_exists(T i = w, p)` names its witness: it is
+                // `_exists(T i, i == w && p)`, a form the emitter proves by
+                // instantiating `i` with `w` instead of leaving the search to
+                // the solver.
+                let body = match witness {
+                    Some(_) if is_forall => {
+                        return Err(Rich::custom(span, "a witness on a `_forall`"));
+                    }
+                    Some(w) => {
+                        let w: Expr = w;
+                        let bound: Expr = ExprT::Var(var.clone()).with_loc(var.loc.clone()).into();
+                        let eq = mk_binop(BinOp::Eq, bound, w, loc.clone());
+                        mk_binop(BinOp::LogAnd, eq, body, loc.clone())
+                    }
+                    None => body,
+                };
+                let body_rv = body.to_rvalue();
+                Ok(if is_forall {
+                    ExprT::Forall(var, ty, body_rv).with_loc(loc).into()
+                } else {
+                    ExprT::Exists(var, ty, body_rv).with_loc(loc).into()
+                })
+            },
+        )
         .boxed();
 
         let postfix_expression_nonrec = choice((

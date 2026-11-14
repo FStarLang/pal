@@ -7575,3 +7575,19 @@ Limitations:
     wants an initialised destination. Source and destination must have
     the same element type (musl's `wcsdup`; `test/alloc_wide_return`,
     `test/alloc_wide_return_bad`).
+84. **Existential witnesses.** A callee's existential precondition (musl's
+    `strncasecmp` wants some `i < n` where the strings end or differ) is
+    proved by Z3 only if it can guess the instance, and a witness that is
+    a computed term (`t - (h - _old(h))`, `n - 1`) it rarely guesses in a
+    heavy context. `_exists(T i = w, p)` is parser sugar for `_exists(T i,
+    i == w && p)`, and the emitter turns any existential with a top-level
+    conjunct `i == w` (`w` free of `i`, and the comparison reading `i` as
+    its plain number, checked by translating both and comparing) into
+    `let i_wit : int = w in range /\ (let i : T = conv i_wit in p)`:
+    `0 <= w /\ SizeT.fits w` with `SizeT.uint_to_t` for `size_t`,
+    `pow2` bounds with `uint_to_t`/`int_to_t` for fixed-width integers,
+    nothing for `_specint` (`0 <= w` for `_nat`). Contract equality
+    compares numbers, so this is the same proposition as the `exists`,
+    in hypotheses as well as goals; other types keep the `exists`. Both
+    the contract translator and the body assertion translator do this
+    (`test/exists_witness`, `test/exists_witness_bad`).

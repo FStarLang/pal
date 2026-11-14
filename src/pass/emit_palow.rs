@@ -3178,6 +3178,8 @@ impl<'a> Spec<'a> {
                 env.push_var_decl(v, ty.clone(), crate::env::LocalDeclKind::RValue);
                 let mut locals = self.locals.clone();
                 locals.insert(v.val.to_string(), bound.clone());
+                let found = if all { None } else { exists_witness(v, body) };
+                let mut witness = None;
                 let body = {
                     let inner = Spec {
                         tds: self.tds,
@@ -3201,6 +3203,21 @@ impl<'a> Spec<'a> {
                         walks: self.walks.clone(),
                     };
                     let p = inner.prop(body, w)?;
+                    // The witness stands for `v` only if the comparison
+                    // pinning it reads `v` as just its value: a conversion
+                    // that wraps would make `v == w` a congruence instead.
+                    if let Some((vs, wt)) = found {
+                        let pd = inner.has_ptr_diff(vs) || inner.has_ptr_diff(wt);
+                        let side = if pd {
+                            inner.pos_num(vs, w)
+                        } else {
+                            inner.num(vs, w)
+                        };
+                        let plain = ExprT::Var(v.clone()).with_loc(v.loc.clone());
+                        let exact = matches!((side, inner.num(&plain, w)),
+                            (Ok(a), Ok(b)) if unparen(&a) == unparen(&b));
+                        witness = exact.then_some((pd, wt));
+                    }
                     self.uses
                         .borrow_mut()
                         .extend(inner.uses.borrow().iter().cloned());
@@ -3213,6 +3230,16 @@ impl<'a> Spec<'a> {
                         format!(r"({} /\ {})", g, p)
                     }
                 };
+                if let Some((pd, wt)) = witness {
+                    let wv = if pd {
+                        self.pos_num(wt, w)?
+                    } else {
+                        self.num(wt, w)?
+                    };
+                    if let Some(f) = witness_let(self.tds, ty, &bound, &wv, &body) {
+                        return Ok(f);
+                    }
+                }
                 Ok(format!(
                     "({} ({}: {}). {})",
                     if all { "forall" } else { "exists" },
@@ -19094,6 +19121,19 @@ impl<'a> Body<'a> {
                 let before = self.lines.len();
                 let r = self.prop(body);
                 let emitted = self.lines.len() != before;
+                // As for a contract: the witness is used only when `v == w`
+                // reads `v` as just its value.
+                let witness = match (all, &r) {
+                    (false, Ok(_)) => exists_witness(v, body).and_then(|(vs, wt)| {
+                        let pd = self.has_ptr_diff(vs) || self.has_ptr_diff(wt);
+                        let side = if pd { self.pos_num(vs) } else { self.num(vs) };
+                        let plain = ExprT::Var(v.clone()).with_loc(v.loc.clone());
+                        let exact = matches!((side, self.num(&plain)),
+                            (Ok(a), Ok(b)) if unparen(&a) == unparen(&b));
+                        exact.then_some((pd, wt))
+                    }),
+                    _ => None,
+                };
                 self.lines.truncate(before);
                 self.env = saved_env;
                 match shadowed {
@@ -19103,6 +19143,12 @@ impl<'a> Body<'a> {
                 let p = r?;
                 if emitted {
                     return Err("a quantified assertion whose body reads memory".to_string());
+                }
+                if let Some((pd, wt)) = witness {
+                    let wv = if pd { self.pos_num(wt)? } else { self.num(wt)? };
+                    if let Some(f) = witness_let(self.tds, ty, &bound, &wv, &p) {
+                        return Ok(f);
+                    }
                 }
                 Ok(format!(
                     "({} ({}: {}). {})",
@@ -27286,6 +27332,99 @@ fn old_mentions(e: &Expr, names: &HashSet<String>, under: bool) -> bool {
         ExprT::FnCall(_, args) => args.iter().any(|a| m(a)),
         _ => true,
     }
+}
+
+/// The witness `w` of `_exists(T v, ... && v == w && ...)`, a conjunct of
+/// the body (the form `_exists(T v = w, p)` is sugar for) that pins `v` to
+/// something not itself mentioning `v`, with the side naming `v` (under
+/// whatever conversions the comparison put on it).
+fn exists_witness<'a>(v: &Ident, body: &'a Expr) -> Option<(&'a Expr, &'a Expr)> {
+    match &body.val {
+        ExprT::BinOp(BinOp::LogAnd, a, b) => exists_witness(v, a).or_else(|| exists_witness(v, b)),
+        ExprT::BinOp(BinOp::Eq, l, r) => {
+            fn is_v(e: &Expr, v: &Ident) -> bool {
+                match &strip_vattr(e).val {
+                    ExprT::Var(x) => x.val == v.val,
+                    ExprT::Cast(x, _) => is_v(x, v),
+                    _ => false,
+                }
+            }
+            let (vs, wt) = if is_v(l, v) {
+                (l, r)
+            } else if is_v(r, v) {
+                (r, l)
+            } else {
+                return None;
+            };
+            let names = HashSet::from([v.val.to_string()]);
+            (!old_mentions(wt, &names, true)).then_some((vs, wt))
+        }
+        _ => None,
+    }
+}
+
+/// `s` without parentheses that enclose all of it.
+fn unparen(s: &str) -> &str {
+    let t = s.trim();
+    if let Some(inner) = t.strip_prefix('(').and_then(|x| x.strip_suffix(')')) {
+        let mut depth = 0i32;
+        for c in inner.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            if depth < 0 {
+                return t;
+            }
+        }
+        if depth == 0 {
+            return unparen(inner);
+        }
+    }
+    t
+}
+
+/// `exists v. v == w /\ p` with the witness filled in: the range that makes
+/// `w` a value of `v`'s type, and `p` with `v` bound to it. Equality in a
+/// contract compares mathematical values, so this is the same proposition,
+/// but one the solver need not search for an instance of. `None` for a type
+/// this has no conversion for, which keeps the plain `exists`.
+fn witness_let(tds: &Typedefs, ty: &Type, bound: &str, wv: &str, body: &str) -> Option<String> {
+    let wit = format!("{}_wit", bound);
+    let (range, conv, fty) = match &tds.resolve(ty).val {
+        TypeT::SizeT => (
+            format!(r"0 <= {w} /\ SizeT.fits {w}", w = wit),
+            format!("SizeT.uint_to_t {}", wit),
+            "SizeT.t".to_string(),
+        ),
+        TypeT::Int {
+            signed: false,
+            width,
+        } => (
+            format!(r"0 <= {w} /\ {w} < pow2 {n}", w = wit, n = width),
+            format!("FStar.UInt{}.uint_to_t {}", width, wit),
+            format!("UInt{}.t", width),
+        ),
+        TypeT::Int {
+            signed: true,
+            width,
+        } => (
+            format!(
+                r"- pow2 {n} <= {w} /\ {w} < pow2 {n}",
+                w = wit,
+                n = width - 1
+            ),
+            format!("FStar.Int{}.int_to_t {}", width, wit),
+            format!("Int{}.t", width),
+        ),
+        TypeT::SpecInt => ("True".to_string(), wit.clone(), "int".to_string()),
+        TypeT::SpecNat => (format!("0 <= {}", wit), wit.clone(), "nat".to_string()),
+        _ => return None,
+    };
+    Some(format!(
+        r"(let {wit} : int = {wv} in {range} /\ (let {bound} : {fty} = {conv} in {body}))"
+    ))
 }
 
 fn strip_vattr(e: &Expr) -> &Expr {
