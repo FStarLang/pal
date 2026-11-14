@@ -7591,3 +7591,29 @@ Limitations:
     in hypotheses as well as goals; other types keep the `exists`. Both
     the contract translator and the body assertion translator do this
     (`test/exists_witness`, `test/exists_witness_bad`).
+85. **Invariant re-establishment per conjunct (`--split-invariants`).**
+    musl's long loop invariants (`strlcpy`'s word loop, `strncat`) make
+    one large query of the invariant check at the end of the body, which
+    times out or is flaky, and a failure does not say which clause broke;
+    this F* has no `--split_queries`. With the flag, where the body falls
+    through to its closing brace (no `_requires` on the loop, the body not
+    always leaving), every conjunct of the invariant -- each `_invariant`
+    clause split at top-level `&&`, under the `_Bool` conversion a clause
+    carries -- is first emitted as its own body assertion
+    (`stmt_assertion`, against the loop head's scope and slots, so a body
+    local cannot capture a name), in order, so later conjuncts have the
+    earlier ones as hypotheses (`s[i - 1]` after `0 < i`). Ownership
+    clauses are skipped; the first conjunct that cannot be written as an
+    assertion ends the list. Pulse's own check of the invariant follows.
+    Measured on musl: `strlcpy` goes from 27 to 53 assertions and reports
+    its one failing clause (`ws - s + n + 1 == _old(n)`) where the whole
+    check reported an earlier alignment clause; `strncat` (24 to 33)
+    reports the quantified clause that fails. It is not on by default: a
+    quantified clause asserted alone can time out where the whole check
+    passes (`test/exists_witness`'s `scan`). Two body-assertion gaps it exposed
+    are fixed for every `_assert`: `p <= q` on pointers into one array
+    compares positions (it was an ill-typed `ptr` comparison), and
+    `(char *)wd - d0` for a view `wd` walked over a `char` array is a
+    position difference; a pointer difference whose positions are unknown
+    is now an error instead of an ill-typed subtraction
+    (`test/invariant_clauses`, `test/invariant_clauses_bad`).

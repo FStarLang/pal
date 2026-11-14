@@ -196,6 +196,8 @@ while (((uint32_t_read loc_ctr) `UInt32.lt` var_x))
 { ... }
 ```
 
+With `--split-invariants`, where an iteration reaches the closing brace, the body first asserts each conjunct of the invariant on its own (every `_invariant` clause, split at top-level `&&`, in order): `assert (pure (UInt32.v (uint32_t_read loc_ctr) <= UInt32.v var_x)); assert (pure (...acc...))`. Each is then its own SMT query with the conjuncts before it in hand, so a long invariant does not become one large query and a failure names the conjunct that is not preserved (`test/invariant_clauses`, `test/invariant_clauses_bad`). Clauses are read at the loop head's scope; ownership clauses (`_live`) are skipped, and a conjunct that cannot be written as an `_assert` stops the list there. The invariant is still checked whole afterwards, as it is on a `continue` and in a loop with `_requires`/`_ensures`. The flag is off by default: an extra query is not always cheaper than Pulse's own check of the whole invariant (a quantified clause can time out on its own where the whole check passes), so it is a tool for localising a failure and for invariants too large for one query.
+
 Inside `_invariant`:
 
 - Parameters and locals are in scope by name; there is no `this`. `_old(x)` is the value at function entry.

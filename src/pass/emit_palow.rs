@@ -13270,12 +13270,17 @@ pub fn decl_name(decl: &Decl) -> String {
     }
 }
 
+/// `--split-invariants`: see `assert_invariant_clauses`.
+static SPLIT_INVARIANTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn emit_palow(
     tu: &TranslationUnit,
     header_statics: &[super::linkage::HeaderStatic],
     has_errors: bool,
     portable: bool,
+    split_invariants: bool,
 ) -> Vec<PalowModule> {
+    SPLIT_INVARIANTS.store(split_invariants, std::sync::atomic::Ordering::Relaxed);
     let mut tds = Typedefs::new(tu);
     let mut base = Env::new();
     for decl in &tu.decls {
@@ -19016,6 +19021,52 @@ impl<'a> Body<'a> {
         Ok(p)
     }
 
+    /// Where an iteration falls through to the closing brace, each
+    /// conjunct of the invariant asserted on its own, in order, before Pulse
+    /// checks the invariant as a whole. Each is then a query of its own,
+    /// with the conjuncts before it in hand: a failure names the clause, and
+    /// the solver is not handed every clause of a long invariant at once.
+    /// The whole check that follows finds every conjunct already proved. A
+    /// conjunct this cannot state as an assertion ends the list, since the
+    /// ones after it may need it to be well defined; nothing is lost by
+    /// that, as the invariant itself is still checked.
+    fn assert_invariant_clauses(&mut self, inv: &Exprs) {
+        fn conjuncts<'a>(e: &'a Rc<Expr>, out: &mut Vec<&'a Rc<Expr>>) {
+            match &e.val {
+                ExprT::BinOp(BinOp::LogAnd, a, b) => {
+                    conjuncts(a, out);
+                    conjuncts(b, out);
+                }
+                // A clause is a condition, converted to `_Bool` as a whole.
+                ExprT::Cast(a, _) if matches!(a.val, ExprT::BinOp(BinOp::LogAnd, ..)) => {
+                    conjuncts(a, out)
+                }
+                _ => out.push(e),
+            }
+        }
+        let mut parts = Vec::new();
+        for e in inv.iter() {
+            conjuncts(e, &mut parts);
+        }
+        if parts.len() < 2 {
+            return;
+        }
+        for e in parts {
+            let mark = self.lines.len();
+            match self.stmt_assertion(e) {
+                Ok(p) if p.starts_with("pure (") => {
+                    self.lines.push(format!("assert ({});", p));
+                }
+                // Ownership (`_live(*a)`) is the invariant's own business.
+                Ok(_) => self.lines.truncate(mark),
+                Err(_) => {
+                    self.lines.truncate(mark);
+                    return;
+                }
+            }
+        }
+    }
+
     /// A statement assertion may mix ownership and pure propositions. Keep
     /// both: `_live` is a checked points-to assertion, never `pure True`.
     fn assertion(&mut self, e: &Expr) -> Result<String, String> {
@@ -19177,6 +19228,25 @@ impl<'a> Body<'a> {
                     return Ok(format!("({} {} {})", a, o, b));
                 }
                 let ty = self.ty_of(l)?;
+                // `s <= p` orders pointers by where they point: by position,
+                // which is only defined within one array.
+                let is_ptr = |x: &Expr| {
+                    self.ty_of(x)
+                        .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
+                };
+                if matches!(op, BinOp::Lt | BinOp::LEq) && is_ptr(l) && is_ptr(r) {
+                    let err = || {
+                        "an assertion that compares pointers not known to be into one array"
+                            .to_string()
+                    };
+                    let (ol, pl) = self.body_ptr_pos(l).ok_or_else(err)??;
+                    let (or, pr) = self.body_ptr_pos(r).ok_or_else(err)??;
+                    if ol != or {
+                        return Err(err());
+                    }
+                    let o = if matches!(op, BinOp::Lt) { "<" } else { "<=" };
+                    return Ok(format!("({} {} {})", pl, o, pr));
+                }
                 if self.has_ptr_diff(l) || self.has_ptr_diff(r) {
                     let o = match op {
                         BinOp::Eq => "==",
@@ -19328,13 +19398,17 @@ impl<'a> Body<'a> {
         if !is_ptr(l) || !is_ptr(r) {
             return None;
         }
-        let (ol, pl) = match self.body_ptr_pos(l)? {
-            Ok(x) => x,
-            Err(e) => return Some(Err(e)),
+        let unknown =
+            || "an assertion that subtracts pointers not known to be into one array".to_string();
+        let (ol, pl) = match self.body_ptr_pos(l) {
+            Some(Ok(x)) => x,
+            Some(Err(e)) => return Some(Err(e)),
+            None => return Some(Err(unknown())),
         };
-        let (or, pr) = match self.body_ptr_pos(r)? {
-            Ok(x) => x,
-            Err(e) => return Some(Err(e)),
+        let (or, pr) = match self.body_ptr_pos(r) {
+            Some(Ok(x)) => x,
+            Some(Err(e)) => return Some(Err(e)),
+            None => return Some(Err(unknown())),
         };
         if ol != or {
             return Some(Err(
@@ -19388,10 +19462,23 @@ impl<'a> Body<'a> {
                 let it = self.ty_of(inner).ok()?;
                 let from = pointee(self.tds, peel(self.tds, &it))?;
                 let to = pointee(self.tds, peel(self.tds, to))?;
-                if palow_name(self.tds, from)? != palow_name(self.tds, to)? {
+                let to = palow_name(self.tds, to)?;
+                if palow_name(self.tds, from)? == to {
+                    return self.body_ptr_pos(inner);
+                }
+                // A walked view at another element type, `(char *)wd`, back at
+                // its array's own: the position of a variable is already
+                // counted in that array's elements.
+                if !matches!(strip_vattr(inner).val, ExprT::Var(_)) {
                     return None;
                 }
-                self.body_ptr_pos(inner)
+                let r = self.body_ptr_pos(inner)?;
+                if let Ok((owner, _)) = &r
+                    && self.arrays.get(owner).is_none_or(|a| a.pn != to)
+                {
+                    return None;
+                }
+                Some(r)
             }
             _ => None,
         }
@@ -24135,6 +24222,20 @@ impl<'a> Body<'a> {
             let released = self.lines.len();
             self.release_from(mark);
             self.forget_loop_storage()?;
+            if SPLIT_INVARIANTS.load(std::sync::atomic::Ordering::Relaxed)
+                && !contract
+                && !self.diverged
+                && !exits(&folded)
+            {
+                // Read at the loop head's scope, as the invariant is: the
+                // body's declarations are over, and one may shadow a name a
+                // clause uses or a quantifier binds.
+                let body_env = std::mem::replace(&mut self.env, outer_env.clone());
+                let body_slots = self.slots.split_off(mark);
+                self.assert_invariant_clauses(inv);
+                self.slots.extend(body_slots);
+                self.env = body_env;
+            }
             // The arm that leaves has released all of this already, so it
             // goes at the end of the other arm. The `if` is then the body's
             // last statement, which Pulse checks arm by arm against the
