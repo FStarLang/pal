@@ -14040,6 +14040,15 @@ struct Body<'a> {
     /// either. The slot holds the value the call passed in for the whole
     /// body, so a frame states it at `var_p` rather than at a fresh binder.
     fixed_params: HashSet<String>,
+    /// While the join of an `if` or `switch` that states ownership is being
+    /// written out: the names its condition and arms may write or rebind. A
+    /// slot outside this set holds the same value after the statement as
+    /// before it, so the join states it at that value rather than at a fresh
+    /// binder, which would forget every fact known about it. The second set
+    /// is what C code stores into: a ghost statement or an inner `_ensures`
+    /// may name `$&(x)`, which conservatively counts as a write in the first
+    /// set, but cannot change the value C reads from `x`.
+    join_written: Option<(HashSet<String>, HashSet<String>)>,
     /// The facts an `if`'s `_ensures` states, for the arm about to be
     /// translated to end by holding; see the `If` case of `stmt`.
     arm_facts: Exprs,
@@ -21933,6 +21942,19 @@ impl<'a> Body<'a> {
                 continue;
             }
             if explicitly_owned {
+                // The author states the slot's ownership, but a slot the
+                // statement cannot write still holds what it holds now, and
+                // `$(x)` elsewhere in the clause means that value.
+                if s.init
+                    && s.array.is_none()
+                    && let Some((_, w)) = &self.join_written
+                    && !w.contains(touch)
+                {
+                    let v = self.fresh("join");
+                    self.lines
+                        .push(format!("with {}. assert ({});", v, s.pts_to(&v)));
+                    locals.insert(s.name.clone(), v);
+                }
                 continue;
             }
             // A local that holds an allocated block and is not reassigned in
@@ -21978,6 +22000,17 @@ impl<'a> Body<'a> {
             // stop matching after the join.
             if self.fixed_params.contains(&s.name) && s.array.is_none() {
                 let v = format!("var_{}", s.name);
+                owns.push(s.pts_to(&v));
+                locals.insert(s.name.clone(), v);
+                continue;
+            }
+            if let Some((w, _)) = &self.join_written
+                && !w.contains(touch)
+                && s.array.is_none()
+            {
+                let v = self.fresh("join");
+                self.lines
+                    .push(format!("with {}. assert ({});", v, s.pts_to(&v)));
                 owns.push(s.pts_to(&v));
                 locals.insert(s.name.clone(), v);
                 continue;
@@ -22209,6 +22242,35 @@ impl<'a> Body<'a> {
         self.uses.extend(spec.uses.borrow().iter().cloned());
         self.frame_slots = bound;
         Ok((binders, owns, props, storage, groups))
+    }
+
+    /// The frame at the join of an `if` or `switch` whose `_ensures` states
+    /// ownership: `frame_slprop`, but a slot that nothing in `cond` or
+    /// `arms` can write keeps the value it has now. Any line this emits binds
+    /// that value and so must come before the statement.
+    fn join_slprop(
+        &mut self,
+        clause: &Exprs,
+        cond: Option<&Expr>,
+        arms: &[&Stmts],
+        what: &str,
+        indent: &str,
+    ) -> Result<String, String> {
+        let mut t = Touched::default();
+        if let Some(c) = cond {
+            touch_expr(c, &mut t);
+        }
+        for a in arms {
+            touch_stmts(a, &mut t);
+        }
+        let mut c: HashSet<String> = t.written;
+        c.extend(t.rebound.into_keys());
+        let mut w = c.clone();
+        w.extend(t.addressed);
+        let saved = self.join_written.replace((w, c));
+        let r = self.frame_slprop(clause, what, indent);
+        self.join_written = saved;
+        r
     }
 
     /// The same frame, written out as one slprop.
@@ -23093,7 +23155,15 @@ impl<'a> Body<'a> {
                 // the frame at the join has to be written out. `switch` is the
                 // one statement PAL already asks the source to annotate, and
                 // that annotation is what goes in the `pure` part.
-                let join = self.frame_slprop(ensures, "a `switch`", "      ")?;
+                let mut arm_bodies: Vec<&Stmts> = branches.iter().map(|b| &*b.body).collect();
+                arm_bodies.push(default_branch);
+                let join = self.join_slprop(
+                    ensures,
+                    Some(scrutinee),
+                    &arm_bodies,
+                    "a `switch`",
+                    "      ",
+                )?;
 
                 self.lines.push("{".to_string());
                 self.lines.push(indent(&format!("match ({}) {{", scrut)));
@@ -23714,12 +23784,22 @@ impl<'a> Body<'a> {
                     }
                     None => (Vec::new(), Vec::new()),
                 };
+                // Pulse does not frame an `if`'s annotation, so it has to be
+                // the whole state at the join: the author's ownership plus
+                // everything they did not speak for.
+                let join = if states_own {
+                    Some(self.join_slprop(
+                        ensures,
+                        Some(cond),
+                        &[then_branch, else_branch],
+                        "an `if`",
+                        "    ",
+                    )?)
+                } else {
+                    None
+                };
                 self.lines.push(format!("if ({})", c));
-                if states_own {
-                    // Pulse does not frame an `if`'s annotation, so it has to
-                    // be the whole state at the join: the author's ownership
-                    // plus everything they did not speak for.
-                    let join = self.frame_slprop(ensures, "an `if`", "    ")?;
+                if let Some(join) = join {
                     self.lines.push(format!("  ensures {}", join));
                     // Validity is not carried by any points-to -- the bytes of
                     // a code pointer say where the code is, not what it does --
@@ -26293,6 +26373,7 @@ fn emit_body(
             .collect(),
         old_params: HashSet::new(),
         fixed_params: HashSet::new(),
+        join_written: None,
         arm_facts: Vec::new(),
     };
 
