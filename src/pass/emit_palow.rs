@@ -3962,9 +3962,15 @@ impl<'a> Spec<'a> {
             let Some((Some(term), _)) = self.pointees.get(&owner) else {
                 return Err(format!("`*{}` in a contract", v.val));
             };
-            let at_base = pos == "0";
+            // `d[k - (d - _old(d))]` (what `_base(d)[k]` is) is element `k`
+            // from the base: index `k` itself, the same term as a base
+            // local's `a[k]`, not `walk_idx .. + (k - walk_idx ..)`.
+            let from_base = idx.and_then(|i| self.base_relative_index(i, &v.val));
+            let at_base = pos == "0" || from_base.is_some();
+            let idx = from_base.or(idx);
             let i = match idx {
                 None => pos,
+                Some(i) if from_base.is_some() => self.index_num(i, wi)?,
                 Some(i) => pos_op(&pos, BinOp::Add, &self.index_num(i, wi)?),
             };
             // At the base the index is the subscript itself, and the guard
@@ -4423,6 +4429,45 @@ impl<'a> Spec<'a> {
     /// Whether a contract subscript is read as a number that may be negative
     /// -- a `_specint` (or signed) position rather than a `size_t` -- so its
     /// definedness guard must say `0 <=` as well as the upper bound.
+    /// `k` of a subscript `k - (d - _old(d))` of the walked `d`: the element
+    /// counted from `d`'s entry position. A `(_specint)` cast of an unsigned
+    /// `k`, as `_base(d)[k]` writes it, is dropped, so `k` stays the term a
+    /// quantifier over `k` triggers on.
+    fn base_relative_index<'e>(&self, idx: &'e Expr, d: &str) -> Option<&'e Expr> {
+        // The type checker's conversions: of the whole subscript to `size_t`
+        // and of the position to `_specint`.
+        let uncast = |e: &'e Expr| -> &'e Expr {
+            match &strip_vattr(e).val {
+                ExprT::Cast(inner, to)
+                    if matches!(peel(self.tds, to).val, TypeT::SizeT | TypeT::SpecInt) =>
+                {
+                    inner
+                }
+                _ => e,
+            }
+        };
+        let ExprT::BinOp(BinOp::Sub, k, pos) = &strip_vattr(uncast(idx)).val else {
+            return None;
+        };
+        let ExprT::BinOp(BinOp::Sub, cur, old) = &strip_vattr(uncast(pos)).val else {
+            return None;
+        };
+        let is_d = |e: &Expr| matches!(&strip_vattr(e).val, ExprT::Var(x) if &*x.val == d);
+        let ExprT::Old(o) = &strip_vattr(old).val else {
+            return None;
+        };
+        if !is_d(cur) || !is_d(o) {
+            return None;
+        }
+        if let ExprT::Cast(inner, to) = &strip_vattr(k).val
+            && matches!(peel(self.tds, to).val, TypeT::SpecInt)
+            && !self.index_may_be_negative(inner)
+        {
+            return Some(inner);
+        }
+        Some(k)
+    }
+
     fn index_may_be_negative(&self, e: &Expr) -> bool {
         let e = match &strip_vattr(e).val {
             ExprT::Cast(inner, to) if matches!(peel(self.tds, to).val, TypeT::SizeT) => inner,

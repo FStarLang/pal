@@ -7768,3 +7768,17 @@ Limitations:
     separators remain) and verifies in about 7.5 min;
     `test/cursor_strtok_bad` reads `*p` when `s` is not null and fails
     (`ptr_pts_to var_p` is not held).
+89. **`_base(d)[k]`: a walked parameter's current contents from its entry
+    position.** musl's `__stpcpy` walks `d` itself, so item 80's
+    `d[(_specint)k - (d - _old(d))]` was the only way to name the current
+    element `k` of the array from where `d` started. `_base(d)[k]` is
+    sugar for exactly that, expanded by the parser, for any expression
+    that is a walked array parameter `d`; it is the current contents, not
+    `_old(d)[k]` (the entry contents). Either spelling is emitted as
+    `Seq.index val_d k`, the array's element `k` with `k` as the index
+    term, not `walk_idx .. + (k - walk_idx ..)`: the same term as a base
+    local's `a[k]` and as the contract's `d[k]`, so the quantifiers over
+    `k` trigger alike and the solver has no arithmetic to undo (musl's
+    `__stpcpy` loops timed out on the long form). `test/array_walk_base_sugar` is
+    stpcpy's byte loop `for (; (*d = *s); s++, d++); return d;` with its
+    full contract; `test/array_walk_base_sugar_bad` is off by one.
