@@ -1408,6 +1408,18 @@ machine primitives, but note that their *specifications* are written entirely
 in terms of the derived layer-1 predicates, so they add operations rather than
 new facts about memory.
 
+### Unions of one integer type
+
+An `_overlay` union with two or more members that all have the same integer
+type, and no `_owning` member, is that integer: C uses it to rename a field
+while keeping the old name for readers, and every member reads the same bytes
+the same way. A union that is not `_overlay` is left as it is, since its active
+member is a tag that a specification may rely on.
+A pass before emission (`collapse_unions`) replaces the union type with the
+integer type, `e.m` with `e`, `(U){.m = v}` with `v`, and `e.m._active` with
+`true`, so no contract has to say which member is active
+(`union_same_type`).
+
 ### Overlay unions
 
 An ordinary union is a tagged value: one member is live, and writing another
@@ -7813,3 +7825,7 @@ Limitations:
     the contract does not state"), because contract paths looked only for a
     struct's ownership. The union's ownership is that member's struct's, so
     such a path now reads it there (`overlay_union_own`).
+94. **Overlay unions of one integer type.** Reading one member of such a union
+    needed that member's bytes to be readable, which callers had no way to know and had to be
+    told through a `_requires` on every function on the way. The union is now
+    the integer (see "Unions of one integer type") (`union_same_type`).
