@@ -912,6 +912,40 @@ ghost fn array_walk_next (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esiz
   assert pure (walk_next_post (SZ.v esize) a q (Seq.length xs) (SZ.v k) n);
 }
 
+(* `p += k` by a variable `k` on a pointer to elements wider than a byte: the
+   step in bytes is `esize * k`, and that product is what the solver would
+   otherwise have to see `SZ.mul` compute, which it cannot once the call that
+   computed it is behind it. *)
+let walk_next_mul_post (esize: SZ.t) (a q: ptr) (len: nat) (k: SZ.t) : prop =
+  walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q + SZ.v k <= len ==>
+  SZ.fits (SZ.v esize * SZ.v k) /\
+  walk_ok (SZ.v esize) a (q +! SZ.mul esize k) /\
+  walk_idx (SZ.v esize) a (q +! SZ.mul esize k) == walk_idx (SZ.v esize) a q + SZ.v k
+
+let walk_next_mul_if (esize: SZ.t) (a q: ptr) (len: nat) (k: SZ.t)
+  : Lemma (requires SZ.fits (addr_of a + SZ.v esize * len) /\ addr_of a + SZ.v esize * len < T.addr_limit)
+          (ensures  walk_next_mul_post esize a q len k)
+  = if walk_ok (SZ.v esize) a q && walk_idx (SZ.v esize) a q + SZ.v k <= len then begin
+      M.lemma_mult_le_left (SZ.v esize) (SZ.v k) len;
+      SZ.fits_lte (SZ.v esize * SZ.v k) (addr_of a + SZ.v esize * len);
+      let n = SZ.mul esize k in
+      assert (SZ.v n == SZ.v esize * SZ.v k);
+      walk_next_if (SZ.v esize) a q len (SZ.v k) n;
+      assert (walk_next_post (SZ.v esize) a q len (SZ.v k) n)
+    end
+
+ghost fn array_walk_next_mul (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                             (q: ptr) (k: SZ.t) (#p: perm) (#xs: Seq.seq t)
+  preserves array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
+  ensures   pure (walk_next_mul_post esize a q (Seq.length xs) k)
+{
+  array_fits t_repr a esize ealign;
+  assert pure (SZ.fits (addr_of a + SZ.v esize * Seq.length xs) /\
+               addr_of a + SZ.v esize * Seq.length xs < T.addr_limit);
+  walk_next_mul_if esize a q (Seq.length xs) k;
+  assert pure (walk_next_mul_post esize a q (Seq.length xs) k);
+}
+
 (* ---------------------------------------------------------------------------
    Lending the rest of an array
 

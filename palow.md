@@ -7782,3 +7782,20 @@ Limitations:
     `__stpcpy` loops timed out on the long form). `test/array_walk_base_sugar` is
     stpcpy's byte loop `for (; (*d = *s); s++, d++); return d;` with its
     full contract; `test/array_walk_base_sugar_bad` is off by one.
+90. **`p += k` over wide elements by a variable count.** A walk step
+    `s += wcsspn(s, sep)` on a `wchar_t *` emitted `array_walk_next ... k
+    (4sz `SizeT.mul` k)`, whose conclusion is conditional on
+    `SizeT.v n == 4 * k`; in `wcstok`'s larger context Z3 did not recover
+    that product for `SizeT.mul`, and the token's position in the array was
+    lost. A step by a variable count over elements wider than a byte now
+    emits `array_walk_next_mul ... q k`, whose conclusion states, from the
+    array's ownership, that `esize * k` fits and the stepped pointer
+    `q +! SizeT.mul esize k` is at index `idx + k` (when that is within
+    the array), so the product is never left to the solver. Constant and
+    byte steps are unchanged. With it musl's `wcstok` (item 88's
+    `strtok_r` over `wchar_t`) keeps the token's position, and every
+    obligation but one return's postcondition verifies; that one times
+    out even at `--z3rlimit_factor 20`, although each of its clauses,
+    asserted separately just before it, verifies: the postcondition
+    (an `exists` over five clauses, with `wcscspn`'s `exists m`) is too
+    large a query, not a missing fact.

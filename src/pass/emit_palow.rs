@@ -18721,19 +18721,28 @@ impl<'a> Body<'a> {
         }
         // The step in elements of the array, which may be narrower than the
         // pointer's own (a word walking a byte array).
-        let k = match count {
-            Step::Const(c) if (pelem * c) % esize == 0 => format!("{}sz", pelem * c / esize),
-            Step::Index(i) if pelem == esize => i,
+        let (k, scaled) = match count {
+            Step::Const(c) if (pelem * c) % esize == 0 => (format!("{}sz", pelem * c / esize), false),
+            Step::Index(i) if pelem == esize => (i, esize != 1),
             _ => return,
         };
         let used = format!(" {} ", ap.addr);
         if self.pending_close.iter().any(|l| l.contains(&used)) {
             return;
         }
-        self.lines.push(format!(
-            "array_walk_next {}_repr {} {} {}_alignof {} {} {};",
-            ap.pn, ap.addr, ap.esize, ap.pn, old, k, off
-        ));
+        // A variable step over elements wider than a byte is `esize * k`
+        // bytes, which the walk states itself (`array_walk_next_mul`).
+        self.lines.push(if scaled {
+            format!(
+                "array_walk_next_mul {}_repr {} {} {}_alignof {} {};",
+                ap.pn, ap.addr, ap.esize, ap.pn, old, k
+            )
+        } else {
+            format!(
+                "array_walk_next {}_repr {} {} {}_alignof {} {} {};",
+                ap.pn, ap.addr, ap.esize, ap.pn, old, k, off
+            )
+        });
     }
 
     /// That `q` points into array parameter `owner`, at an element boundary.
