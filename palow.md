@@ -1499,6 +1499,12 @@ the whole arm, and a store through it uses `_switch_m`. In contracts,
 `union_U_active_A`, and there is no tag guard: the read is well defined
 exactly when its bytes are, which is what the body's read checks.
 
+A struct that holds an overlay union has no whole-value writer either, so
+`x = (T){ ... }` into one is taken apart (`split_overlay_init`): a store per
+field -- the ones the literal leaves out get their C zero -- and, for the
+overlay union's part, a store to the arm the literal initializes, recursively
+while the part still holds an overlay (`overlay_struct_literal`).
+
 `_unchanged(lv)` in a postcondition says the object `lv` names has the bytes
 it had on entry. Inside an overlay union it is
 `Overlay.range_unchanged u' u o (o + n)` for the outermost overlay union `u`
@@ -7787,3 +7793,9 @@ Limitations:
     call, and `q = NULL; ... q = get(o)` drops the dead init as for `&`. The
     binding is no longer mistaken for a store through `q` by
     `split_alias_stores` (`alias_call_result`, `alias_call_result_bad`).
+91. **Literals stored into a struct that holds an overlay union.**
+    `p->in = (struct s){0}` failed in F* ("Identifier not found:
+    struct_s_write"): such a struct has no whole-value writer, but the
+    emitter called one. The store is now split into a store per field, with
+    omitted fields zeroed and an overlay union's part stored to its
+    initialized arm (`overlay_struct_literal`).

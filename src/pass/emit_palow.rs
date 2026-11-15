@@ -25395,6 +25395,12 @@ impl<'a> Body<'a> {
         if let Some(s2) = self.split_byte_field(s)? {
             return self.stmt(&s2);
         }
+        if let Some(parts) = self.split_overlay_init(s) {
+            for p in &parts {
+                self.stmt(p)?;
+            }
+            return Ok(());
+        }
         self.check_alias_snaps(s)?;
         let r = self.stmt_inner(s);
         let close = std::mem::take(&mut self.pending_close);
@@ -25407,6 +25413,63 @@ impl<'a> Body<'a> {
         self.own_open = open;
         self.close_own();
         Ok(())
+    }
+
+    /// `x = (T){...}` for a `T` with an overlay union in it, one field at a
+    /// time. Such a value is bytes and has no whole-value writer (see
+    /// `holds_overlay`), so the literal is taken apart into a store per
+    /// field, and an overlay union's literal into a store to the arm it
+    /// initializes. `None` when the statement is not one of these.
+    fn split_overlay_init(&self, s: &Stmt) -> Option<Vec<Rc<Stmt>>> {
+        fn go(
+            b: &Body,
+            lhs: &Rc<Expr>,
+            rhs: &Rc<Expr>,
+            loc: &Rc<SourceInfo>,
+            out: &mut Vec<Rc<Stmt>>,
+        ) -> bool {
+            let whole = b.ty_of(lhs).is_ok_and(|t| holds_overlay(b.tds, &t));
+            match &strip_vattr(rhs).val {
+                ExprT::StructInit(n, fs) if whole => {
+                    let Some(si) = b.tds.structs.get(&*n.val) else {
+                        return false;
+                    };
+                    for f in &si.fields {
+                        let name = Rc::<str>::from(f.name.as_str()).with_loc(lhs.loc.clone());
+                        let m = ExprT::Member(lhs.clone(), name).with_loc(lhs.loc.clone());
+                        // C zeroes the fields an initialiser leaves out.
+                        let e = match fs.iter().find(|(i, _)| *i.val == *f.name) {
+                            Some((_, e)) => e.clone(),
+                            None => match zero_expr(b.tds, &f.ty, &lhs.loc) {
+                                Some(z) => z,
+                                None => return false,
+                            },
+                        };
+                        if !go(b, &m, &e, loc, out) {
+                            return false;
+                        }
+                    }
+                }
+                ExprT::UnionInit(_, arm, e) if whole => {
+                    let m = ExprT::Member(lhs.clone(), arm.clone()).with_loc(lhs.loc.clone());
+                    return go(b, &m, e, loc, out);
+                }
+                _ => out.push(StmtT::Assign(lhs.clone(), rhs.clone()).with_loc(loc.clone())),
+            }
+            true
+        }
+        let StmtT::Assign(lhs, rhs) = &s.val else {
+            return None;
+        };
+        if !matches!(
+            &strip_vattr(rhs).val,
+            ExprT::StructInit(..) | ExprT::UnionInit(..)
+        ) || !self.ty_of(lhs).is_ok_and(|t| holds_overlay(self.tds, &t))
+        {
+            return None;
+        }
+        let mut out = Vec::new();
+        go(self, lhs, rhs, &s.loc, &mut out).then_some(out)
     }
 
     /// Prove, before a statement that uses an alias, that each pointer its
@@ -30396,6 +30459,35 @@ fn int_lit(e: &Expr) -> Option<u64> {
         ExprT::Cast(inner, _) => int_lit(inner),
         _ => None,
     }
+}
+
+/// The C zero of `ty` as an expression: what a field an initialiser leaves
+/// out holds. A union's zero is its first member's, as in C. `None` for a
+/// type with no such expression (an array, a float).
+fn zero_expr(tds: &Typedefs, ty: &Rc<Type>, loc: &Rc<SourceInfo>) -> Option<Rc<Expr>> {
+    let lit = |t: Rc<Type>| ExprT::IntLit(Rc::new(BigInt::from(0)), t).with_loc(loc.clone());
+    Some(match &peel(tds, ty).val {
+        TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT => lit(ty.clone()),
+        TypeT::Bool => ExprT::BoolLit(false).with_loc(loc.clone()),
+        TypeT::Pointer(..) | TypeT::FnPtr { .. } => {
+            let int = TypeT::Int {
+                signed: true,
+                width: 32,
+            }
+            .with_loc(loc.clone());
+            ExprT::Cast(lit(int), ty.clone()).with_loc(loc.clone())
+        }
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+            ExprT::StructInit(n.clone(), Vec::new()).with_loc(loc.clone())
+        }
+        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+            let m = tds.unions.get(&*n.val)?.members.first()?;
+            let z = zero_expr(tds, &m.ty, loc)?;
+            let arm = Rc::<str>::from(m.name.as_str()).with_loc(loc.clone());
+            ExprT::UnionInit(n.clone(), arm, z).with_loc(loc.clone())
+        }
+        _ => return None,
+    })
 }
 
 fn is_zero(e: &Expr) -> bool {
