@@ -2354,7 +2354,16 @@ Limitations:
    means. It is only the same C if the place denotes the same object
    throughout, so the alias is taken only when nothing rebinds the pointer
    again and nothing rebinds any name the place is built from; writing
-   *through* those names is fine, and is the point. Handing the pointer itself
+   *through* those names is fine, and is the point. A place that reads a
+   pointer out of memory -- `q = &h->s->seq` -- needs one thing more: `q`
+   holds the `seq` of the `h->s` of the moment it was set, and a store into
+   `h->s` changes which `seq` the place names without touching `q`. So each
+   such load is bound to a local when the alias is, and every statement that
+   uses the alias first asserts the load still gives that value. A callee that
+   leaves the pointer alone says so (`_ensures(h->s == _old(h->s))`) and the
+   assertion is the solver's; a call on the right of a store through the alias
+   is bound first, and any other call in a statement that uses it is refused.
+   Handing the pointer itself
    to something else is still refused, because that hands out ownership of the
    place, which is the focus-across-statements problem again.
 
@@ -7748,3 +7757,17 @@ Limitations:
     need only congruence, so each is checked under `--using_facts_from`
     that hides the nested `_repr` definitions; a zero-size field's is left
     visible, since its proof is the definition.
+
+89. **Aliases through loaded pointers.** An alias `q = &h->s->seq` was
+    re-evaluated at each use, but `stable_names` only kept the *names* in the
+    place fixed, not the pointers it loads through them. After a call that
+    stored another pointer into `h->s`, `*q = 5` was emitted as a store to the
+    new `h->s->seq` while C stores to the old one, so an `_assert` about
+    `h->s->seq` verified that the program falsifies. Each pointer an alias's
+    place loads (and each index that reads memory) is now bound to a
+    `__pal_snap_<n>` local when the alias is set, and every statement that
+    uses the alias asserts the load still equals it. `*q = f(h)` is split so
+    the check follows the call; other statements that call a function and use
+    such an alias, and loop conditions that use one, are refused
+    (`alias_loaded_pointer`, `alias_loaded_pointer_bad`,
+    `alias_loaded_pointer_call_bad`).

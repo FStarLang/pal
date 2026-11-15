@@ -15438,6 +15438,9 @@ struct Body<'a> {
     /// Local pointers that stand for a place rather than for storage. See
     /// `alias_map`.
     aliases: HashMap<String, Rc<Expr>>,
+    /// The pointers each alias's place loads, with the locals holding their
+    /// values from when it was bound (see `snapshot_alias_loads`).
+    alias_snaps: AliasSnaps,
     /// Fixed aliases whose local pointer cell is named by a contract.
     stored_aliases: HashSet<String>,
     /// Local pointers loaded once out of memory, with what they were loaded
@@ -25390,6 +25393,7 @@ impl<'a> Body<'a> {
         if let Some(s2) = self.split_byte_field(s)? {
             return self.stmt(&s2);
         }
+        self.check_alias_snaps(s)?;
         let r = self.stmt_inner(s);
         let close = std::mem::take(&mut self.pending_close);
         let open = std::mem::take(&mut self.own_open);
@@ -25401,6 +25405,103 @@ impl<'a> Body<'a> {
         self.own_open = open;
         self.close_own();
         Ok(())
+    }
+
+    /// Prove, before a statement that uses an alias, that each pointer its
+    /// place loads still holds what it held when the alias was bound. Only
+    /// then is re-evaluating the place the same as reading C's pointer.
+    fn check_alias_snaps(&mut self, s: &Stmt) -> Result<(), String> {
+        if self.alias_snaps.is_empty() {
+            return Ok(());
+        }
+        let exprs: Vec<&Rc<Expr>> = match &s.val {
+            // Binding the alias is not a use of it.
+            StmtT::Assign(lhs, _)
+                if lvalue_name(lhs).is_some_and(|q| self.aliases.contains_key(&q)) =>
+            {
+                vec![]
+            }
+            StmtT::Call(e) | StmtT::Let(_, _, e) | StmtT::Return(Some(e)) => vec![e],
+            StmtT::Assign(l, r) => vec![l, r],
+            StmtT::If { cond, .. } => vec![cond],
+            StmtT::Match { scrutinee, .. } => vec![scrutinee],
+            StmtT::DeclStackArray { size, .. } => vec![size],
+            // The condition is evaluated again after every iteration, where
+            // nothing here could check it.
+            StmtT::While { cond, .. } => {
+                if let Some(q) = self.snapped_alias_in(cond).into_iter().next() {
+                    return Err(format!(
+                        "a loop condition using `{}`, whose place reads a pointer that may change",
+                        q
+                    ));
+                }
+                vec![]
+            }
+            _ => vec![],
+        };
+        // The check covers the state before the statement. A call evaluated
+        // ahead of the alias's use would come between, so the only call a
+        // statement using one may make is a single outermost call, whose
+        // arguments are all read before it runs. `*q = f(h)` was split by
+        // `split_alias_stores` and does not get here.
+        if let Some(q) = exprs
+            .iter()
+            .find_map(|e| self.snapped_alias_in(e).into_iter().next())
+        {
+            let single = |e: &Rc<Expr>| match &strip_casts(e).val {
+                ExprT::FnCall(_, args) => !args.iter().any(has_call),
+                ExprT::FnPtrCall(f, args) => !has_call(f) && !args.iter().any(has_call),
+                _ => !has_call(e),
+            };
+            let ordered = match &s.val {
+                StmtT::Assign(l, r) => {
+                    !has_call(l)
+                        && single(r)
+                        && !(has_call(r) && mentions_snapped(l, &self.alias_snaps))
+                }
+                _ => exprs.iter().all(|e| single(e)),
+            };
+            if !ordered {
+                return Err(format!(
+                    "a statement that calls a function and uses `{}`, whose place reads a pointer the call may change",
+                    q
+                ));
+            }
+        }
+        let mut done: Vec<Rc<Ident>> = Vec::new();
+        for e in exprs {
+            for q in self.snapped_alias_in(e) {
+                for (l, id) in self.alias_snaps[&q].clone() {
+                    if done.contains(&id) {
+                        continue;
+                    }
+                    done.push(id.clone());
+                    let cur = self.rvalue(&l)?;
+                    let at = self.rvalue(&ExprT::Var(id.clone()).with_loc(l.loc.clone()))?;
+                    self.lines
+                        .push(format!("assert (pure ({} == {}));", cur, at));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The aliases with snapshots that an expression mentions, in order.
+    fn snapped_alias_in(&self, e: &Rc<Expr>) -> Vec<String> {
+        fn go(e: &Rc<Expr>, snaps: &AliasSnaps, out: &mut Vec<String>) {
+            if let ExprT::Var(v) = &e.val {
+                let v = v.val.to_string();
+                if snaps.contains_key(&v) && !out.contains(&v) {
+                    out.push(v);
+                }
+            }
+            for x in expr_operands(e) {
+                go(x, snaps, out);
+            }
+        }
+        let mut out = Vec::new();
+        go(e, &self.alias_snaps, &mut out);
+        out
     }
 
     fn stmt_inner(&mut self, s: &Stmt) -> Result<(), String> {
@@ -29419,6 +29520,244 @@ fn hoist_alias_effects(env: &Env, body: &Stmts) -> Option<Stmts> {
     changed.then_some(out)
 }
 
+/// The pointers an alias's place loads out of memory, each with the local
+/// that holds the value it had when the alias was bound.
+type AliasSnaps = HashMap<String, Vec<(Rc<Expr>, Rc<Ident>)>>;
+
+/// Bind, before each alias is taken, the pointers its place loads.
+///
+/// An alias is re-evaluated at every use, which is right only while the place
+/// it names is the one C's pointer holds. `q = &h->s->seq` names the `seq` of
+/// whatever `h->s` holds *at the use*, while `q` holds the address of the one
+/// `h->s` held when `q` was set. `stable_names` keeps the names a place is
+/// built from fixed, but not the pointers it reads through them. So each such
+/// load is bound to a `__pal_snap_<n>` here, and every statement that uses
+/// the alias first proves the load still gives that value (see `Body::stmt`).
+/// A callee that leaves the pointer alone says so in its contract, and the
+/// proof is the solver's; one that does not refuses the use, which is the
+/// point.
+///
+/// An index that reads memory is held to the same terms, since `&a[h->n]`
+/// names element `h->n` of the time `q` was set.
+fn snapshot_alias_loads(
+    env: &Env,
+    body: &Stmts,
+    aliases: &HashMap<String, Rc<Expr>>,
+) -> (Option<Stmts>, AliasSnaps) {
+    fn reads_memory(e: &Rc<Expr>) -> bool {
+        matches!(
+            &e.val,
+            ExprT::Deref(_) | ExprT::Member(..) | ExprT::Index(..)
+        ) || expr_operands(e).into_iter().any(reads_memory)
+    }
+    struct Cx<'a> {
+        snaps: &'a AliasSnaps,
+        found: Vec<Rc<Expr>>,
+        inherited: Vec<(Rc<Expr>, Rc<Ident>)>,
+    }
+    // The loads in a pointer expression, innermost first, ending with the
+    // expression itself when it is one.
+    fn ptr(cx: &mut Cx, e: &Rc<Expr>) {
+        match &e.val {
+            ExprT::VAttr(_, x) | ExprT::Cast(x, _) => ptr(cx, x),
+            ExprT::Ref(p) => place(cx, p),
+            ExprT::BinOp(BinOp::Add | BinOp::Sub, b, i) => {
+                ptr(cx, b);
+                index(cx, i);
+            }
+            ExprT::Var(v) => {
+                if let Some(s) = cx.snaps.get(&*v.val.to_string()) {
+                    cx.inherited.extend(s.iter().cloned());
+                }
+            }
+            ExprT::Deref(_) | ExprT::Member(..) | ExprT::Index(..) => {
+                place(cx, e);
+                cx.found.push(e.clone());
+            }
+            _ if reads_memory(e) => cx.found.push(e.clone()),
+            _ => {}
+        }
+    }
+    fn index(cx: &mut Cx, i: &Rc<Expr>) {
+        if reads_memory(i) {
+            cx.found.push(i.clone());
+        }
+    }
+    fn place(cx: &mut Cx, p: &Rc<Expr>) {
+        match &p.val {
+            ExprT::VAttr(_, x) | ExprT::Member(x, _) => place(cx, x),
+            ExprT::Index(b, i) => {
+                place(cx, b);
+                index(cx, i);
+            }
+            ExprT::Deref(x) => ptr(cx, x),
+            _ => {}
+        }
+    }
+
+    let env_at_entry = env;
+    let mut env = env.clone();
+    let mut snaps: AliasSnaps = HashMap::new();
+    let mut out: Stmts = Vec::new();
+    let mut n = 0;
+    for st in body {
+        if let StmtT::Assign(lhs, _) = &st.val
+            && let Some(q) = lvalue_name(lhs)
+            && let Some(at) = aliases.get(&q)
+            && !snaps.contains_key(&q)
+        {
+            // A copy of an alias holds the address the original was bound
+            // to, so it answers to the original's snapshots, not new ones.
+            if let StmtT::Assign(_, rhs) = &st.val
+                && let ExprT::Var(v) = &strip_casts(rhs).val
+                && aliases.contains_key(&*v.val.to_string())
+            {
+                if let Some(s) = snaps.get(&*v.val.to_string()).cloned() {
+                    snaps.insert(q, s);
+                }
+                env.push_stmt(st);
+                out.push(st.clone());
+                continue;
+            }
+            let mut cx = Cx {
+                snaps: &snaps,
+                found: Vec::new(),
+                inherited: Vec::new(),
+            };
+            place(&mut cx, at);
+            let (found, mut held) = (cx.found, cx.inherited);
+            for l in found {
+                if held.iter().any(|(h, _)| **h == *l) {
+                    continue;
+                }
+                let Ok(ty) = env.infer_expr(&l) else {
+                    continue;
+                };
+                n += 1;
+                let id: Rc<Ident> =
+                    Rc::<str>::from(format!("__pal_snap_{}", n)).with_loc(st.loc.clone());
+                let s = StmtT::Let(id.clone(), ty.to_rc(), l.clone()).with_loc(st.loc.clone());
+                env.push_stmt(&s);
+                out.push(s);
+                held.push((l, id));
+            }
+            if !held.is_empty() {
+                snaps.insert(q, held);
+            }
+        }
+        env.push_stmt(st);
+        out.push(st.clone());
+    }
+    if n == 0 && snaps.is_empty() {
+        return (None, snaps);
+    }
+    let mut k = 0;
+    let out = split_alias_stores(&env_at_entry, &out, &snaps, &mut k);
+    (Some(out), snaps)
+}
+
+/// Whether an expression mentions one of the aliases in `snaps`.
+fn mentions_snapped(e: &Rc<Expr>, snaps: &AliasSnaps) -> bool {
+    matches!(&e.val, ExprT::Var(v) if snaps.contains_key(&*v.val.to_string()))
+        || expr_operands(e)
+            .into_iter()
+            .any(|x| mentions_snapped(x, snaps))
+}
+
+/// Whether an expression calls a function.
+fn has_call(e: &Rc<Expr>) -> bool {
+    matches!(&e.val, ExprT::FnCall(..) | ExprT::FnPtrCall(..))
+        || expr_operands(e).into_iter().any(has_call)
+}
+
+/// `*q = f(h)` stores through `q` after the call, so the check made before
+/// the statement would not cover what the call does to the place. Binding the
+/// call's result first puts the store in a statement of its own.
+fn split_alias_stores(env: &Env, body: &Stmts, snaps: &AliasSnaps, k: &mut usize) -> Stmts {
+    let mut env = env.clone();
+    let mut out: Stmts = Vec::new();
+    for st in body {
+        let loc = &st.loc;
+        let v = match &st.val {
+            StmtT::Assign(lhs, rhs)
+                if has_call(rhs) && !has_call(lhs) && mentions_snapped(lhs, snaps) =>
+            {
+                if let Ok(ty) = env.infer_expr(rhs) {
+                    *k += 1;
+                    let id: Rc<Ident> =
+                        Rc::<str>::from(format!("__pal_res_{}", k)).with_loc(loc.clone());
+                    let bind =
+                        StmtT::Let(id.clone(), ty.to_rc(), rhs.clone()).with_loc(loc.clone());
+                    env.push_stmt(&bind);
+                    out.push(bind);
+                    StmtT::Assign(lhs.clone(), ExprT::Var(id).with_loc(rhs.loc.clone()))
+                } else {
+                    st.val.clone()
+                }
+            }
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => StmtT::If {
+                cond: cond.clone(),
+                then_branch: Rc::new(split_alias_stores(&env, then_branch, snaps, k)),
+                else_branch: Rc::new(split_alias_stores(&env, else_branch, snaps, k)),
+                ensures: ensures.clone(),
+            },
+            StmtT::Match {
+                scrutinee,
+                branches,
+                default_branch,
+                ensures,
+            } => StmtT::Match {
+                scrutinee: scrutinee.clone(),
+                branches: Rc::new(
+                    branches
+                        .iter()
+                        .map(|b| {
+                            Rc::new(MatchBranch {
+                                patterns: b.patterns.clone(),
+                                body: Rc::new(split_alias_stores(&env, &b.body, snaps, k)),
+                            })
+                        })
+                        .collect(),
+                ),
+                default_branch: Rc::new(split_alias_stores(&env, default_branch, snaps, k)),
+                ensures: ensures.clone(),
+            },
+            StmtT::While {
+                cond,
+                inv,
+                requires,
+                ensures,
+                body,
+            } => StmtT::While {
+                cond: cond.clone(),
+                inv: inv.clone(),
+                requires: requires.clone(),
+                ensures: ensures.clone(),
+                body: Rc::new(split_alias_stores(&env, body, snaps, k)),
+            },
+            StmtT::GotoBlock {
+                body,
+                label,
+                ensures,
+            } => StmtT::GotoBlock {
+                body: Rc::new(split_alias_stores(&env, body, snaps, k)),
+                label: label.clone(),
+                ensures: ensures.clone(),
+            },
+            other => other.clone(),
+        };
+        let st = v.with_loc(loc.clone());
+        env.push_stmt(&st);
+        out.push(st);
+    }
+    out
+}
+
 /// Recognize a direct native storage predicate, not a guarded or nested one.
 fn spliced_uninit_object(code: &InlinePulseCode) -> Option<(String, &InlinePulseToken)> {
     let (last, head) = code.tokens.split_last()?;
@@ -29523,6 +29862,18 @@ fn emit_body(
         None => defn,
     };
     let aliases = alias_map(&defn.body, &|x| ptr_base(tds, &env, x));
+    let (snapped, alias_snaps) = snapshot_alias_loads(&env, &defn.body, &aliases);
+    let snapshotted;
+    let defn = match snapped {
+        Some(body) => {
+            snapshotted = FnDefn {
+                body,
+                ..defn.clone()
+            };
+            &snapshotted
+        }
+        None => defn,
+    };
     let mut arrays = HashMap::new();
     let mut array_facts = Vec::new();
     let walked: HashSet<String> = {
@@ -29731,6 +30082,7 @@ fn emit_body(
                 .collect()
         },
         aliases: aliases,
+        alias_snaps,
         ptr_src: ptr_source_map(&defn.body),
         byte_bases: byte_base_map(&defn.body),
         fp_from_call: call_bound_map(&defn.body),
