@@ -2363,7 +2363,13 @@ Limitations:
    leaves the pointer alone says so (`_ensures(h->s == _old(h->s))`) and the
    assertion is the solver's; a call on the right of a store through the alias
    is bound first, and any other call in a statement that uses it is refused.
-   Handing the pointer itself
+   A pointer bound to a call whose contract says what it returns --
+   `q = get(o)` with `get` declared `_ensures(return == &o->in)` -- is an alias
+   of that place, with the call's arguments for the callee's parameters. The
+   call is still made, its result is asserted to be the place's address, and
+   any pointer the place loads is bound after the call. The arguments the
+   place mentions have to be plain names, and `PATH` has to be reached through
+   a pointer parameter. Handing the pointer itself
    to something else is still refused, because that hands out ownership of the
    place, which is the focus-across-statements problem again.
 
@@ -7771,3 +7777,13 @@ Limitations:
     such an alias, and loop conditions that use one, are refused
     (`alias_loaded_pointer`, `alias_loaded_pointer_bad`,
     `alias_loaded_pointer_call_bad`).
+
+90. **Aliases bound by a getter.** `q = get(o); q->a = 1;` was refused ("a
+    dereference of local `q`, whose target the contract does not grant")
+    even when `get` says `_ensures(return == &o->in)`, while `q = &o->in`
+    went through. `alias_map` now reads such a contract (`returned_place`)
+    and makes `q` an alias of `o->in`; the emitter makes the call and asserts
+    `result == &o->in`, snapshots of loads in the place are taken after the
+    call, and `q = NULL; ... q = get(o)` drops the dead init as for `&`. The
+    binding is no longer mistaken for a store through `q` by
+    `split_alias_stores` (`alias_call_result`, `alias_call_result_bad`).
