@@ -7713,3 +7713,58 @@ Limitations:
     which is also a failure. Since wall time depends on load, the option
     is a safety net against runaway queries, not a proof budget; it is
     unset by default, and test results don't depend on it.
+88. **`_cursor_from(s)`: a cursor seeded by an array parameter.** musl's
+    `strtok_r(char *s, const char *sep, char **p)` tokenises `s` when it
+    is not null and resumes from `*p` otherwise; on the first call `*p` is
+    uninitialised. `_nullable _array char *s, ..., _cursor_from(s) char
+    **p` says so: the cursor starts at `s` if `s` is not null and at the
+    incoming `*p` if it is, and only then is `*p` read. The slot's entry
+    ownership is `null_or var_s (ptr_pts_to var_p 1.0R var_p__arr)
+    (ptr_pts_to_uninit var_p)` (`Pulse.Lib.C.Palow.Nullable.null_or`:
+    the first resource when `var_s` is null, the second otherwise), and
+    the cursor's array `p__arr` is owned at `var_s` when it is not null,
+    at the incoming `*p` otherwise; `s` owns nothing of its own. On exit
+    the slot is an ordinary `_cursor`'s. In the contract `_old(*p)` and
+    `(*p)` (in a `_requires`) name that effective start, so the clauses are
+    `_cursor` clauses: `_old((*p)[k])` the entry contents, `_old(*p)[k]`
+    the exit contents, `*p - _old(*p)` where the cursor ended up. The body
+    is musl's unchanged: the test `!s && !(s = *p)` is split so that the
+    seed test is an `if` of its own (`split_seed_and`), whose arms settle
+    the slot (`elim_null_or_null` / `elim_null_or`), the seed becomes the
+    array's base where it is not null, and `s = *p` walks it where it is.
+    `**p` and `*(*p)++ = 0` are hoisted into a fresh local read out of the
+    slot (`hoist_cursor_derefs`), so they are walks of the cursor's array;
+    `(*p)++` itself is a walk. Calls of read-only callees on a cursor
+    position (`strspn(s, sep)`) lend the array as for an `_array`
+    parameter, and a lend to a `const` parameter now hands the array back
+    whole at its old value (`array_lend_whole_at` /
+    `array_return_whole_at`) instead of as an append of the lent slices,
+    which the token clauses could not see through (`lent_index_back`,
+    `append_lent_slices` in Palow.Array). Writable lends keep
+    `array_lend_at` without `lent_index_back`, whose extra facts slowed
+    `wcscat`'s postcondition (`test/array_walk_lend`) past its limit.
+    Three contract changes came with it:
+    - `return - X`, where `X` is a position in an array (`_old(*p)`), is
+      the returned pointer's position in that array (`ret_pos`), so a
+      token's start can be named: `_exists(size_t l0 = return -
+      _old(*p), ...)`. Z3 does not find a `SizeT` witness that no term
+      names, such as `l0 + l`.
+    - Guards (the well-formedness conditions of a subscript or a
+      division) that `&&`, `||` or `==>` copy up from the right operand
+      are marked as implied, and only a `forall`'s premise repeats them;
+      conjunctions, `exists` and whole clauses use the unmarked ones.
+      Along a chain of `&&` this kept the clause linear, not quadratic,
+      in its length. The marking is undone where it would be unsound: under
+      `!` and in the left operand of `||` or `==>`, where a guard the
+      right operand implied is no longer implied
+      (`test/contract_guard_negation`), and loop invariants keep only the
+      guards they need, never the marker.
+    - A test case may carry an `fstar_opts` file whose contents the test
+      Makefile appends to the F\* command line (`cursor_strtok` needs
+      `--z3rlimit_factor 5`, as musl's `strtok_r` does).
+    `test/cursor_strtok` states `strtok_r`'s full behaviour (leading
+    separators skipped, token up to a separator or the terminator, the
+    separator overwritten, `*p` past it or null, null when only
+    separators remain) and verifies in about 7.5 min;
+    `test/cursor_strtok_bad` reads `*p` when `s` is not null and fails
+    (`ptr_pts_to var_p` is not held).

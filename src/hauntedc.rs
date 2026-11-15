@@ -1608,6 +1608,7 @@ fn let_signature_parser<
                     name: name_opt,
                     ty,
                     mode,
+                    cursor_from: None,
                 }
             },
         );

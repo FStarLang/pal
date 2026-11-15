@@ -939,7 +939,7 @@ public:
     // meaning for the contract, so the type is rebuilt from the pointee.
     for (auto attr : attrs) {
       auto ann = dyn_cast<AnnotateAttr>(attr);
-      if (!ann || ann->getAnnotation() != "pal-cursor" || ann->args_size() != 0)
+      if (!ann || ann->getAnnotation() != "pal-cursor" || ann->args_size() > 1)
         continue;
       auto outer = declQt.isNull()
                        ? nullptr
@@ -4148,6 +4148,21 @@ public:
                     std::move(ty), std::move(mode));
       } else {
         builder.arg_anon(std::move(ty), std::move(mode));
+      }
+      // `_cursor_from(s)`: the parameter the cursor starts from when it is
+      // not null.
+      for (auto *attr : param->getAttrs()) {
+        auto *ann = dyn_cast<AnnotateAttr>(attr);
+        if (!ann || ann->getAnnotation() != "pal-cursor" ||
+            ann->args_size() != 1)
+          continue;
+        auto *lit =
+            dyn_cast<StringLiteral>(ann->args_begin()[0]->IgnoreParenCasts());
+        if (!lit)
+          continue;
+        builder.cursor_from(ctx.mk_ident(toStr(lit->getString()),
+                                         getRange(ann->getRange())));
+        break;
       }
     }
     builder.return_type(trTypeAttrs(

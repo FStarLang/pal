@@ -921,6 +921,33 @@ ghost fn array_walk_next (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esiz
    one array again, whatever the callee left in its part.
    --------------------------------------------------------------------------- *)
 
+(* A fact the caller had about `xs[i]` past the lent position, at the index
+   the callee's quantifiers use: the suffix at `i - w` as a `SizeT.t` term.
+   Without it a witness the caller knows for `xs` (a terminator, say) is not
+   one for the suffix, whose index is `i - w`, a term nothing names. *)
+let lent_index_back (#t: Type) (xs: Seq.seq t) (w: nat) : prop =
+  w <= Seq.length xs /\
+  (forall (i: SZ.t). {:pattern (Seq.index xs (SZ.v i))}
+    w <= SZ.v i /\ SZ.v i < Seq.length xs ==>
+      Seq.index (Seq.slice xs w (Seq.length xs)) (SZ.v (SZ.uint_to_t (SZ.v i - w))) ==
+      Seq.index xs (SZ.v i))
+
+let lent_index_back_intro (#t: Type) (xs: Seq.seq t) (w: nat)
+  : Lemma (requires w <= Seq.length xs)
+          (ensures lent_index_back xs w)
+  = let aux (i: SZ.t) : Lemma (w <= SZ.v i /\ SZ.v i < Seq.length xs ==>
+        Seq.index (Seq.slice xs w (Seq.length xs)) (SZ.v (SZ.uint_to_t (SZ.v i - w))) ==
+        Seq.index xs (SZ.v i))
+      = if w <= SZ.v i then SZ.fits_lte (SZ.v i - w) (SZ.v i) in
+    FStar.Classical.forall_intro aux
+
+(* What `array_return_at` gives back when the callee left its part as it was
+   lent: the caller's array is the one it lent from. *)
+let append_lent_slices (#t: Type) (xs: Seq.seq t) (w: nat { w <= Seq.length xs })
+  : Lemma (Seq.append (Seq.slice xs 0 w) (Seq.slice xs w (Seq.length xs)) == xs)
+          [SMTPat (Seq.append (Seq.slice xs 0 w) (Seq.slice xs w (Seq.length xs)))]
+  = Seq.lemma_split xs w
+
 ghost fn array_lend_at (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
                        (#p: perm) (#xs: Seq.seq t)
                        (q: ptr { walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q <= Seq.length xs })
@@ -963,6 +990,44 @@ ghost fn array_return_at (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esiz
   ptr_ext (a +! off) q;
   rewrite each q as (a +! off);
   array_join t_repr a esize ealign off;
+}
+
+(* `array_return_at` for a lend the callee only read: its part is still the
+   slice it was lent, so the caller gets its whole value back as it was, not
+   an `Seq.append` of two slices that every later fact has to see through. *)
+ghost fn array_return_whole_at (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                               (#p: perm) (#xs: Seq.seq t)
+                               (q: ptr { walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q <= Seq.length xs })
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p
+                        (Seq.slice xs 0 (walk_idx (SZ.v esize) a q))
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) q p
+                        (Seq.slice xs (walk_idx (SZ.v esize) a q) (Seq.length xs))
+  ensures  array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
+{
+  array_return_at t_repr a esize ealign q;
+  append_lent_slices xs (walk_idx (SZ.v esize) a q);
+  rewrite array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p
+            (Seq.append (Seq.slice xs 0 (walk_idx (SZ.v esize) a q))
+                        (Seq.slice xs (walk_idx (SZ.v esize) a q) (Seq.length xs)))
+       as array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs;
+}
+
+(* `array_lend_at` for a read-only callee, which is handed back with
+   `array_return_whole_at`: what the caller knew about `xs[i]` past the lent
+   position is also stated at the suffix's index (`lent_index_back`). *)
+ghost fn array_lend_whole_at (#t: Type0) (t_repr: t -> bytes -> prop) (a: ptr) (esize: SZ.t) (ealign: SZ.t)
+                             (#p: perm) (#xs: Seq.seq t)
+                             (q: ptr { walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q <= Seq.length xs })
+  requires array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p xs
+  ensures  array_pts_to t_repr (SZ.v esize) (SZ.v ealign) a p
+                        (Seq.slice xs 0 (walk_idx (SZ.v esize) a q))
+  ensures  array_pts_to t_repr (SZ.v esize) (SZ.v ealign) q p
+                        (Seq.slice xs (walk_idx (SZ.v esize) a q) (Seq.length xs))
+  ensures  pure (walk_ok (SZ.v esize) a q /\ walk_idx (SZ.v esize) a q <= Seq.length xs)
+  ensures  pure (lent_index_back xs (walk_idx (SZ.v esize) a q))
+{
+  lent_index_back_intro xs (walk_idx (SZ.v esize) a q);
+  array_lend_at t_repr a esize ealign q;
 }
 
 (* After `array_return_at` the caller's array is `Seq.append` of what it kept
