@@ -2560,7 +2560,9 @@ fn not_null_lemma(tds: &Typedefs, pt: &Type, uninit: bool) -> Option<String> {
         "pts_to_not_null"
     };
     match &peel(tds, pt).val {
-        TypeT::TypeRef(TypeRefKind::Union(_)) => None,
+        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+            (!uninit && is_overlay(tds, &n.val)).then(|| format!("{}_{}", pn, suffix))
+        }
         TypeT::TypeRef(TypeRefKind::Struct(n)) => {
             let si = tds.structs.get(&*n.val)?;
             let flex = matches!(
@@ -3470,6 +3472,28 @@ impl<'a> Spec<'a> {
             {
                 let owner = self.own_field(parent, &field.val, w)?;
                 return Ok(format!("(({}).own_{})", owner, f));
+            }
+            // The `_owning` arm of an overlay union: the union's ownership is
+            // that arm's struct's.
+            if let ExprT::Member(parent, arm) = &strip_vattr(base).val
+                && let Ok(ty) = self.ty_of(parent)
+                && let TypeT::TypeRef(TypeRefKind::Union(n)) = &peel(self.tds, &ty).val
+                && self
+                    .tds
+                    .unions
+                    .get(&*n.val)
+                    .and_then(|u| u.own.as_ref())
+                    .is_some_and(|o| o.arm == *arm.val)
+                && let Some((pre, post)) = self.owns.get(&self.value(parent, w)?)
+            {
+                let chosen = match w {
+                    When::Post => post,
+                    When::Pre | When::Old => pre,
+                };
+                return match chosen {
+                    Some(o) => Ok(format!("(({}).own_{})", o, f)),
+                    None => Err(format!("`.{}` has no value here", f)),
+                };
             }
             return Err(format!(
                 "`.{}`, whose ownership the contract does not state",
@@ -9644,7 +9668,11 @@ fn emit_overlay_union(tds: &Typedefs, name: &str) -> String {
          mem_pts_to a p u ** pure (aligned a {un}_alignof)\n\n\
          let {un}_pts_to_uninit ([@@@mkey] a: ptr) : slprop =\n  \
          exists* b. mem_pts_to a 1.0R b\n             \
-         ** pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof)\n\n"
+         ** pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof)\n\n\
+         ghost fn {un}_pts_to_not_null (a: ptr) (#p: perm) (#u: {un})\n  \
+         preserves {un}_pts_to a p u\n  \
+         ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
+         {{\n  unfold {un}_pts_to a p u;\n  mem_pts_to_not_null a;\n  fold {un}_pts_to a p u;\n}}\n\n"
     );
     // An array member has no functions of its own: its elements are read and
     // written by the scalar accessors below, at constant subscripts.
@@ -25415,6 +25443,56 @@ impl<'a> Body<'a> {
         Ok(())
     }
 
+    /// Before `_assert(p != NULL)`, the fact that `p` is not null, from the
+    /// points-to of a parameter whose pointee the contract grants whole: Pulse
+    /// does not derive it from the resource by itself.
+    fn not_null_facts(&mut self, e: &Expr) {
+        fn tested(e: &Expr, out: &mut Vec<String>) {
+            match &strip_vattr(strip_casts(e)).val {
+                ExprT::BinOp(BinOp::LogAnd, a, b) => {
+                    tested(a, out);
+                    tested(b, out);
+                }
+                ExprT::UnOp(UnOp::Not, x) => {
+                    if let ExprT::BinOp(BinOp::Eq, a, b) = &strip_vattr(strip_casts(x)).val {
+                        for (v, z) in [(a, b), (b, a)] {
+                            if is_zero(strip_casts(z))
+                                && let ExprT::Var(x) = &strip_vattr(strip_casts(v)).val
+                            {
+                                out.push(x.val.to_string());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut vs = Vec::new();
+        tested(e, &mut vs);
+        for x in vs {
+            if !self.params.contains(&x)
+                || !self.granted.contains(&x)
+                || self.pieces.contains(&x)
+                || (self.guarded.contains(&x) && !self.unguarded.contains(&x))
+                || self.slots.iter().any(|s| s.name == x)
+            {
+                continue;
+            }
+            let Ok(t) = self.ty_of(
+                &ExprT::Var(Rc::<str>::from(x.as_str()).with_loc(e.loc.clone()))
+                    .with_loc(e.loc.clone()),
+            ) else {
+                continue;
+            };
+            if let TypeT::Pointer(pt, _) = &peel(self.tds, &t).val
+                && extent(self.tds, &t) == Some(Extent::One)
+                && let Some(l) = not_null_lemma(self.tds, pt, false)
+            {
+                self.lines.push(format!("{} var_{};", l, x));
+            }
+        }
+    }
+
     /// `x = (T){...}` for a `T` with an overlay union in it, one field at a
     /// time. Such a value is bytes and has no whole-value writer (see
     /// `holds_overlay`), so the literal is taken apart into a store per
@@ -25426,9 +25504,12 @@ impl<'a> Body<'a> {
             lhs: &Rc<Expr>,
             rhs: &Rc<Expr>,
             loc: &Rc<SourceInfo>,
+            in_arm: bool,
             out: &mut Vec<Rc<Stmt>>,
         ) -> bool {
-            let whole = b.ty_of(lhs).is_ok_and(|t| holds_overlay(b.tds, &t));
+            // Inside an arm of an overlay union a struct is taken apart too:
+            // a store of a whole member is refused there (C11 6.2.6.1p7).
+            let whole = in_arm || b.ty_of(lhs).is_ok_and(|t| holds_overlay(b.tds, &t));
             match &strip_vattr(rhs).val {
                 ExprT::StructInit(n, fs) if whole => {
                     let Some(si) = b.tds.structs.get(&*n.val) else {
@@ -25445,14 +25526,15 @@ impl<'a> Body<'a> {
                                 None => return false,
                             },
                         };
-                        if !go(b, &m, &e, loc, out) {
+                        if !go(b, &m, &e, loc, in_arm, out) {
                             return false;
                         }
                     }
                 }
-                ExprT::UnionInit(_, arm, e) if whole => {
+                ExprT::UnionInit(n, arm, e) if whole => {
                     let m = ExprT::Member(lhs.clone(), arm.clone()).with_loc(lhs.loc.clone());
-                    return go(b, &m, e, loc, out);
+                    let overlay = b.tds.unions.get(&*n.val).is_some_and(|u| u.overlay);
+                    return go(b, &m, e, loc, in_arm || overlay, out);
                 }
                 _ => out.push(StmtT::Assign(lhs.clone(), rhs.clone()).with_loc(loc.clone())),
             }
@@ -25469,7 +25551,7 @@ impl<'a> Body<'a> {
             return None;
         }
         let mut out = Vec::new();
-        go(self, lhs, rhs, &s.loc, &mut out).then_some(out)
+        go(self, lhs, rhs, &s.loc, false, &mut out).then_some(out)
     }
 
     /// Prove, before a statement that uses an alias, that each pointer its
@@ -25937,6 +26019,7 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Assert(e) => {
+                self.not_null_facts(e);
                 let p = self.stmt_assertion(e)?;
                 self.lines.push(format!("assert ({});", p));
                 if is_false_lit(e) {

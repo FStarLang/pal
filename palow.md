@@ -1503,7 +1503,8 @@ A struct that holds an overlay union has no whole-value writer either, so
 `x = (T){ ... }` into one is taken apart (`split_overlay_init`): a store per
 field -- the ones the literal leaves out get their C zero -- and, for the
 overlay union's part, a store to the arm the literal initializes, recursively
-while the part still holds an overlay (`overlay_struct_literal`).
+while the part still holds an overlay and, inside the arm, down to its scalars,
+since a whole member of an overlay union is not stored (`overlay_struct_literal`).
 
 `_unchanged(lv)` in a postcondition says the object `lv` names has the bytes
 it had on entry. Inside an overlay union it is
@@ -7798,4 +7799,17 @@ Limitations:
     struct_s_write"): such a struct has no whole-value writer, but the
     emitter called one. The store is now split into a store per field, with
     omitted fields zeroed and an overlay union's part stored to its
-    initialized arm (`overlay_struct_literal`).
+    initialized arm, field by field when the arm is a struct
+    (`overlay_struct_literal`).
+92. **`_assert(p != NULL)` on an owned parameter.** It failed even though the
+    contract grants `p`'s pointee: Pulse does not derive non-nullness from a
+    points-to by itself. Before an assertion, each `p != NULL` conjunct over a
+    parameter whose pointee is granted whole now calls the type's
+    `_pts_to_not_null` lemma, and an overlay union has one
+    (`union_U_pts_to_not_null`) (`assert_param_not_null`).
+93. **Contracts through an `_owning` member.** A contract that read through an
+    owned pointer of an overlay union's `_owning` member, as in
+    `_requires(r->params.ctx->count >= 1)`, was weakened ("whose ownership
+    the contract does not state"), because contract paths looked only for a
+    struct's ownership. The union's ownership is that member's struct's, so
+    such a path now reads it there (`overlay_union_own`).

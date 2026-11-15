@@ -5,7 +5,8 @@
    compound literal stored into one is taken apart into a store per field,
    and the union's part into a store to the arm the literal initializes. */
 
-union __attribute__((annotate("pal-overlay"))) u { uint32_t a; uint32_t b; };
+struct pair { uint16_t lo; uint16_t hi; };
+union __attribute__((annotate("pal-overlay"))) u { uint32_t a; uint32_t b; struct pair p; };
 struct t { uint8_t c; _Bool f; };
 struct s { union u x; uint32_t n; struct t w; };
 struct o { struct s in; uint32_t k; };
@@ -24,4 +25,12 @@ void through_pointer(struct o *p)
     *q = (struct s){ .x = { .b = 4 }, .n = 9 };
     _assert(p->in.n == 9);
     _assert(p->in.x.b == 4);
+}
+
+void arm_struct(struct o *p)
+{
+    p->in = (struct s){ .x = { .p = { .hi = 7 } } };
+    _assert(p->in.x.p.hi == 7);
+    _assert(p->in.x.p.lo == 0);
+    _assert(p->in.n == 0);
 }
