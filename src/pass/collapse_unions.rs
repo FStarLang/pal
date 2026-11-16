@@ -32,12 +32,25 @@ fn collapsible(env: &Env, u: &UnionDefn) -> Option<Rc<Type>> {
         tys.push(ty.clone());
     }
     let first = tys[0].clone();
-    if !matches!(env.vtype_whnf(first.clone().into()).val, TypeT::Int { .. }) {
+    // `vtype_eq` sees through a refinement, which would either lose a
+    // member's or impose it on the others: such a union stays an overlay.
+    if !tys.iter().all(|t| bare_int(env, t)) {
         return None;
     }
     tys.iter()
         .all(|t| env.vtype_eq(t.clone().into(), first.clone().into()))
         .then_some(first)
+}
+
+/// Whether `t` is an integer type, through typedefs but not refinements.
+fn bare_int(env: &Env, t: &Type) -> bool {
+    match &t.val {
+        TypeT::Int { .. } => true,
+        TypeT::TypeRef(TypeRefKind::Typedef(n)) => {
+            env.lookup_type(n).is_some_and(|d| bare_int(env, &d.body))
+        }
+        _ => false,
+    }
 }
 
 fn collapsed_of<'a>(env: &Env, c: &'a Collapsed, e: &Expr) -> Option<&'a Rc<Type>> {

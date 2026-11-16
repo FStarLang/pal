@@ -25423,7 +25423,7 @@ impl<'a> Body<'a> {
         if let Some(s2) = self.split_byte_field(s)? {
             return self.stmt(&s2);
         }
-        if let Some(parts) = self.split_overlay_init(s) {
+        if let Some(parts) = self.split_overlay_init(s)? {
             for p in &parts {
                 self.stmt(p)?;
             }
@@ -25498,7 +25498,12 @@ impl<'a> Body<'a> {
     /// `holds_overlay`), so the literal is taken apart into a store per
     /// field, and an overlay union's literal into a store to the arm it
     /// initializes. `None` when the statement is not one of these.
-    fn split_overlay_init(&self, s: &Stmt) -> Option<Vec<Rc<Stmt>>> {
+    ///
+    /// C leaves the bytes of a union outside the member a literal initializes
+    /// unspecified -- an omitted union's first member included -- so a store
+    /// to that member alone, which keeps the old bytes, is the C store only
+    /// when the member is every byte of the union. Any other is refused.
+    fn split_overlay_init(&self, s: &Stmt) -> Result<Option<Vec<Rc<Stmt>>>, String> {
         fn go(
             b: &Body,
             lhs: &Rc<Expr>,
@@ -25506,14 +25511,14 @@ impl<'a> Body<'a> {
             loc: &Rc<SourceInfo>,
             in_arm: bool,
             out: &mut Vec<Rc<Stmt>>,
-        ) -> bool {
+        ) -> Result<bool, String> {
             // Inside an arm of an overlay union a struct is taken apart too:
             // a store of a whole member is refused there (C11 6.2.6.1p7).
             let whole = in_arm || b.ty_of(lhs).is_ok_and(|t| holds_overlay(b.tds, &t));
             match &strip_vattr(rhs).val {
                 ExprT::StructInit(n, fs) if whole => {
                     let Some(si) = b.tds.structs.get(&*n.val) else {
-                        return false;
+                        return Ok(false);
                     };
                     for f in &si.fields {
                         let name = Rc::<str>::from(f.name.as_str()).with_loc(lhs.loc.clone());
@@ -25523,35 +25528,77 @@ impl<'a> Body<'a> {
                             Some((_, e)) => e.clone(),
                             None => match zero_expr(b.tds, &f.ty, &lhs.loc) {
                                 Some(z) => z,
-                                None => return false,
+                                None => return Ok(false),
                             },
                         };
-                        if !go(b, &m, &e, loc, in_arm, out) {
-                            return false;
+                        if !go(b, &m, &e, loc, in_arm, out)? {
+                            return Ok(false);
                         }
                     }
                 }
                 ExprT::UnionInit(n, arm, e) if whole => {
                     let m = ExprT::Member(lhs.clone(), arm.clone()).with_loc(lhs.loc.clone());
-                    let overlay = b.tds.unions.get(&*n.val).is_some_and(|u| u.overlay);
+                    let ui = b.tds.unions.get(&*n.val);
+                    let overlay = ui.is_some_and(|u| u.overlay);
+                    if let Some(ui) = ui
+                        && overlay
+                        && !ui.members.iter().any(|x| {
+                            *x.name == *arm.val && x.size == ui.size && fills(b.tds, &x.ty)
+                        })
+                    {
+                        return Err(format!(
+                            "a literal that initializes `.{}` of union `{}`, which leaves bytes of the union unspecified",
+                            arm.val, n.val
+                        ));
+                    }
                     return go(b, &m, e, loc, in_arm || overlay, out);
                 }
                 _ => out.push(StmtT::Assign(lhs.clone(), rhs.clone()).with_loc(loc.clone())),
             }
-            true
+            Ok(true)
+        }
+        // Whether a store of every scalar in a value of `ty` writes all of its
+        // bytes: no padding, no bit-fields.
+        fn fills(tds: &Typedefs, ty: &Rc<Type>) -> bool {
+            match &peel(tds, ty).val {
+                TypeT::Int { .. }
+                | TypeT::Bool
+                | TypeT::SizeT
+                | TypeT::PtrdiffT
+                | TypeT::Pointer(..)
+                | TypeT::FnPtr { .. } => true,
+                TypeT::FixedArray(t, _) => fills(tds, t),
+                TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+                    let Some(si) = tds.structs.get(&*n.val) else {
+                        return false;
+                    };
+                    let mut at = 0;
+                    for f in &si.fields {
+                        if f.offset != at || !fills(tds, &f.ty) {
+                            return false;
+                        }
+                        at += f.size;
+                    }
+                    si.bitfields.is_empty() && at == si.size
+                }
+                // A union member is stored through one of its own arms,
+                // which is checked when it is.
+                TypeT::TypeRef(TypeRefKind::Union(n)) => tds.unions.contains_key(&*n.val),
+                _ => false,
+            }
         }
         let StmtT::Assign(lhs, rhs) = &s.val else {
-            return None;
+            return Ok(None);
         };
         if !matches!(
             &strip_vattr(rhs).val,
             ExprT::StructInit(..) | ExprT::UnionInit(..)
         ) || !self.ty_of(lhs).is_ok_and(|t| holds_overlay(self.tds, &t))
         {
-            return None;
+            return Ok(None);
         }
         let mut out = Vec::new();
-        go(self, lhs, rhs, &s.loc, false, &mut out).then_some(out)
+        Ok(go(self, lhs, rhs, &s.loc, false, &mut out)?.then_some(out))
     }
 
     /// Prove, before a statement that uses an alias, that each pointer its
@@ -25562,11 +25609,16 @@ impl<'a> Body<'a> {
             return Ok(());
         }
         let exprs: Vec<&Rc<Expr>> = match &s.val {
-            // Binding the alias is not a use of it.
-            StmtT::Assign(lhs, _)
+            // Binding the alias is not a use of it, but a getter's arguments
+            // are read before the call that binds it.
+            StmtT::Assign(lhs, rhs)
                 if lvalue_name(lhs).is_some_and(|q| self.aliases.contains_key(&q)) =>
             {
-                vec![]
+                if matches!(&strip_casts(rhs).val, ExprT::FnCall(..)) {
+                    vec![rhs]
+                } else {
+                    vec![]
+                }
             }
             StmtT::Call(e) | StmtT::Let(_, _, e) | StmtT::Return(Some(e)) => vec![e],
             StmtT::Assign(l, r) => vec![l, r],
@@ -25615,6 +25667,11 @@ impl<'a> Body<'a> {
                 // A call in a specification is to a pure function: it changes
                 // nothing the check covers.
                 StmtT::Assert(_) | StmtT::GhostStmt(_) => true,
+                StmtT::Assign(l, r)
+                    if lvalue_name(l).is_some_and(|q| self.aliases.contains_key(&q)) =>
+                {
+                    single(r)
+                }
                 StmtT::Assign(l, r) => {
                     !has_call(l)
                         && single(r)

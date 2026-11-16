@@ -1411,7 +1411,7 @@ new facts about memory.
 ### Unions of one integer type
 
 An `_overlay` union with two or more members that all have the same integer
-type, and no `_owning` member, is that integer: C uses it to rename a field
+type, none refined, and no `_owning` member, is that integer: C uses it to rename a field
 while keeping the old name for readers, and every member reads the same bytes
 the same way. A union that is not `_overlay` is left as it is, since its active
 member is a tag that a specification may rely on.
@@ -1517,6 +1517,10 @@ field -- the ones the literal leaves out get their C zero -- and, for the
 overlay union's part, a store to the arm the literal initializes, recursively
 while the part still holds an overlay and, inside the arm, down to its scalars,
 since a whole member of an overlay union is not stored (`overlay_struct_literal`).
+C leaves the bytes of the union outside the initialized member unspecified, so
+the split is made only when that member -- an omitted union's first -- covers
+every byte of the union without padding; otherwise the literal is refused
+(`overlay_struct_literal_stale_bad`).
 
 `_unchanged(lv)` in a postcondition says the object `lv` names has the bytes
 it had on entry. Inside an overlay union it is
@@ -7807,14 +7811,21 @@ Limitations:
     `result == &o->in`, snapshots of loads in the place are taken after the
     call, and `q = NULL; ... q = get(o)` drops the dead init as for `&`. The
     binding is no longer mistaken for a store through `q` by
-    `split_alias_stores` (`alias_call_result`, `alias_call_result_bad`).
+    `split_alias_stores`. The call's arguments are read before it, so an
+    alias with snapshots among them is checked as at any other use
+    (`alias_call_result`, `alias_call_result_bad`,
+    `alias_getter_arg_stale_bad`).
 91. **Literals stored into a struct that holds an overlay union.**
     `p->in = (struct s){0}` failed in F* ("Identifier not found:
     struct_s_write"): such a struct has no whole-value writer, but the
     emitter called one. The store is now split into a store per field, with
     omitted fields zeroed and an overlay union's part stored to its
-    initialized arm, field by field when the arm is a struct
-    (`overlay_struct_literal`).
+    initialized arm (an omitted union's first member), field by field when
+    the arm is a struct. C leaves the union's other bytes unspecified, so a
+    store to the arm alone, which keeps them, is the C store only when the
+    arm covers every byte of the union with no padding; any other such
+    literal is refused (`overlay_struct_literal`,
+    `overlay_struct_literal_stale_bad`).
 92. **`_assert(p != NULL)` on an owned parameter.** It failed even though the
     contract grants `p`'s pointee: Pulse does not derive non-nullness from a
     points-to by itself. Before an assertion, each `p != NULL` conjunct over a
@@ -7830,4 +7841,6 @@ Limitations:
 94. **Overlay unions of one integer type.** Reading one member of such a union
     needed that member's bytes to be readable, which callers had no way to know and had to be
     told through a `_requires` on every function on the way. The union is now
-    the integer (see "Unions of one integer type") (`union_same_type`).
+    the integer (see "Unions of one integer type") (`union_same_type`). A
+    member with a refinement keeps the union an overlay, since one type
+    would lose the refinement or impose it on the other members.
