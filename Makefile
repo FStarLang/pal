@@ -28,8 +28,12 @@ format-check:
 	cargo fmt --check
 	clang-format --dry-run --Werror cpp/impl.cpp
 
+.PHONY: annotations-test
+annotations-test: rust
+	cargo test --bin pal_annotations --test annotations
+
 .PHONY: test
-test: rust lib -testsuite
+test: rust lib -testsuite annotations-test
 # Only run formatting checks when tests succeed
 	$(MAKE) comment-check format-check
 
