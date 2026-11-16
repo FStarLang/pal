@@ -7935,3 +7935,10 @@ Limitations:
     reader gets it with the ownership; a write has to keep it, and is
     checked when the ownership is gathered back (`own_target_refine`,
     `own_target_refine_bad`).
+103. **A refinement that is just `u.m._active` is kept.** Splitting a
+    `_refine` into its conjuncts peeled value attributes off each clause, so
+    a clause that was nothing but `this.u.m._active` became `this.u` -- a
+    union, not a proposition -- and the struct's whole `_refine` was dropped
+    without a diagnostic, from contracts and from `struct_X__refine` alike.
+    The attribute now stays on the clause, which says which member is live
+    (`anon_union_refine`, `anon_union_refine_bad`).

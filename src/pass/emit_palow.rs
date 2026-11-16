@@ -2486,7 +2486,9 @@ fn split_refine<'e>(
     own: &mut Vec<&'e Expr>,
     props: &mut Vec<&'e Expr>,
 ) {
-    let inner = strip_vattr(p);
+    // Not `strip_vattr`: a whole clause `u.m._active` is the attribute, and
+    // peeling it would leave just the union.
+    let inner = p;
     match &inner.val {
         ExprT::Cast(x, to) if matches!(tds.resolve(to).val, TypeT::SLProp) => {
             split_refine(tds, x, own, props)
