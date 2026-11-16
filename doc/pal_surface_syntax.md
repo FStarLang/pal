@@ -54,7 +54,8 @@ compatibility checking, not for erasing pointer-view definitions.
 Compatibility checks are deliberately conservative: harmless command differences
 or more complex compatible declarators may be rejected. Missing or ambiguous
 compilation commands and failed Clang parses are explicit errors. Selected or
-referenced linker aliases and block-scope static storage are unsupported.
+referenced linker aliases and block-scope static storage are unsupported, except
+a function alias (see *Function aliases*).
 Incompatible named type/Pulse representations are diagnosed, not silently merged.
 
 C references are qualified while Clang still knows their bindings.
@@ -122,12 +123,17 @@ fn func_f (var_x: ptr) (#val_x: erased T)
 | `_allocated T *x`         | adds `freeable var_x <size>`: the block came from `malloc` and may be freed (usually with `_consumes`) |
 | `_array T *x` / `T x[]`   | `array_pts_to T_repr <size> (SizeT.v T_alignof) var_x 1.0R val_x`, `val_x : Seq.seq T` |
 | `_arrayptr T *x`          | nothing: a pointer into an array owned elsewhere (stated by hand, see `test/arrayptrs`) |
+| `_cursor T **x`           | `ptr_pts_to var_x 1.0R var_x__arr` plus `unless_null var_x__arr (array_pts_to ... var_x__arr 1.0R val_x__arr)`: `*x` is null or points into an array the function owns for the call (see below) |
 | `struct s x` (by value)   | `struct_s_own var_x 1.0R own_x` when `struct s` has owned pointer fields |
 | `_core_ref T *f` (a field)| nothing: a non-owning back-pointer, left out of the struct's `_own` |
 
 `_nullable` and `_allocated` also apply to the return value: `_allocated _nullable T *f(...)` is the shape of an allocator.
 
-The body may dereference a `_nullable` parameter only where a null test on it has settled that it is not null: in the matching arm of `if (p)`, `if (p != NULL)` or `if (!p) return ...;`, of `p ? ... : ...`, or on the right of `p && ...` / `p == NULL || ...`. The translation opens the guard there (`elim_unless_null`) and closes it again where the arm ends. A contract still cannot mention `*p`, and a `_refine` behind the guard keeps the body from opening it.
+`_allocated _nullable _array T *f(...)` returns a fresh heap array: under `return != 0` the `_ensures` can name its contents and length (`return[k]`, `return._length`), and every cell must have been written before it is returned. A `char`-sized `malloc(n)` (no `sizeof` factor) allocates an array of `n` elements, and `memcpy(d, s, n)` from a `T` array of the same byte-sized type fills the first `n` cells of such a fresh block; its value is `d`, so `return memcpy(d, s, n);` works (`test/alloc_array_return`). `wmemcpy(d, s, n)` likewise fills the first `n` cells of a fresh `malloc(m * sizeof(wchar_t))` block from a `wchar_t` array, as musl's `wcsdup` does (`test/alloc_wide_return`). A caller cannot yet take over such a returned array.
+
+The body may dereference a `_nullable` parameter only where a null test on it has settled that it is not null: in the matching arm of `if (p)`, `if (p != NULL)` or `if (!p) return ...;`, of `p ? ... : ...`, or on the right of `p && ...` / `p == NULL || ...`. The translation opens the guard there (`elim_unless_null`) and closes it again where the arm ends. A contract still cannot mention `*p` of a `_nullable T *p`, and a `_refine` behind the guard keeps the body from opening it. A `_nullable _array` parameter's contents and length (`a[k]`, `a._length`) can be named; each clause that does is read under `a != 0`.
+
+`_cursor T **x` is an in/out position in a terminated array, as in `strsep(char **str, ...)`: `*x` is null or points at the start of an array the function owns for the call, and the function may store back a pointer into that array, or null. In the contract `*x` is the incoming pointer, `(*x)[k]` / `(*x)._length` the array's entry contents and length (in an `_ensures` written `_old((*x)[k])`), and `_old(*x)[k]` its contents at exit. In an `_ensures`, `*x` is the outgoing pointer: it can be compared with null and measured from the incoming one, `*x - _old(*x)`. `(*x)[k]` in an `_ensures` is rejected, since `*x` may have moved. The body reads `*x` into a local, tests it for null, and walks, reads and writes the array through it like an `_array` parameter (`test/cursor_strsep`). The parameter must be a plain `T **`, and callers of a function with a `_cursor` parameter are not supported yet.
 
 Beyond ownership, the user typically also wants to constrain values. PAL provides the following annotations for adding extra contract clauses:
 
@@ -136,19 +142,26 @@ Beyond ownership, the user typically also wants to constrain values. PAL provide
 - `_preserves_value(x)` = `_ensures(x == _old(x))`.
 - `_invariant(p)` / `_ensures(p)` on a loop — see below.
 - `_decreases(p)` — termination measure on a `_rec` function (required there; not a loop annotation).
-- `_assert(p)` — verification assertion inside a function body.
+- `_assert(p)` — verification assertion inside a function body. It may quantify over array contents (`_exists(size_t m, m < c._length && c[m] == 0)`) and read through walked pointers (`*s`); those are read at their current values, as in an `_invariant` (`test/assert_quantified_array`). `_old(d[k])` there is the array's element on entry, as in an `_invariant`.
 
 Inside any of these predicates the following spec-only constructs are available:
 
 - `_old(x)` — value of `x` at function entry.
 - `*p`, `p->f`, `a[i]` — the value behind a pointer, read off the contract's existential (`val_p`, `(val_p).fld_f`, `Seq.index val_a i`); no read is performed.
-- `x._length` — length of an `_array`'s sequence (`Seq.length val_x`).
+- `_exists(T i = w, p)` — an existential with a named witness: it means `_exists(T i, i == w && p)`, and is emitted as `p` with `i` bound to `w` (plus the range condition that makes `w` a `T`), so the solver need not find the instance itself. Any `_exists` whose body has a conjunct `i == w` (`w` not mentioning `i`) is emitted the same way; the two forms are the same proposition, so this changes no contract's meaning, only how easily it is proved. It is the way to discharge a callee's existential precondition whose witness the solver cannot guess: assert it, in the caller's terms, just before the call, quantifying over whatever the witness depends on (`_assert(_forall(size_t t, t < _old(h)._length && _old(h)[t] == 0 ==> _exists(size_t i = t - (h - _old(h)), ...)))`; `test/exists_witness`, `test/exists_witness_bad`). `_forall` takes no witness.
+- `x._length` — length of an `_array`'s sequence (`Seq.length val_x`). It is a `_specint`, so arithmetic on it is mathematical: `j < s._length - m` states `m + j < s._length` without `size_t` wraparound (`test/spec_length_sub`).
 - `_live(x)` — the storage of `x` exists. For a local in a loop invariant, or a parameter, the generated frame already says so, and `_live` translates to `True`; for a mutable global it is the global's points-to (see below).
 - `_specint` — arbitrary-precision integer (ghost arithmetic); `(_specint) e` turns a machine integer into a mathematical one, so overflow bounds can be stated.
+- A cast to a C integer type in a contract is C's conversion: `(size_t)-1` is `SIZE_MAX`, `(size_t)n` of an `ssize_t` is `n` reduced modulo `2^64` and `(uint8_t)(x + 1)` is reduced modulo 256 (`spec_to_unsigned`/`spec_to_signed` in `Pulse.Lib.C.Palow.Scalar`); a value already in range is unchanged. A subscript `a[k]` with a `_specint` `k` is the position `k` itself, which must be within the array (`test/spec_cast_wrap`).
+- Contract arithmetic applies C's integer promotions and usual arithmetic conversions: with `unsigned char a, b`, `a - b` is the `int` difference (possibly negative), not a byte subtraction modulo 256, and `-a` is the negated `int` (`test/spec_int_promotion`).
+- Unsigned arithmetic in a contract (`m + k` on `size_t`) is the mathematical result reduced modulo the type's range, written over the operands' numbers (`spec_to_unsigned`), not a new machine integer; where the operator is partial (a checked `size_t` `+`), its definedness condition joins the clause's guards and the sum is the plain number: `d[m + k]` under `_forall(size_t k, ...)` gives the solver no `size_t` term built from `k` to instantiate the quantifier on again (`test/spec_unsigned_index`).
+- Bitwise operators `&`, `|`, `^`, `~`, `<<` and `>>` on unsigned operands in a contract are `FStar.UInt.logand`/`logor`/`logxor`/`shift_left`/`shift_right` at the operand's width (64 for `size_t`), and `~x` is `2^w - 1 - x`, all over the operands' numbers: `((set[b / 64] >> (b % 64)) & 1) != 0` reads a bit of a word. A shift amount must be below the width, which joins the clause's guards like an array index; a `_specint` on the left of a shift is rejected (`test/spec_bitwise`).
 - `_slprop` — type cast that declares a separation-logic predicate (in `_refine`, or on an `_inline_pulse` clause).
 - `$(...)` — antiquotation: splice a C-level entity into an `_inline_pulse` body (see the Antiquotation section under Pulse interop).
 
 Pure builtins with a Pulse model may be used in specifications too, e.g. `__builtin_bswap64(x)` is `Pulse.Lib.C.UInt64.bswap64 x`.
+
+In function bodies, an integer constant expression built from literals and operators (`(size_t)-1/UCHAR_MAX`, `ONES * (UCHAR_MAX/2+1)`) is emitted as a single literal of its type, so it carries no overflow or division obligations. Expressions mentioning `sizeof`/`_Alignof`, enumerators, or whose evaluation is undefined (`INT_MAX + 1`) are translated operator by operator as before (`test/int_const_fold`).
 
 In function bodies, `__builtin_mul_overflow(a, b, result)` supports unsigned
 operands of at most 64 bits and a nonvolatile unsigned 32-bit destination.
@@ -180,15 +193,88 @@ while (((uint32_t_read loc_ctr) `UInt32.lt` var_x))
   invariant exists* (inv_acc: UInt32.t) (inv_ctr: UInt32.t).
     uint32_t_pts_to loc_acc 1.0R inv_acc **
     uint32_t_pts_to loc_ctr 1.0R inv_ctr **
-    pure ((UInt32.v inv_ctr <= UInt32.v var_x) /\ (UInt32.v inv_acc == UInt32.v (inv_ctr `mul_wrap` var_y)))
+    pure ((UInt32.v inv_ctr <= UInt32.v var_x) /\ (UInt32.v inv_acc == spec_to_unsigned 4294967296 (UInt32.v inv_ctr * UInt32.v var_y)))
 { ... }
 ```
+
+With `--split-invariants`, where an iteration reaches the closing brace, the body first asserts each conjunct of the invariant on its own (every `_invariant` clause, split at top-level `&&`, in order): `assert (pure (UInt32.v (uint32_t_read loc_ctr) <= UInt32.v var_x)); assert (pure (...acc...))`. Each is then its own SMT query with the conjuncts before it in hand, so a long invariant does not become one large query and a failure names the conjunct that is not preserved (`test/invariant_clauses`, `test/invariant_clauses_bad`). Clauses are read at the loop head's scope; ownership clauses (`_live`) are skipped, and a conjunct that cannot be written as an `_assert` stops the list there. The invariant is still checked whole afterwards, as it is on a `continue` and in a loop with `_requires`/`_ensures`. The flag is off by default: an extra query is not always cheaper than Pulse's own check of the whole invariant (a quantified clause can time out on its own where the whole check passes), so it is a tool for localising a failure and for invariants too large for one query.
 
 Inside `_invariant`:
 
 - Parameters and locals are in scope by name; there is no `this`. `_old(x)` is the value at function entry.
 - `_live(x)` is accepted but unnecessary (the frame is generated).
+- A local array (`size_t bs[4] = { 0 };`, or one cleared by `memset(bs, 0, sizeof bs)`) is named by its current contents, as an `_array` parameter is: `bs[i]` reads element `i`, with `i < 4` a well-formedness guard. The same holds in an `_assert`, an `if`'s `_ensures` and a label's `_ensures`. For an array declared without an initializer, reading `bs[i]` also claims that element has been written (`test/local_array_spec`, `test/local_array_spec_bad`).
 - Ownership PAL does not generate — a helper predicate, part of an array named through an `_arrayptr` — goes in an slprop clause: `_invariant(_inline_pulse(Helpers.claim $(lo) $`arr))`. `` $`name `` there is quantified by the invariant (see `test/arrayptrs`).
+
+#### Pointers walked through an array
+
+A loop may move a pointer through an `_array` parameter instead of indexing it, as musl's string functions do:
+
+```c
+size_t wcslen(_array const wchar_t *s)
+  _requires(_exists(size_t i, i < s._length && s[i] == 0))
+  _requires(s._length <= 1000000)            // `s - a` must fit in ptrdiff_t
+  _ensures(return < s._length && s[return] == 0)
+  _ensures(_forall(size_t k, k < return ==> s[k] != 0))
+{
+  const wchar_t *a;
+  for (a=s; *s; s++)
+    _invariant(s - a < _old(s)._length)
+    _invariant(_forall(_specint k, 0 <= k && k < s - a ==> a[k] != 0));
+  return s-a;
+}
+```
+
+A reassigned array parameter, or a local pointer, is *walked* when every value it is given comes from one `_array` parameter: a copy of it or of another walked pointer, `p ± n`, `p++`/`p--`/`++p`/`--p`, `p += n`, `c ? p : q`. `*p`, `p[i]`, `*p++` and `*(p + i)` on it read and write the owning array at wherever `p` points now. PAL adds to every loop invariant that each walked pointer is inside that array's allocation at an element boundary (`walk_ok`); that it is *in bounds* is for the `_invariant` to say. A pointer given values from two arrays, or from an array and anything else, is refused at the access. Stepping a walked pointer forward (`p++`, `p += n`, `p + n`) needs only that the new position is at most the array's length; PAL proves it stays a `walk_ok` pointer one step further from the array's ownership (`array_walk_next`), without nonlinear arithmetic.
+
+In a loop `_invariant` or an `_assert` -- not a function's `_requires`/`_ensures`, where there are no walked pointers and `p - q` is refused -- for pointers walked through the same array:
+
+- `p - q` is the number of elements between them, a mathematical integer; `p < q` and `p <= q` compare positions. Either may be the array parameter itself (`p - s`, `s <= p`). `_old(s)` is the parameter's entry value, the array's base. The same holds in `_assert`. A pointer of another element type walked over the array (`word *wd = (void *)d;` over bytes) steps by its own type -- `wd + 1` is 8 bytes on -- but `wd - w0` is refused, since its position counts the array's elements: write `(unsigned char *)wd - d` (`test/ptr_word_step`, `test/ptr_word_diff_diag`).
+- Anything combined with a position is mathematical too: `(l - _old(l)) + n == _old(n)`, `l - _old(l) == _old(n) - n` and `_forall(size_t k, k < s - a ==> ...)` compare numbers, not `ptrdiff_t` values, and a `_exists(size_t i, ...)` whose witness is where a pointer stopped needs no hint. A conversion that keeps every distance (to `ptrdiff_t`, `int64_t` or `_specint`) is read through; one that can change it is the converted value, as in C: `(uint8_t)(p - a)` is the count modulo 256, not the count. The `size_t` arithmetic itself still wraps: `_old(n) - n` is the wrapped difference, so an invariant using it also states `n <= _old(n)`.
+- A `_specint` subscript need not be bounded below by a literal `0`: `_forall(_specint k, d - a <= k && k < a._length ==> a[k] == _old(d[k]))` reads `a[k]` only where `0 <= k` too, as PAL makes the subscript's well-formedness (`0 <= k`, `k < length`) part of the read.
+- `p[k]`, `*p` and `p._length` are relative to where `p` points: `p._length` is the number of elements left. `_old(p)[k]` is the array at entry. A `_specint` subscript may reach behind `p`, so a walked parameter with no local keeping its base names the array's *current* element `k` counted from the entry position as `d[k - (d - _old(d))]` (musl's `__stpcpy`, `test/array_walk_relative`).
+- A walked pointer the loop does not move (`a` above) keeps its value; a `const` array's contents are its entry contents.
+- A local that copies an array parameter before the parameter moves and is never reassigned (`wchar_t *a = d;`) is the array's base for the whole body, and `a[k]` is the same term as the contract's `d[k]`: a quantified `_assert` or `_invariant` through `a` matches an `_ensures` that says it about `d` (`test/array_walk_base`).
+
+`*(unsigned char *)p` on an array of `char` is the element converted to `unsigned char`, and so is `*l` where `const unsigned char *l = (void *)_l` walks a `char` array (musl's `strncmp`); a write through such a pointer stores the byte with the written value's representation. In a contract `l - _l` between the two signednesses is a position difference too. A subscript is a `size_t`, so read behind a walked pointer with `*(p - 1)`, not `p[-1]`. `test/array_pointer_walk` has `wcslen`, `strcmp`, `memchr`, `memcpy` and a backward walk.
+
+In an `_invariant`, `_old(d._length)` and `_old(d)._length` are the length on entry. An array a loop writes keeps its length (a write replaces an element), and PAL says so in the invariant unless the loop calls a function, whose contract would have to.
+
+A function can return a pointer into an array it is passed: `_ensures(return == s + i)` (or `(wchar_t *)(s + i)`) with a `size_t i` is `elem_ptr esize s i`, the pointer `i` elements past `s`. A caller then treats the result as a pointer walked through the array it lent: when exactly one pointer parameter appears as `return == p` or `return == p + e` in the callee's `_ensures`, `z = f(s, ...)` makes `z` a walked pointer of `s`, so `z - s` is a position and `*z` reads `s` there (behind an `if (z)` when the result may be null). `test/array_walk_followups` has musl's `wmemchr`, `wcsnlen`, `wcschr`-like `s + wcslen(s)`, `wmemset`, `wmemcpy` and `strncmp`.
+
+A `void *` parameter declared `_array` (or `_arrayptr`) is an array of `unsigned char`, the type through which C lets any object be read and written: musl's `void *memset(_array void *dest, int c, size_t n)` walks it through `unsigned char *s = dest;`. A contract reads it as `((unsigned char *)dest)[k]` (C does not subscript a `void *`), and `return == dest` compares the `void *` result with it. A caller passes an `_array` of `unsigned char` (`test/array_void_bytes`), or of `char`/`signed char`, which the callee sees as its bytes: the callee's `((unsigned char *)p)[k]` is the caller's `(unsigned char)s[k]`, a byte the callee writes is the `char` with that representation, and a pointer it returns into the array (`return == (void *)((unsigned char *)p + i)`) is a walked pointer of the caller's `char` array (musl's `strrchr` calling `__memrchr`, `strnlen` calling `memchr`; `test/array_char_as_bytes`). Arrays of wider elements (`int`, `wchar_t`) have no byte view yet and are refused. A local initialised from such a parameter (`const unsigned char *s = m;`) is the array itself, so `s[n]` and `s + n` work as for a typed array (musl's `memrchr`, `test/spec_int_promotion`).
+
+A local that is another name for a byte array at the other signedness -- `const char *src = _src;` with `_array void *_src` (musl's `swab`), or `const unsigned char *l = (const void *)l0;` with `_array const char *l0` (musl's `strverscmp`) -- can be subscripted, walked and written like the array: a read is the element converted to the local's type, and a write stores the byte with the written value's representation (`test/sign_view_alias`). The same holds in an `_invariant` or `_assert`: `l[i]` there is the array's element converted to `unsigned char` (`test/sign_view_spec`).
+
+Inside a loop body, an `if` one of whose branches always leaves (`return`, `break`, `continue`, `goto`) is followed by the rest of the block only on its other branch, so the code after it knows the condition: `if (!*s || *s == c) return s; ...` (musl's `strchrnul`) continues with `*s != 0 && *s != c` (`test/if_exit_rest`).
+
+A loop's condition runs before each iteration, so a pointer it advances (`while ((*d++ = *s++))`, musl's `wcscpy`) is written by the loop like one its body advances, and the `_invariant` is what holds before each test of the condition. `test/array_walk_cond` has `wcscpy`.
+
+An argument to an `_array` parameter may point into the middle of an array the caller owns: a walked pointer (`wmemset(d, 0, n)` after `d` was walked) or `base + i` of an `_array` parameter (`wcscpy(dest + wcslen(dest), src)`, `wcslen(s + i)`). The caller lends the callee the suffix from that position, whose `_length` is the array's length minus the position, so the callee's `p[k]` is the caller's `a[pos + k]` and `p._length` is `a._length - pos`; the position must be at most the length, which the contract or `_invariant` must give. After the call the caller has the elements before the position unchanged and the callee's post-state of the suffix behind them. The argument must have the array's element type, and two arguments cannot be lent from one array in a single call. `test/array_walk_lend` has musl's `wcsncpy` and `wcscat`.
+
+#### Word-at-a-time access through a byte array
+
+A pointer walked through an `_array` of `char`, `signed char` or `unsigned char` may be cast to a pointer to `uint16_t`, `uint32_t`, `uint64_t` or `size_t` (directly or through `void *`: `w = (const void *)s`, `s = (const void *)w`, `*(uint32_t *)(s + 4)`). The result is still walked through the same array, and its position is still counted in *bytes*: `w++` moves 8 elements for a `uint64_t *`, and `(const unsigned char *)w - s` is its position. `*w = v` and reads of `*w` access the `W` elements at that position as one integer, in the target's byte order (little-endian): byte `j` of the value is element `pos + j`, stated as `word_byte W x j == x / pow2 (8*j) % 256` (`Pulse.Lib.C.Palow.Word`). This is proved from the byte model, not assumed. The access needs `pos + W <= length` and the word's alignment, which the contract or `_invariant` must give: `(uintptr_t)p` in a contract is the pointer's address as an integer, so `(uintptr_t)w % 8 == 0` states it, and a loop test `(uintptr_t)s % 8` establishes it. A word is accessed only as `*w`, not `w[i]`; the pointer must be a walked one (an array parameter the body never reassigns, used directly under a cast, is not).
+
+```c
+typedef uint64_t __attribute__((__may_alias__)) word;
+void copy_words(_array unsigned char *d, _array const unsigned char *s, size_t n)
+  _requires(n <= d._length && n <= s._length && n % 8 == 0)
+  _requires((uintptr_t)d % 8 == 0 && (uintptr_t)s % 8 == 0)
+  _ensures(_forall(size_t k, k < n ==> d[k] == s[k]))
+{
+  word *wd = (void *)d;
+  const word *ws = (const void *)s;
+  for (; n; n -= 8, wd++, ws++)
+    _invariant((unsigned char *)wd - d + n == _old(n) && n % 8 == 0 && _old(n) <= d._length)
+    _invariant((const unsigned char *)ws - s == (unsigned char *)wd - d)
+    _invariant((uintptr_t)wd % 8 == 0 && (uintptr_t)ws % 8 == 0)
+    _invariant(_forall(size_t k, k < (unsigned char *)wd - d ==> d[k] == s[k]))
+    *wd = *ws;
+}
+```
+
+**Trusted over-read.** musl's `strlen` reads aligned words until one holds the terminator, and that word may extend past the end of the string. ISO C leaves this undefined; it is safe on real hardware only because an aligned word never crosses a page. A word pointer declared `_pal_overread` (`_pal_overread const word *w;`, on a local or a parameter) accepts that argument as an axiom for the reads through it: a word *read* through `w` -- or through `w + i`, `w++` and the like -- needs only its first byte inside the array (`pos < length`) and alignment, and what is known of the value is the bytes that are inside the array (`word_bytes_upto`); nothing is said about the others. Writes are unaffected, and so is every other pointer in the function. The axiom is `Pulse.Lib.C.Palow.Overread.fsti`, an interface with no implementation; through an unmarked pointer the same read must lie inside the array and fails to verify (`test/array_word_overread_bad`). `test/array_word_access` has a `memchr`-like search with an alignment prologue and a word loop, a word copy, `uint32_t` stores, and a `strlen` whose word pointer is `_pal_overread`.
 
 `_ensures(p)` may also be attached to a loop. It states what holds when the loop exits. Without a `break` the loop exits only when the condition is false, and the clause is asserted after the loop. With a `break`, Pulse no longer knows the condition is false on exit, so:
 
@@ -211,7 +297,29 @@ For `do { ... } while (cond)`, PAL desugars to `while (first || cond)` with a fr
 
 ### `if` statements
 
-Pulse computes the state after an `if` itself, so an `if` needs no annotation. An `_ensures` on an `if` is emitted only when it states ownership (an `_slprop` clause): it is then the join, and PAL frames in the points-to of every live slot the clause does not name with `$&(x)`. A pure `_ensures` on an `if` is not emitted; use `_assert` after it instead.
+Pulse computes the state after an `if` itself, so an `if` usually needs no annotation. An `_ensures` on an `if` that states ownership (an `_slprop` clause) is the join, and PAL frames in the points-to of every live slot the clause does not name with `$&(x)`.
+
+A pure `_ensures` (anything but `_live`) on an `if` is also emitted as its join. Pulse's own join forgets every fact about a value an arm computed -- a loop inside an arm leaves nothing behind about the locals it moved -- so the clause is what is known after the `if` about the locals the arms write; a local neither arm writes keeps its value and what is known about it, and a walked pointer keeps its `walk_ok`. In it a local is its value after the `if`, and `_old(x)` is a parameter's entry value:
+
+```c
+if (n && *p != c)
+  _ensures(p - s + n == _old(n) && _forall(size_t k, k < p - s ==> s[k] != c))
+{
+  const word *w;
+  for (w = (const void *)p; n >= 8 && !has_byte(*w, c); w++, n -= 8) ...;
+  p = (const void *)w;
+}
+```
+
+The contents of a mutable array the arms may write are bound afresh, so restate what is needed about them.
+
+Annotated `if`s nest: one may end an arm of another, or a loop body, and an explicit `_ensures` on an `if` directly before a loop is used as written rather than replaced by the loop's invariant (`test/if_ensures_tail`).
+
+PAL supplies two joins of its own. An `if` without `_ensures` whose arms write locals and that is directly followed by a loop with pure `_invariant`s gets those invariants as its join, since they are what the loop needs on entry (`test/if_loop_join`). An `if` without `_ensures` with a loop in an arm, followed by nothing but straight-line code ending in `return` (musl's `wmemmove`), has that tail copied into both arms, so there is no join at all (`test/if_loops_tail`).
+
+### Labels
+
+A label may carry `_ensures` clauses, which hold whenever control reaches it, by a `goto` or by falling through: `finish: _ensures(...)`. PAL checks them at every path into the label, so they accept the same language as `_assert`: array contents of parameters and of locals that alias them, `_length`, quantifiers over memory, `_old(p)[k]` and `_old(p[k])` (`test/label_array_ensures`, after musl's `strlcpy`).
 
 ### Refinements for data types
 
@@ -329,6 +437,10 @@ Notes:
 - `_memset_zero` — the function is a `memset(p, 0, n)` wrapper, and calls to it are translated as such (`test/memset`).
 - `_pulse_opaque_to_smt` — on a pure global, emit its value `opaque_to_smt`, so that a large initializer is not unfolded by the SMT solver (`test/global_array_tactic`).
 
+## Function aliases
+
+`extern __typeof(old) new __attribute__((__alias__("old")));` (musl's `weak_alias(old, new)`, optionally `__weak__`) makes `new` a second name for the function `old` declared in the same file. Calls to either name are translated. `new` gets `old`'s contract; when only `new` has one (a prepended specification header names the public `stpcpy`, not `__stpcpy`), `old` is verified against it, adopting its parameter annotations such as `_array`. When both have one, they must be the same contract (`test/weak_alias`, `test/weak_alias_bad`). Other linker aliases (`asm` labels, `ifunc`, `weakref`) are refused.
+
 ## Ignoring declarations and admitting functions
 
 `_pal_admit` keeps a function's signature and contract but skips translating and
@@ -344,7 +456,13 @@ int platform_identity(int x) _ensures(return == x) {
 }
 ```
 
-Contracts on an earlier prototype are retained. `_pal_admit` applies only to
+An `asm` statement with an empty template, no output operands and no `goto` labels, such as the compiler barrier `__asm__ __volatile__ ("" : : "r"(d) : "memory")` in musl's `explicit_bzero`, executes nothing; PAL translates it as its input expressions, for their side effects. Any other `asm` statement is unsupported (`test/asm_barrier`).
+
+Contracts on an earlier prototype are retained, including across later
+unannotated redeclarations (such as a system header included after a header
+of contracts). A redeclaration that states a contract must state all of it:
+one that restates only some clauses (`_requires` but not `_ensures`, say) is
+reported as having differing specifications. `_pal_admit` applies only to
 functions; `_pal_ignore` takes precedence if both markers are present.
 
 `_pal_ignore` omits declarations entirely: functions, typedefs, structs/unions,

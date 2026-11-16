@@ -420,3 +420,27 @@ union event copy_configured_alarm(void)
 {
   return configured_alarm;
 }
+
+/* A struct whose union holds its second arm, returned by value: the whole
+   read of `result` forwards the value just stored, since a reader would
+   commit to the first arm. */
+struct envelope make_stats_envelope(uint16_t samples)
+  _ensures(return.sequence == 3)
+  _ensures(return.record.st._active)
+  _ensures(return.record.st.samples == samples)
+{
+  struct envelope result = {
+    .sequence = 3,
+    .record = { .st = { .samples = samples, .dropped = 0 } }
+  };
+  return result;
+}
+
+struct envelope copy_stats_envelope(struct envelope input)
+  _requires(input.record.st._active)
+  _ensures(return.record.st._active)
+  _ensures(return.record.st.samples == input.record.st.samples)
+{
+  struct envelope copy = input;
+  return copy;
+}

@@ -490,6 +490,7 @@ fn rewrite_type(ty: &mut Rc<Type>, elim: &HashSet<Rc<IdentT>>) {
         TypeT::Pointer(inner, _)
         | TypeT::FixedArray(inner, _)
         | TypeT::Nullable(inner)
+        | TypeT::Overread(inner)
         | TypeT::Plain(inner)
         | TypeT::Refine(inner, _)
         | TypeT::RefineAlways(inner, _)

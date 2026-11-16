@@ -315,7 +315,14 @@ When a function won't verify, **localize before you theorize**:
    `pts_to`, an existential keyed on the wrong name, or a quantified
    invariant with a bad trigger. Only after ruling those out, raise the budget —
    prefer a *target-specific* `--z3rlimit_factor` over a global bump, and
-   keep it as low as still passes.
+   keep it as low as still passes. Note that `--z3rlimit` does not bound
+   wall time: a matching loop can run for hours while using only a few rlimit
+   units. Pass `Z3_TIMEOUT_MS=<ms>` to `make` (handled by `test/verify.mk`,
+   which adds `--z3cliopt timeout=<ms>`) to cancel any single Z3 query after
+   that long; F* then reports an ordinary Error 19 ("The SMT query timed
+   out") and continues with the rest of the module. The bound is per
+   check-sat (fuel retries multiply it) and depends on machine load, so use
+   it as a safety net, not as a proof budget.
 6. **Flaky (passes sometimes)?** The proof is unstable — usually an
    under-constrained quantifier or a fragile trigger. Measure with `--quake 5`
    (or `--retry`), then stabilize: name intermediate facts with `assert pure
@@ -372,6 +379,34 @@ Key facts:
   helper predicate over an `_arrayptr` range, or your own struct invariant.
   Use `` $`name `` for an existential the invariant should quantify
   (`test/arrayptrs`).
+- **Walking a pointer through an array** (`for (; *s; s++)`,
+  `*d++ = *s++`) works on `_array` parameters and locals copied from them:
+  PAL keeps the ownership at the array's base and adds to the invariant that
+  the pointer is inside it. You state the bounds, e.g.
+  `_invariant(s - _old(s) < _old(s)._length)`; in a contract `p - q` is an
+  element count, and `p[k]` / `p._length` are relative to where `p` points
+  (`test/array_pointer_walk`, and *Loop invariants* in
+  `doc/pal_surface_syntax.md`). A callee whose `_ensures` says
+  `return == s + i` returns a walked pointer of the caller's `s`
+  (`test/array_walk_followups`); a `const unsigned char *` walking a `char`
+  array reads elements converted.
+  A walked pointer or `base + i` passed to an `_array` parameter lends the
+  suffix from there (`wcscpy(dest + wcslen(dest), src)`; `test/array_walk_lend`);
+  a pointer advanced in a loop condition (`while ((*d++ = *s++))`) is written
+  by the loop. `_assert` may quantify over arrays (`c[m]`, `c._length`) and
+  read `*s` of a walked pointer, e.g. after a loop to help the postcondition.
+- **`weak_alias(old, new)`** (`__attribute__((__alias__("old")))`) gives `new`
+  `old`'s contract, or verifies `old` against `new`'s when only `new` has one.
+- **Word-at-a-time access** (`w = (const void *)s; *w`, `*(uint32_t *)(s + 4) = v`)
+  through a walked pointer into a byte array reads/writes `W` elements as one
+  little-endian integer (`word_byte W x j == x / pow2 (8*j) % 256`). State
+  `pos + W <= length` and alignment (`(uintptr_t)w % 8 == 0`). A `strlen`-style
+  aligned read past the end needs the word pointer declared with the trusted
+  `_pal_overread` (`_pal_overread const word *w;`, `test/array_word_access`).
+- **`void *` byte buffers** (`memset`, `memcpy`): `_array void *dest` is an
+  array of `unsigned char`; read it in contracts as `((unsigned char *)dest)[k]`
+  (`test/array_void_bytes`).
+- **Casts in contracts wrap** like C: `(size_t)-1` is `SIZE_MAX`, not `-1`.
 - **`_ensures` on a loop is a pure prop** about the exit. A loop without a
   `break` exits only when `cond` is false; Pulse knows `¬cond` there, and PAL
   asserts the `_ensures` right after the loop.
@@ -414,8 +449,12 @@ keyed on the address, so the two arms' slprops are matched by location and a
 value that differs is joined into a `match` on the condition. You normally
 annotate nothing. Consequently:
 
-- **A pure `_ensures` on an `if` is not emitted** — it would only be a check.
-  Put the fact in an `_assert` after the `if`, or in a helper's precondition.
+- **A pure `_ensures` on an `if` is its join.** Pulse's own join forgets the
+  facts about values an arm computed (a loop inside an arm loses what its
+  invariant said about the locals it moved), so state them on the `if`:
+  `if (c) _ensures(p - s + n == _old(n)) { ... }`. Locals neither arm writes
+  keep their values and facts; contents of arrays the arms may write are
+  bound afresh.
 - **An ownership `_ensures` on an `if` is emitted, and it is the join.** Use
   one when the arms establish ownership in different words that only you can
   reconcile — the typical case is a function-pointer local assigned a different

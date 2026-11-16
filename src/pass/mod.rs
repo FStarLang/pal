@@ -1,5 +1,6 @@
 pub mod builtins;
 pub mod check;
+pub mod collapse_unions;
 pub mod decay;
 pub mod elab;
 pub mod elim_cis;

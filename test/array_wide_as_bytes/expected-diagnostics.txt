@@ -1,0 +1,2 @@
+# Expected translation diagnostic substrings
+an array of int32_t passed for an array of uint8_t

@@ -278,7 +278,7 @@ impl<'a> Elaborator<'a> {
                 self.suppress_next_view = true;
                 self.elab_type(env, Rc::make_mut(ty));
             }
-            TypeT::Nullable(ty) => self.elab_type(env, Rc::make_mut(ty)),
+            TypeT::Nullable(ty) | TypeT::Overread(ty) => self.elab_type(env, Rc::make_mut(ty)),
         }
     }
 
@@ -436,6 +436,19 @@ impl<'a> Elaborator<'a> {
             }
             ExprT::Index(arr, idx) => {
                 self.elab_rvalue(env, Rc::make_mut(arr), None);
+                // `((unsigned char *)dest)[k]` of an array `dest` of
+                // `unsigned char` -- how a contract reads a `void *` byte
+                // array, which C will not subscript -- is `dest[k]`: the cast
+                // changes nothing but the pointer's kind.
+                if let ExprT::Cast(inner, to) = &arr.val
+                    && let TypeT::Pointer(elem, _) = &env.vtype_whnf(to.clone().into()).val
+                    && let Ok(it) = env.infer_expr(inner)
+                    && let TypeT::Pointer(ielem, PointerKind::Array | PointerKind::ArrayPtr) =
+                        &env.vtype_whnf(it).val
+                    && env.vtype_eq(elem.clone().into(), ielem.clone().into())
+                {
+                    *arr = inner.clone();
+                }
                 self.elab_rvalue(env, Rc::make_mut(idx), None);
                 // Cast index to SizeT for Pulse array operations
                 if let Ok(idx_ty) = env.infer_expr(idx) {
@@ -621,7 +634,17 @@ impl<'a> Elaborator<'a> {
                 self.elab_rvalue(env, Rc::make_mut(arg), None);
                 match un_op {
                     UnOp::Not => self.cast_to_bool(env, arg),
-                    UnOp::Neg | UnOp::BitNot => {}
+                    // C's integer promotion: an operand narrower than `int`
+                    // is converted to `int` first. Code arrives with clang's
+                    // conversions already in it; a contract does not.
+                    UnOp::Neg | UnOp::BitNot => {
+                        if let Some(t) = self.infer_expr(env, arg)
+                            && let TypeT::Int { width, .. } = env.vtype_whnf(t).val
+                            && width < 32
+                        {
+                            cast_to(arg, int32_type(&arg.loc));
+                        }
+                    }
                 }
             }
             ExprT::BinOp(bin_op, lhs, rhs) => {
@@ -780,6 +803,56 @@ impl<'a> Elaborator<'a> {
                             }
                             return;
                         }
+                        // An array parameter compared with, or subtracted
+                        // from, a pointer into it (a contract about a walked
+                        // pointer): the two differ only in the pointer kind,
+                        // and the array side is read as the plain pointer.
+                        if matches!(bin_op, BinOp::Eq | BinOp::LEq | BinOp::Lt | BinOp::Sub) {
+                            if let (TypeT::Pointer(lt, lk), TypeT::Pointer(rt, rk)) =
+                                (&lhs_w.val, &rhs_w.val)
+                            {
+                                // A `void *` result compared with the byte array it
+                                // returns (`memset`'s `return == dest`) is the same case.
+                                let void = |t: &Rc<Type>| {
+                                    matches!(env.vtype_whnf(t.clone().into()).val, TypeT::Void)
+                                };
+                                if lk != rk
+                                    && (env.vtype_eq(lt.clone().into(), rt.clone().into())
+                                        || void(lt)
+                                        || void(rt))
+                                {
+                                    if matches!(lk, PointerKind::Array) {
+                                        cast_to(lhs, rhs_w.to_rc());
+                                        return;
+                                    }
+                                    if matches!(rk, PointerKind::Array) {
+                                        cast_to(rhs, lhs_w.to_rc());
+                                        return;
+                                    }
+                                }
+                                // `l - _l` where `l = (const unsigned char *)_l`
+                                // walks a `char` array: elements of one width
+                                // and either signedness are positions in the
+                                // same array, so the other side is read at
+                                // this one's pointee.
+                                let (lw, rw) = (
+                                    env.vtype_whnf(lt.clone().into()),
+                                    env.vtype_whnf(rt.clone().into()),
+                                );
+                                if let (TypeT::Int { width: a, .. }, TypeT::Int { width: b, .. }) =
+                                    (&lw.val, &rw.val)
+                                    && a == b
+                                    && !env.vtype_eq(lw.clone(), rw.clone())
+                                {
+                                    if matches!(lk, PointerKind::Array) {
+                                        cast_to(lhs, rhs_w.to_rc());
+                                    } else {
+                                        cast_to(rhs, lhs_w.to_rc());
+                                    }
+                                    return;
+                                }
+                            }
+                        }
                         if let Some(mut meet_type) = env.meet_type(lhs_ty.clone(), rhs_ty.clone()) {
                             // C integer promotion: Bool → int for arithmetic/bitwise ops
                             if env.is_bool(meet_type.clone())
@@ -801,6 +874,30 @@ impl<'a> Elaborator<'a> {
                                 }
                                 .with_loc(lhs.loc.clone())
                                 .into();
+                            }
+                            // The integer promotions: operands narrower
+                            // than `int` are computed with as `int`. A
+                            // comparison of two values of one narrow type
+                            // means the same either way, so only a mixed
+                            // one (`(uint8_t)x == (int8_t)y`) is promoted.
+                            if let TypeT::Int { width, .. } = env.vtype_whnf(meet_type.clone()).val
+                                && width < 32
+                                && (!matches!(bin_op, BinOp::Eq | BinOp::LEq | BinOp::Lt)
+                                    || !env.vtype_eq(lhs_ty.clone(), rhs_ty.clone()))
+                            {
+                                meet_type = int32_type(&lhs.loc).into();
+                            }
+                            // The integer promotions: operands narrower
+                            // than `int` are computed with as `int`. A
+                            // comparison of two values of one narrow type
+                            // means the same either way, so only a mixed
+                            // one (`(uint8_t)x == (int8_t)y`) is promoted.
+                            if let TypeT::Int { width, .. } = env.vtype_whnf(meet_type.clone()).val
+                                && width < 32
+                                && (!matches!(bin_op, BinOp::Eq | BinOp::LEq | BinOp::Lt)
+                                    || !env.vtype_eq(lhs_ty.clone(), rhs_ty.clone()))
+                            {
+                                meet_type = int32_type(&lhs.loc).into();
                             }
                             if !env.vtype_eq(lhs_ty, meet_type.clone()) {
                                 cast_to(lhs, meet_type.clone().to_rc())
@@ -1089,6 +1186,43 @@ impl<'a> Elaborator<'a> {
             if assign_name.val != *var_name {
                 continue;
             }
+            // `const unsigned char *s = m;` with `m` an `_array void *`: the
+            // conversion to the array's own element type is a pointer into
+            // the same array, so it keeps the array's kind, as a copy of a
+            // typed array parameter does.
+            // The same holds at the other signedness of the element type
+            // (`const char *src = _src;`, `(const unsigned char *)(void *)l0`):
+            // C lets an object be accessed through that type (C11 6.5p7),
+            // and the access is the stored bits read at the new type.
+            if let ExprT::Cast(inner, to) = &v.val
+                && let TypeT::Pointer(pt, PointerKind::Unknown | PointerKind::Ref) = &to.val
+                && let inner = strip_ptr_casts(inner)
+                && let Ok(i_ty) = env.infer_expr(inner)
+                && let TypeT::Pointer(ipt, ik @ (PointerKind::Array | PointerKind::ArrayPtr)) =
+                    &env.vtype_whnf(i_ty).val
+                && (env.vtype_eq(pt.clone().into(), ipt.clone().into())
+                    || matches!(
+                        (&env.vtype_whnf(pt.clone().into()).val, &env.vtype_whnf(ipt.clone().into()).val),
+                        (TypeT::Int { width: a, signed: x }, TypeT::Int { width: b, signed: y })
+                            if a == b && x != y
+                    ))
+            {
+                let ik = ik.clone();
+                let s = Rc::make_mut(&mut stmts[j]);
+                if let StmtT::Assign(_, v) = &mut s.val
+                    && let ExprT::Cast(_, to) = &mut Rc::make_mut(v).val
+                    && let TypeT::Pointer(_, kind) = &mut Rc::make_mut(to).val
+                {
+                    *kind = ik.clone();
+                }
+                if let StmtT::Decl(_, decl_ty) = &mut Rc::make_mut(&mut stmts[decl_idx]).val
+                    && let TypeT::Pointer(_, kind) = &mut Rc::make_mut(decl_ty).val
+                    && matches!(kind, PointerKind::Unknown | PointerKind::Ref)
+                {
+                    *kind = ik;
+                }
+                break;
+            }
             let Ok(v_ty) = env.infer_expr(v) else {
                 break;
             };
@@ -1253,6 +1387,7 @@ impl<'a> Elaborator<'a> {
             is_pure: _,
             is_rec: _,
             is_total: _,
+            adopts_signature: _,
             decreases,
         }: &mut FnDecl,
     ) {
@@ -1377,7 +1512,8 @@ fn view_pointee(body: &Type) -> Option<&TypeRefKind> {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, _, _, _)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => view_pointee(t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => view_pointee(t),
         TypeT::Pointer(to, _) => match &to.val {
             TypeT::TypeRef(k) => Some(k),
             _ => None,
@@ -1527,5 +1663,23 @@ pub fn elab(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         }
         elab.elab_decl(&env, decl);
         env.push_decl(decl);
+    }
+}
+
+fn int32_type(loc: &Rc<SourceInfo>) -> Rc<Type> {
+    TypeT::Int {
+        signed: true,
+        width: 32,
+    }
+    .with_loc(loc.clone())
+    .into()
+}
+
+/// A pointer expression with its pointer-to-pointer conversions removed:
+/// `(const void *)l0` is `l0` as far as which object it points into goes.
+fn strip_ptr_casts(e: &Expr) -> &Expr {
+    match &e.val {
+        ExprT::Cast(inner, to) if matches!(to.val, TypeT::Pointer(..)) => strip_ptr_casts(inner),
+        _ => e,
     }
 }

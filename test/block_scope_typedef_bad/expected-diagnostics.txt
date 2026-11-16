@@ -1,0 +1,4 @@
+# Expected translation diagnostic substrings
+block-scope typedef 'aint' carries an alignment attribute; declare it at file scope
+block-scope typedef 'pos' carries a PAL annotation; declare it at file scope
+block-scope typedef 'row' has a variably modified type; declare it at file scope

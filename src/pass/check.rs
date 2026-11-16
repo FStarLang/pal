@@ -155,7 +155,7 @@ impl<'a> Checker<'a> {
                 self.check_slprop(env, p);
             }
             TypeT::Plain(ty) => self.check_type(env, ty),
-            TypeT::Nullable(ty) => self.check_type(env, ty),
+            TypeT::Nullable(ty) | TypeT::Overread(ty) => self.check_type(env, ty),
             TypeT::Unknown => {}
             TypeT::Error => {}
         }
@@ -181,7 +181,8 @@ impl<'a> Checker<'a> {
             | TypeT::RefineUninit(..)
             | TypeT::RefineValue(..)
             | TypeT::Plain(..)
-            | TypeT::Nullable(..) => false,
+            | TypeT::Nullable(..)
+            | TypeT::Overread(..) => false,
             TypeT::Unknown => true,
             TypeT::Error => true,
         }
@@ -286,6 +287,13 @@ impl<'a> Checker<'a> {
                             TypeT::FixedArray(_, _) => {}
                             TypeT::FlexArray(_) => {}
                             TypeT::Error => {}
+                            TypeT::Pointer(..) => self.report(
+                                format!(
+                                    "cannot subscript {}, a pointer not declared to point into an array (declare the pointer it comes from `_array` or `_arrayptr`)",
+                                    arr_ty
+                                ),
+                                &rval.loc,
+                            ),
                             _ => self.report(format!("not an array type: {}", arr_ty), &rval.loc),
                         }
                     }
@@ -794,6 +802,7 @@ impl<'a> Checker<'a> {
             is_pure: _,
             is_rec: _,
             is_total: _,
+            adopts_signature: _,
             decreases,
         }: &FnDecl,
     ) {

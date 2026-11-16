@@ -1,0 +1,2 @@
+# Expected translation diagnostic substrings
+an array argument walked through `s` at a type other than its element type

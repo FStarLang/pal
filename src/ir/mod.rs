@@ -211,9 +211,29 @@ pub enum TypeT {
     /// `unless_null this (…)` so the resource is `emp` when the pointer is null.
     Nullable(Rc<Type>),
 
+    /// `_pal_overread` on a pointer: a word read through it, or through a
+    /// pointer stepped from it, may reach past the end of the byte array it
+    /// walks, on the trusted assumption in `Pulse.Lib.C.Palow.Overread`.
+    /// Transparent everywhere else.
+    Overread(Rc<Type>),
+
     /// Placeholder for type inference (resolved during elaboration).
     Unknown,
     Error,
+}
+
+/// The element type of an `_array`/`_arrayptr` pointer to `elem`. A `void *`
+/// array (`memset`'s `dest`) is an array of bytes, `unsigned char` being the
+/// type C lets any object's representation be read and written at.
+pub fn array_elem(elem: &Rc<Type>) -> Rc<Type> {
+    match elem.val {
+        TypeT::Void => TypeT::Int {
+            signed: false,
+            width: 8,
+        }
+        .with_loc(elem.loc.clone()),
+        _ => elem.clone(),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -512,6 +532,9 @@ pub struct UnionDefn {
     /// `_overlay`: the members are views of one object rather than
     /// alternatives, and the value is the object's bytes. See palow.md.
     pub overlay: bool,
+    /// The `_owning` members of an `_overlay` union: the views whose pointer
+    /// fields own what they point at. See palow.md.
+    pub owning: Vec<Rc<Ident>>,
 }
 
 impl UnionDefn {
@@ -551,7 +574,8 @@ pub fn peel_type(ty: &Rc<Type>) -> &Rc<Type> {
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, ..)
         | TypeT::Plain(inner)
-        | TypeT::Nullable(inner) => peel_type(inner),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => peel_type(inner),
         _ => ty,
     }
 }
@@ -634,6 +658,11 @@ pub struct FnDecl {
     pub is_pure: bool,
     pub is_rec: bool,
     pub is_total: bool,
+    /// Declared for a function that a linker alias (`weak_alias(old, new)`)
+    /// gave the alias's contract. The definition adopts this declaration's
+    /// parameter types, whose array annotations the contract relies on, as it
+    /// would by inheriting them from an earlier prototype.
+    pub adopts_signature: bool,
     pub decreases: Option<Rc<Expr>>,
 }
 

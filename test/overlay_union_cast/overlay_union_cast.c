@@ -113,3 +113,27 @@ void Late_Set(REQ* r, uint64_t v)
     p = &r->Args;
     Seq_Set(&p->Seq, w);
 }
+
+/* An ordinary union with an overlay member, and a struct holding one: no
+   whole value of either can be stored, so neither has a whole-value writer. */
+typedef union _WRAP { REQ Req; uint64_t Word; } WRAP;
+typedef struct _HOLDER { uint32_t Tag; WRAP Wrap; } HOLDER;
+typedef struct _OUTER { HOLDER Holder; uint32_t Count; } OUTER;
+
+uint32_t Outer_GetCount(const OUTER* o) _ensures(return == o->Count)
+{
+    return o->Count;
+}
+
+void Outer_SetTag(OUTER* o, uint32_t t) _ensures(o->Holder.Tag == t)
+{
+    o->Holder.Tag = t;
+}
+
+/* An array of them has no element writer either. */
+typedef struct _HOLDERS { HOLDER Items[4]; uint32_t Count; } HOLDERS;
+
+uint32_t Holders_GetCount(const HOLDERS* h) _ensures(return == h->Count)
+{
+    return h->Count;
+}

@@ -196,7 +196,8 @@ fn rename_type_in_place(ty: &mut Type, renames: &HashMap<Rc<str>, Rc<Ident>>) {
         | TypeT::FixedArray(inner, _)
         | TypeT::FlexArray(inner)
         | TypeT::Plain(inner)
-        | TypeT::Nullable(inner) => rename_type_in_place(Rc::make_mut(inner), renames),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => rename_type_in_place(Rc::make_mut(inner), renames),
         TypeT::Refine(inner, pred)
         | TypeT::RefineAlways(inner, pred)
         | TypeT::RefineUninit(inner, pred) => {
@@ -388,6 +389,9 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     // definition is checked against a predicate mentioning names it does not
     // bind.
     let mut arg_type_renames: Vec<(usize, HashMap<Rc<str>, Rc<Ident>>)> = Vec::new();
+    // Parameter and return types a definition adopts from the declaration an
+    // alias gave it (`FnDecl::adopts_signature`).
+    let mut signature_copies: Vec<(usize, Vec<Rc<Type>>, Rc<Type>)> = Vec::new();
 
     // Build an Env for type comparison (need typedef resolution)
     let mut env = Env::new();
@@ -405,8 +409,23 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                         _ => unreachable!(),
                     };
 
-                    // Validate types match
-                    if !types_match(&env, fn_decl, &defn.decl) {
+                    let renames = param_renames(fn_decl, &defn.decl);
+
+                    // Validate types match. A declaration made for an alias's
+                    // contract instead lends its (annotated) types to the
+                    // definition: clang already checked that the C types agree.
+                    if fn_decl.adopts_signature {
+                        let args = fn_decl
+                            .args
+                            .iter()
+                            .map(|a| {
+                                let mut ty = (*a.ty).clone();
+                                rename_type_in_place(&mut ty, &renames);
+                                Rc::new(ty)
+                            })
+                            .collect();
+                        signature_copies.push((defn_idx, args, fn_decl.ret_type.clone()));
+                    } else if !types_match(&env, fn_decl, &defn.decl) {
                         report(
                             diags,
                             format!(
@@ -418,7 +437,6 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                         continue;
                     }
 
-                    let renames = param_renames(fn_decl, &defn.decl);
                     if !renames.is_empty() {
                         arg_type_renames.push((defn_idx, renames.clone()));
                     }
@@ -541,6 +559,15 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         }
     }
 
+    for (defn_idx, args, ret_type) in signature_copies {
+        if let DeclT::FnDefn(ref mut defn) = tu.decls[defn_idx].val {
+            for (arg, ty) in defn.decl.args.iter_mut().zip(args) {
+                arg.ty = ty;
+            }
+            defn.decl.ret_type = ret_type;
+        }
+    }
+
     // Copy specs from declarations into definitions before moving/removing them.
     for (defn_idx, requires, ensures, ghost_args) in spec_copies {
         if let DeclT::FnDefn(ref mut defn) = tu.decls[defn_idx].val {
@@ -604,7 +631,8 @@ fn is_plain_ptr(ty: &Type) -> bool {
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, _, _, _)
-        | TypeT::Nullable(inner) => is_plain_ptr(inner),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => is_plain_ptr(inner),
         _ => false,
     }
 }
@@ -621,7 +649,8 @@ fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, _, _, _)
-        | TypeT::Nullable(inner) => collect_type_refs(inner, out),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => collect_type_refs(inner, out),
         TypeT::TypeRef(k) => {
             let key = match k {
                 TypeRefKind::Typedef(n) => (TYPEDEF_NS, n.val.clone()),
@@ -645,7 +674,8 @@ fn collect_value_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, _, _, _)
-        | TypeT::Nullable(inner) => collect_value_type_refs(inner, out),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => collect_value_type_refs(inner, out),
         TypeT::TypeRef(_) => collect_type_refs(ty, out),
         _ => {}
     }

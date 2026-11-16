@@ -82,6 +82,14 @@ val range_unchanged_in (c: bytes) (s e: nat) (b2: bytes) (i j k l: nat)
           (ensures  slice c k l == slice b2 (k - s) (l - s))
           [SMTPat (range_unchanged (slice c s e) b2 i j); SMTPat (slice c k l)]
 
+(* What a callee handed a whole member promised `_unchanged`, read back
+   through the union the member was written over. *)
+val range_unchanged_overlay (old: bytes) (s: nat) (c: bytes) (o: nat) (b2: bytes) (i j k l: nat)
+  : Lemma (requires range_unchanged c b2 i j /\ k <= l /\ l <= len old /\
+                    o <= s + k /\ i <= s + k - o /\ s + l - o <= j)
+          (ensures  slice (overlay old s c o) k l == slice b2 (s + k - o) (s + l - o))
+          [SMTPat (range_unchanged c b2 i j); SMTPat (slice (overlay old s c o) k l)]
+
 (* A witness of a property known to have one, for ghost code: how the load
    of an island picks the member value its bytes are the representation of. *)
 val ov_pick (#t: Type) (q: t -> prop)
