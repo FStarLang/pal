@@ -143,3 +143,25 @@ struct ctx *get_ctx(union req *r)
 {
     return r->params.ctx;
 }
+
+/* A getter macro hands back the owning member's address; a store through it
+   is a store into that member, and leaves `ctx` where it was. */
+#define params_of(r) (&(r)->params)
+
+uint32_t set_seq_via_getter(union req *r, uint32_t s)
+{
+    struct params *p;
+    p = params_of(r);
+    p->seq = s;
+    return r->params.ctx->count;
+}
+
+/* The same for a struct-typed field, which goes through a focus on it. */
+uint32_t set_last_via_getter(union req *r, struct pair *v)
+    _requires(r->params._active)
+{
+    struct params *p;
+    p = params_of(r);
+    p->last = *v;
+    return r->params.ctx->count;
+}
