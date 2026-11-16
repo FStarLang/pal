@@ -7755,9 +7755,10 @@ Limitations:
       conjunctions, `exists` and whole clauses use the unmarked ones.
       Along a chain of `&&` this kept the clause linear, not quadratic,
       in its length. The marking is undone where it would be unsound: under
-      `!` and in the left operand of `||` or `==>`, where a guard the
-      right operand implied is no longer implied
-      (`test/contract_guard_negation`), and loop invariants keep only the
+      `!`, in the left operand of `||` or `==>`, and on both sides of a
+      `_Bool` `==` (`<==>`), where a guard the right operand implied is no
+      longer implied (`test/contract_guard_negation`,
+      `test/contract_guard_iff_bad`), and loop invariants keep only the
       guards they need, never the marker.
     - A test case may carry an `fstar_opts` file whose contents the test
       Makefile appends to the F\* command line (`cursor_strtok` needs

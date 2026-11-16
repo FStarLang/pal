@@ -2521,6 +2521,8 @@ fn cursor_seeds(tds: &Typedefs, decl: &FnDecl) -> Result<HashMap<String, String>
         };
         if !same
             || !is_nullable(tds, &s.ty)
+            || extent(tds, &s.ty) != Some(Extent::Array)
+            || is_arrayptr(tds, &s.ty)
             || s.mode != ParamMode::Regular
             || cursor_pointee(tds, &s.ty).is_some()
             || out.contains_key(&*seed.val)
@@ -3462,8 +3464,14 @@ impl<'a> Spec<'a> {
                     // `_Bool` equality is equivalence of the two conditions,
                     // not equality of two values: one side is often a
                     // comparison, which has no value in F*.
+                    // Neither side of `<==>` implies the guards its own `&&`,
+                    // `||` or `==>` marked as implied, so they are needed.
                     if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
-                        return Ok(format!("({} <==> {})", self.prop(l, w)?, self.prop(r, w)?));
+                        let mark = self.guards.borrow().len();
+                        let a = self.prop(l, w)?;
+                        let b = self.prop(r, w)?;
+                        self.unmark_guards_since(mark);
+                        return Ok(format!("({} <==> {})", a, b));
                     }
                     // `num` rather than `value`: machine-integer `v` is
                     // injective, so this is the same proposition, and it is
@@ -18722,7 +18730,9 @@ impl<'a> Body<'a> {
         // The step in elements of the array, which may be narrower than the
         // pointer's own (a word walking a byte array).
         let (k, scaled) = match count {
-            Step::Const(c) if (pelem * c) % esize == 0 => (format!("{}sz", pelem * c / esize), false),
+            Step::Const(c) if (pelem * c) % esize == 0 => {
+                (format!("{}sz", pelem * c / esize), false)
+            }
             Step::Index(i) if pelem == esize => (i, esize != 1),
             _ => return,
         };
