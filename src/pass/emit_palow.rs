@@ -15292,6 +15292,9 @@ struct Body<'a> {
     /// The function's parameters, by C name. Ownership of what a pointer points
     /// to is granted by the contract, and the contract only names parameters.
     params: HashSet<String>,
+    /// The function's `_ghost_arg`s, by C name. Each is an erased value with
+    /// no storage, so a path into one is a projection and never a read.
+    ghost_args: HashSet<String>,
     /// The parameters that `_old(p)` can name inside the body: `var_p` is the
     /// value the call passed in for the whole body, since assigning to `p`
     /// gives it a slot of its own, unless a local declared under the same name
@@ -16073,7 +16076,10 @@ impl<'a> Body<'a> {
                     return Some(format!("var_{}", v.val));
                 }
                 let v = v.val.to_string();
-                if !self.params.contains(&v) {
+                // A ghost argument is the same kind of value, only erased: it
+                // must never be copied into storage, which a ghost value
+                // cannot be.
+                if !self.params.contains(&v) && !self.ghost_args.contains(&v) {
                     return None;
                 }
                 if self.slots.iter().any(|s| s.name == v)
@@ -29886,6 +29892,12 @@ fn emit_body(
             .args
             .iter()
             .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
+            .collect(),
+        ghost_args: defn
+            .decl
+            .ghost_args
+            .iter()
+            .map(|g| g.name.val.to_string())
             .collect(),
         old_params: HashSet::new(),
     };
