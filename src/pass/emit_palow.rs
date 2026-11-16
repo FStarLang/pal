@@ -5980,6 +5980,7 @@ fn emit_fn(
                     name: Some(id.with_loc(n.loc.clone())),
                     ty: pt.clone(),
                     mode: ParamMode::Regular,
+                    unowned: false,
                 },
                 true,
             ));
@@ -7759,6 +7760,7 @@ fn emit_fn(
                 continue;
             }
             if let Ok(t) = with_this(
+                None,
                 "return",
                 Some((&ret_name, None, true)),
                 &decl.ret_type,
@@ -7800,6 +7802,7 @@ fn emit_fn(
                 .unwrap_or_default();
             let fthis = format!("({}).fld_{}", this, field.field);
             if let Ok(t) = with_this(
+                None,
                 "return",
                 Some((&fthis, None, false)),
                 &field.ty,
