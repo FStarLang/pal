@@ -53,6 +53,13 @@ endif
 
 translate: $(OUT_DIR)/.stamp
 
+ifneq ($(wildcard body-selection-controls),)
+.PHONY: body-selection-controls
+all: body-selection-controls
+body-selection-controls: verify
+	python3 ../check-body-selection.py "$(abspath $(C2PULSE))" "$(abspath $(OUT_DIR))/selection-controls"
+endif
+
 $(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h $(wildcard extra_opts pal_opts)
 	@mkdir -p $(OUT_DIR)
 	$(C2PULSE) $(PAL_OPTS) --outdir $(OUT_DIR) $(C_FILES)

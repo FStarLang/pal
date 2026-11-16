@@ -448,6 +448,25 @@ public:
     return true;
   }
 
+  std::string linkageType(QualType ty) {
+    // Anonymous tag names contain source paths. Keep the tag's location,
+    // but compare physical header identity rather than include spelling
+    // (e.g. rpe/gc/../Defs.h versus rpe/Defs.h).
+    struct CanonicalPaths : PrintingCallbacks {
+      llvm::vfs::FileSystem &fs;
+      explicit CanonicalPaths(llvm::vfs::FileSystem &fs) : fs(fs) {}
+      std::string remapPath(StringRef path) const override {
+        SmallString<256> real;
+        if (!fs.getRealPath(path, real))
+          return std::string(real);
+        return path.str();
+      }
+    } paths(sm.getFileManager().getVirtualFileSystem());
+    auto policy = astCtx->getPrintingPolicy();
+    policy.Callbacks = &paths;
+    return ty.getCanonicalType().getAsString(policy);
+  }
+
   void collectLinkage(DeclContext *dc) {
     for (auto *d : dc->decls()) {
       if (d->isInvalidDecl())
@@ -461,7 +480,8 @@ public:
           !isSupportedFnAlias(d) &&
           (astCtx->getSourceManager().isWrittenInMainFile(
                astCtx->getSourceManager().getExpansionLoc(d->getLocation())) ||
-           (function && function->doesThisDeclarationHaveABody()) ||
+           (function && (function->doesThisDeclarationHaveABody() ||
+                         function->hasSkippedBody())) ||
            (object && object->isThisDeclarationADefinition() !=
                           VarDecl::DeclarationOnly)))
         ctx.report_diag(getRange(d->getSourceRange()), true,
@@ -478,14 +498,15 @@ public:
         if (anchor)
           continue;
         ctx.add_c_symbol(toStr(fd->getName()), 0,
-                         toStr(fd->getType().getCanonicalType().getAsString()),
+                         toStr(linkageType(fd->getType())),
                          !fd->hasExternalFormalLinkage(),
-                         fd->doesThisDeclarationHaveABody(), fd->isInlined(),
+                         fd->doesThisDeclarationHaveABody() || fd->hasSkippedBody(),
+                         fd->isInlined(),
                          ignored, isAdmitted(fd),
                          getRange(fd->getSourceRange()));
       } else if (auto *vd = dyn_cast<VarDecl>(d); vd && vd->isFileVarDecl()) {
         ctx.add_c_symbol(toStr(vd->getName()), 1,
-                         toStr(vd->getType().getCanonicalType().getAsString()),
+                         toStr(linkageType(vd->getType())),
                          !vd->hasExternalFormalLinkage(),
                          vd->isThisDeclarationADefinition() !=
                              VarDecl::DeclarationOnly,
@@ -500,7 +521,7 @@ public:
           for (auto *field : rd->fields()) {
             signature +=
                 "|" + fieldNameStr(field) + ":" +
-                field->getType().getCanonicalType().getAsString() + ":" +
+                linkageType(field->getType()) + ":" +
                 std::to_string(layout.getFieldOffset(field->getFieldIndex()));
             if (field->isBitField())
               signature += ":" + std::to_string(field->getBitWidthValue());
@@ -514,7 +535,7 @@ public:
       } else if (auto *td = dyn_cast<TypedefNameDecl>(d)) {
         ctx.add_c_symbol(
             toStr(td->getName()), 4,
-            toStr(td->getUnderlyingType().getCanonicalType().getAsString()),
+            toStr(linkageType(td->getUnderlyingType())),
             false, false, false, ignored, false,
             getRange(td->getSourceRange()));
       } else if (auto *ed = dyn_cast<EnumDecl>(d)) {
@@ -532,6 +553,11 @@ public:
 
   void HandleTranslationUnit(ASTContext &Context) override {
     collectLinkage(Context.getTranslationUnitDecl());
+  }
+
+  bool shouldSkipFunctionBody(Decl *D) override {
+    auto *FD = dyn_cast<FunctionDecl>(D);
+    return FD && !ctx.selects_function_body(toStr(FD->getName()));
   }
 
   virtual bool HandleTopLevelDecl(DeclGroupRef DG) override {
@@ -4473,7 +4499,7 @@ public:
         inSystemBody = outer;
         return ctx.add_fn_defn(std::move(builder), std::move(body));
       } else {
-        if (FD->doesThisDeclarationHaveABody() && !admit) {
+        if ((FD->doesThisDeclarationHaveABody() || FD->hasSkippedBody()) && !admit) {
           std::string message =
               "--only-function excludes body of `" + FD->getName().str() +
               "`; only its external declaration is translated";
@@ -4610,6 +4636,10 @@ public:
   SnipMap snippets = SnipMap::default_();
 
   bool BeginSourceFileAction(CompilerInstance &CI) override {
+    // Let the consumer select bodies before Sema checks them. Declarations,
+    // types, attributes and preprocessor diagnostics remain fully checked.
+    // With no selection the consumer returns false for every function.
+    CI.getFrontendOpts().SkipFunctionBodies = true;
     CI.getPreprocessor().addPPCallbacks(
         std::make_unique<MacroTracker>(rangeMap, snippets, CI));
     return SyntaxOnlyAction::BeginSourceFileAction(CI);

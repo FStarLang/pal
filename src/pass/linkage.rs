@@ -317,10 +317,23 @@ pub fn prepare(units: &mut [(TranslationUnit, UnitSymbols)], diags: &mut Diagnos
                         );
                     }
                     if !compatible_signature(previous, symbol) {
+                        let (old, new) = previous
+                            .signature
+                            .split('|')
+                            .zip(symbol.signature.split('|'))
+                            .find(|(a, b)| a != b)
+                            .unwrap_or((&previous.signature, &symbol.signature));
                         error(
                             diags,
                             &symbol.loc,
-                            format!("incompatible C declarations for {}", symbol.name),
+                            format!(
+                                "incompatible C declarations for {} ({} vs {}): {:?} vs {:?}",
+                                symbol.name,
+                                units[*previous_unit].1.identity.logical_path,
+                                symbols.identity.logical_path,
+                                old,
+                                new
+                            ),
                         );
                     }
                     if symbol.kind <= 1 && *context != symbols.context {
