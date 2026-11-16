@@ -932,9 +932,12 @@ impl<'a> Elaborator<'a> {
             ExprT::Live(val) => self.elab_rvalue(env, Rc::make_mut(val), None),
             ExprT::Unchanged(val) => self.elab_lvalue(env, Rc::make_mut(val)),
             ExprT::Old(val) => self.elab_rvalue(env, Rc::make_mut(val), None),
-            ExprT::Forall(var, ty, body) | ExprT::Exists(var, ty, body) => {
+            ExprT::Forall(var, ty, trigs, body) | ExprT::Exists(var, ty, trigs, body) => {
                 let mut env = env.clone();
                 env.push_var_decl(var, ty.clone(), LocalDeclKind::RValue);
+                for t in trigs.iter_mut().flatten() {
+                    self.elab_rvalue(&env, Rc::make_mut(t), None);
+                }
                 self.elab_rvalue(&env, Rc::make_mut(body), None);
             }
             ExprT::StructInit(name, fields) => {
