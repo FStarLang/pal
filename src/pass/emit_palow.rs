@@ -111,19 +111,231 @@ fn value_reader(tds: &Typedefs, ty: &Type) -> Option<String> {
     }
 }
 
+/// How a struct's `_refine` ties the live member of one of its union fields
+/// to the value of a sibling tag field: `this.T != K || this.m._active` says
+/// that tag `K` means member `m`, and `this.T == K || this.m._active` that
+/// every tag but `K` does.
+#[derive(Clone)]
+struct TagArms {
+    tag: String,
+    tag_ty: Rc<Type>,
+    cases: Vec<(BigInt, String)>,
+    default: String,
+}
+
+/// The union fields of struct `sname` whose live member its `_refine` ties
+/// to a tag field laid out before them, so that a whole-value read can read
+/// the tag first and pick the member by it.
+///
+/// Nothing here has to be right for the read to be sound: the reader's guard
+/// is the choice it makes, stated as a fact the caller has to prove. What the
+/// `_refine` decides is only which choice is likely to be provable.
+fn tag_arms(tds: &Typedefs, sname: &str) -> HashMap<String, TagArms> {
+    tds.structs
+        .get(sname)
+        .map(|si| si.tag_arms.clone())
+        .unwrap_or_default()
+}
+
+/// Computes `tag_arms` from the struct's `_refine`, once its own `StructInfo`
+/// is in place. An enumerator is looked up for its value.
+fn struct_tag_arms(tds: &Typedefs, env: &Env, sname: &str) -> HashMap<String, TagArms> {
+    fn nocast(e: &Expr) -> &Expr {
+        match &e.val {
+            ExprT::Cast(inner, _) => nocast(inner),
+            _ => e,
+        }
+    }
+    fn this_field(e: &Expr) -> Option<String> {
+        match &nocast(e).val {
+            ExprT::Member(b, f) if matches!(&nocast(b).val, ExprT::Var(v) if &*v.val == "this") => {
+                Some(f.val.to_string())
+            }
+            _ => None,
+        }
+    }
+    fn active(e: &Expr) -> Option<(String, String)> {
+        match &nocast(e).val {
+            ExprT::VAttr(VAttr::Active(m), u) => Some((this_field(u)?, m.val.to_string())),
+            ExprT::BinOp(BinOp::Eq, l, r) if matches!(nocast(r).val, ExprT::BoolLit(true)) => {
+                active(l)
+            }
+            _ => None,
+        }
+    }
+    // `this.T == K` as `(T, K, true)`, `this.T != K` as `(T, K, false)`.
+    fn tag_cmp(env: &Env, e: &Expr) -> Option<(String, BigInt, bool)> {
+        if let ExprT::UnOp(UnOp::Not, inner) = &nocast(e).val {
+            let (t, k, eq) = tag_cmp(env, inner)?;
+            return Some((t, k, !eq));
+        }
+        let ExprT::BinOp(BinOp::Eq, l, r) = &nocast(e).val else {
+            return None;
+        };
+        fn lit(env: &Env, e: &Expr) -> Option<BigInt> {
+            match &nocast(e).val {
+                ExprT::IntLit(k, _) => Some((**k).clone()),
+                ExprT::Var(v) => {
+                    let gv = env.lookup_global_var(v)?;
+                    if !gv.is_enum_constant {
+                        return None;
+                    }
+                    lit(env, gv.init.as_ref()?)
+                }
+                _ => None,
+            }
+        }
+        let lit = |e: &Expr| lit(env, e);
+        let (t, k) = match (this_field(l), lit(r)) {
+            (Some(t), Some(k)) => (t, k),
+            _ => (this_field(r)?, lit(l)?),
+        };
+        Some((t, k, true))
+    }
+    let mut out: HashMap<String, TagArms> = HashMap::new();
+    let Some(si) = tds.structs.get(sname) else {
+        return out;
+    };
+    let Some(r) = tds.refined_structs.get(sname) else {
+        return out;
+    };
+    let Ok((ps, _, _)) = refinements(tds, r) else {
+        return out;
+    };
+    let mut clauses = Vec::new();
+    for p in &ps {
+        let (mut own, mut props) = (Vec::new(), Vec::new());
+        split_refine(tds, p, &mut own, &mut props);
+        clauses.extend(props);
+    }
+    let pos = |n: &str| si.fields.iter().position(|f| f.name == n);
+    for c in clauses {
+        // Whether the clause says tag `K` means `m` (`ne`), or that every
+        // other tag does.
+        let found = match &nocast(c).val {
+            ExprT::BinOp(BinOp::LogOr, a, b) => tag_cmp(env, a)
+                .zip(active(b))
+                .or_else(|| tag_cmp(env, b).zip(active(a)))
+                .map(|((t, k, eq), um)| ((t, k, !eq), um)),
+            ExprT::BinOp(BinOp::Implies, a, b) => tag_cmp(env, a).zip(active(b)),
+            _ => None,
+        };
+        let Some(((t, k, ne), (u, m))) = found else {
+            continue;
+        };
+        let (Some(ti), Some(ui)) = (pos(&t), pos(&u)) else {
+            continue;
+        };
+        let tf = &si.fields[ti];
+        if ti >= ui
+            || !matches!(tf.shape, FieldShape::One { .. })
+            || !matches!(peel(tds, &tf.ty).val, TypeT::Int { .. })
+        {
+            continue;
+        }
+        let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(tds, &si.fields[ui].ty).val else {
+            continue;
+        };
+        let Some(uinfo) = tds.unions.get(&*un.val).filter(|x| !x.overlay) else {
+            continue;
+        };
+        if !uinfo.members.iter().any(|x| x.name == m) {
+            continue;
+        }
+        let first = uinfo
+            .members
+            .first()
+            .map(|x| x.name.clone())
+            .unwrap_or_default();
+        let e = out.entry(u).or_insert_with(|| TagArms {
+            tag: t.clone(),
+            tag_ty: tf.ty.clone(),
+            cases: Vec::new(),
+            default: first,
+        });
+        if e.tag != t {
+            continue;
+        }
+        if ne {
+            if !e.cases.iter().any(|(x, _)| *x == k) {
+                e.cases.push((k, m));
+            }
+        } else {
+            e.default = m;
+        }
+    }
+    // Every member chosen has to be readable on its own, with no choice of
+    // its own to make: a member that holds a union is left to the plain read.
+    out.retain(|u, ta| {
+        let Some(f) = si.fields.iter().find(|f| f.name == *u) else {
+            return false;
+        };
+        let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(tds, &f.ty).val else {
+            return false;
+        };
+        let ui = &tds.unions[&*un.val];
+        !ta.cases.is_empty()
+            && ta
+                .cases
+                .iter()
+                .map(|(_, m)| m)
+                .chain(std::iter::once(&ta.default))
+                .all(|m| {
+                    ui.members.iter().any(|x| {
+                        x.name == *m
+                            && matches!(x.shape, FieldShape::One { .. })
+                            && readable_field(tds, &x.ty)
+                            && value_read_guard(tds, &x.ty, "_").is_none()
+                    })
+                })
+    });
+    out
+}
+
+/// What reading union field `u` of a struct value `x` by its tag asks of the
+/// value: the member the tag picks is the live one.
+fn tag_read_guard(tds: &Typedefs, un: &str, ta: &TagArms, x: &str, u: &str) -> Option<String> {
+    let tag = format!("({}).fld_{}", x, ta.tag);
+    let v = |k: &BigInt| -> Option<String> {
+        Some(format!("{}", int_literal(tds, k, &ta.tag_ty).ok()?))
+    };
+    let ctor = |m: &str| format!("Union_{}.Union_{}_{}? ({}).fld_{}", un, un, m, x, u);
+    let mut gs = Vec::new();
+    let mut others = Vec::new();
+    for (k, m) in &ta.cases {
+        let kv = v(k)?;
+        gs.push(format!("({} == {} ==> {})", tag, kv, ctor(m)));
+        others.push(format!("{} <> {}", tag, kv));
+    }
+    gs.push(format!(
+        "(({}) ==> {})",
+        others.join(" /\\ "),
+        ctor(&ta.default)
+    ));
+    Some(format!("({})", gs.join(" /\\ ")))
+}
+
 /// The reader never branches on an erased tag. It reads a fixed member at
 /// each union, and the caller must establish that entire choice of arms.
 fn value_read_guard(tds: &Typedefs, ty: &Type, x: &str) -> Option<String> {
     fn guard(tds: &Typedefs, ty: &Type, x: &str, depth: usize) -> Option<String> {
         match &peel(tds, ty).val {
             TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+                let tagged = tag_arms(tds, &n.val);
                 let guards: Vec<_> = tds
                     .structs
                     .get(&*n.val)?
                     .fields
                     .iter()
-                    .filter_map(|f| {
-                        guard(tds, &f.ty, &format!("({}).fld_{}", x, f.name), depth + 1)
+                    .filter_map(|f| match tagged.get(&f.name) {
+                        Some(ta) => {
+                            let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(tds, &f.ty).val
+                            else {
+                                return None;
+                            };
+                            tag_read_guard(tds, &un.val, ta, x, &f.name)
+                        }
+                        None => guard(tds, &f.ty, &format!("({}).fld_{}", x, f.name), depth + 1),
                     })
                     .collect();
                 (!guards.is_empty()).then(|| format!("({})", guards.join(" /\\ ")))
@@ -1320,6 +1532,13 @@ struct StructInfo {
     /// proposition about the value. Emitted as `struct_X__refine`, it is what
     /// an `_array` of the struct says of each of its elements.
     elem_refine: Option<String>,
+    /// Whether `struct_X__deep_refine` exists: the declaration's `_refine`
+    /// together with those of the structs embedded in it, at any depth. It is
+    /// what an owned pointer to the struct says of the object it reaches.
+    deep_refine: bool,
+    /// The union fields whose live member the `_refine` ties to a tag field;
+    /// see `struct_tag_arms`.
+    tag_arms: HashMap<String, TagArms>,
 }
 
 /// One member of a union the emitter generated a Palow type for.
@@ -2569,33 +2788,41 @@ fn not_null_lemma(tds: &Typedefs, pt: &Type, uninit: bool) -> Option<String> {
                 si.fields.last().map(|f| &f.shape),
                 Some(FieldShape::Flex { .. })
             );
-            first_field_not_null(tds, si, uninit)?;
+            field_not_null(tds, si, uninit)?;
             (!(flex && uninit)).then(|| format!("{}_{}", pn, suffix))
         }
         _ => Some(format!("{}_{}", pn, suffix)),
     }
 }
 
-/// A pointer to a struct is a pointer to its field at offset zero, so the
-/// struct's non-nullness lemma is that field's, reached through the struct.
-/// The field's lemma and name, when the field is a single object that has
-/// one: a scalar, or a struct whose own first field does.
-fn first_field_not_null<'s>(
+/// A pointer to a struct and a pointer to any of its fields share a
+/// provenance, and null has none, so the struct's non-nullness lemma is a
+/// field's, reached through the struct. The field's lemma and name, for the
+/// first field that is a single object with one: a scalar, or a struct with a
+/// field that does. The field at offset zero is tried first, since nothing
+/// more is needed to carry its fact to the struct.
+fn field_not_null<'s>(
     tds: &Typedefs,
     si: &'s StructInfo,
     uninit: bool,
 ) -> Option<(String, &'s str)> {
-    let first = si.fields.iter().find(|f| f.offset == 0)?;
-    let FieldShape::One { pn } = &first.shape else {
-        return None;
+    let lemma_of = |f: &'s StructField| -> Option<(String, &'s str)> {
+        let FieldShape::One { pn } = &f.shape else {
+            return None;
+        };
+        let lemma = match &peel(tds, &f.ty).val {
+            TypeT::TypeRef(TypeRefKind::Struct(_)) => not_null_lemma(tds, &f.ty, uninit)?,
+            TypeT::TypeRef(..) | TypeT::FixedArray(..) => return None,
+            _ if uninit => format!("{}_pts_to_uninit_not_null", pn),
+            _ => format!("{}_pts_to_not_null", pn),
+        };
+        Some((lemma, &f.name))
     };
-    let lemma = match &peel(tds, &first.ty).val {
-        TypeT::TypeRef(TypeRefKind::Struct(_)) => not_null_lemma(tds, &first.ty, uninit)?,
-        TypeT::TypeRef(..) | TypeT::FixedArray(..) => return None,
-        _ if uninit => format!("{}_pts_to_uninit_not_null", pn),
-        _ => format!("{}_pts_to_not_null", pn),
-    };
-    Some((lemma, &first.name))
+    si.fields
+        .iter()
+        .filter(|f| f.offset == 0)
+        .chain(si.fields.iter().filter(|f| f.offset != 0))
+        .find_map(lemma_of)
 }
 
 /// The guarded resource of an optional input parameter, stated at a null
@@ -2891,6 +3118,19 @@ struct OwnedParam {
     elem_refine: Option<String>,
     /// A `const` pointee, which nothing in the body can change.
     fixed: bool,
+    /// The deep half of the ownership, for a pointee with owned pointer
+    /// fields: the struct's predicate prefix, the record's type, the
+    /// permission, and the record on entry. A loop invariant that rebinds
+    /// the value has to rebind this with it, since `_own` is about the value.
+    own: Option<OwnInfo>,
+}
+
+#[derive(Clone)]
+struct OwnInfo {
+    sn: String,
+    osty: String,
+    perm: String,
+    entry: String,
 }
 
 /// Which values a specification expression refers to: the ones on entry, the
@@ -6037,6 +6277,7 @@ fn emit_fn(
                             entry: String::new(),
                             elem_refine: None,
                             fixed: false,
+                            own: None,
                         });
                     }
                     if !ens_own {
@@ -6128,6 +6369,7 @@ fn emit_fn(
                         entry: String::new(),
                         elem_refine: None,
                         fixed: false,
+                        own: None,
                     });
                 }
                 // The mode is a statement about the *pre*condition: what
@@ -6181,6 +6423,15 @@ fn emit_fn(
                     entry: format!("(reveal {})", vname),
                     elem_refine: elem_refine.clone(),
                     fixed: true,
+                    own: own_info
+                        .as_ref()
+                        .filter(|_| !null_guard)
+                        .map(|(sn, osty)| OwnInfo {
+                            sn: sn.clone(),
+                            osty: osty.clone(),
+                            perm: perm.clone(),
+                            entry: format!("(reveal {})", oname),
+                        }),
                 });
                 if let Some((sn, osty)) = &own_info {
                     ghosts.push(format!("(#{}: erased ({}))", oname, osty));
@@ -6207,6 +6458,15 @@ fn emit_fn(
                     entry: format!("(reveal {})", vname),
                     elem_refine: elem_refine.clone(),
                     fixed: false,
+                    own: own_info
+                        .as_ref()
+                        .filter(|_| !null_guard)
+                        .map(|(sn, osty)| OwnInfo {
+                            sn: sn.clone(),
+                            osty: osty.clone(),
+                            perm: "1.0R".to_string(),
+                            entry: format!("(reveal {})", oname),
+                        }),
                 });
                 if let Some((sn, osty)) = &own_info {
                     ghosts.push(format!("(#{}: erased ({}))", oname, osty));
@@ -6234,11 +6494,31 @@ fn emit_fn(
                     entry: format!("(reveal {})", vname),
                     elem_refine: elem_refine.clone(),
                     fixed: false,
+                    own: own_info
+                        .as_ref()
+                        .filter(|_| !null_guard)
+                        .map(|(sn, osty)| OwnInfo {
+                            sn: sn.clone(),
+                            osty: osty.clone(),
+                            perm: "1.0R".to_string(),
+                            entry: format!("(reveal {})", oname),
+                        }),
                 });
+                // A C object keeps its size, so a flexible struct's tail
+                // comes back as long as it went in. A caller that holds the
+                // struct as a union member, where the tail has a fixed
+                // length, needs that to have the member back.
+                let keep_len = match flex_tail(tds, pt).filter(|_| !null_guard) {
+                    Some((_, f, _)) => format!(
+                        " ** pure (Seq.length ({}').fld_{} == Seq.length (reveal {}).fld_{})",
+                        vname, f.name, vname, f.name
+                    ),
+                    None => String::new(),
+                };
                 fresh.push((
                     format!("{}'", vname),
                     vty,
-                    pts_to("1.0R", &format!("{}'", vname)),
+                    format!("{}{}", pts_to("1.0R", &format!("{}'", vname)), keep_len),
                 ));
                 // The new value comes first, because what the deep half owns
                 // is stated in terms of it: a body that overwrote a pointer
@@ -7306,6 +7586,93 @@ fn emit_fn(
             Ok(t) => ret_own.push(t),
             Err(why) => {
                 value_err.get_or_insert(why);
+            }
+        }
+    }
+    // A result that is a value -- a scalar, or a struct returned whole --
+    // satisfies its type's pure refinements, the struct's own `_refine` and
+    // those on its fields included, just as a parameter of that type is
+    // required to. The body proves them at its `return`s and the caller is
+    // given them. A clause with no translation here is not promised, rather
+    // than costing the function its contract.
+    if pointee(tds, &decl.ret_type).is_none() {
+        let mut ps: Vec<Rc<Expr>> = refinements(tds, &decl.ret_type)
+            .map(|(ps, _, _)| ps)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| slprop_refine(tds, p).is_none())
+            .collect();
+        for p in struct_refines(&decl.ret_type) {
+            if !ps.iter().any(|q| Rc::ptr_eq(q, &p)) {
+                ps.push(p);
+            }
+        }
+        let pure_clause = |sp: &Spec, w: When, p: &Rc<Expr>| -> Result<String, String> {
+            let prop = sp.prop(p, w)?;
+            let guards = sp.guards.borrow();
+            Ok(if guards.is_empty() {
+                format!("pure ({})", prop)
+            } else {
+                format!(r"pure ({} /\ {})", guards.join(r" /\ "), prop)
+            })
+        };
+        for p in &ps {
+            if refine_states_own(tds, p) {
+                continue;
+            }
+            if let Ok(t) = with_this(
+                "return",
+                Some((&ret_name, None, true)),
+                &decl.ret_type,
+                p,
+                When::Post,
+                false,
+                None,
+                &[],
+                &|sp: &Spec, w| pure_clause(sp, w, p),
+            ) {
+                ret_own.push(t);
+            }
+        }
+        for field in field_refines(tds, &decl.ret_type) {
+            let p = &field.clause;
+            if refine_states_own(tds, p) || matches!(extent(tds, &field.ty), Some(Extent::Array)) {
+                continue;
+            }
+            let mut this = ret_name.clone();
+            for parent in &field.parents {
+                this = format!("({}).fld_{}", this, parent);
+            }
+            let sibs: Vec<(String, String, Rc<Type>)> = tds
+                .structs
+                .get(&field.container)
+                .map(|si| {
+                    si.fields
+                        .iter()
+                        .filter(|g| g.name != field.field)
+                        .map(|g| {
+                            (
+                                g.name.clone(),
+                                format!("(({}).fld_{})", this, g.name),
+                                g.ty.clone(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let fthis = format!("({}).fld_{}", this, field.field);
+            if let Ok(t) = with_this(
+                "return",
+                Some((&fthis, None, false)),
+                &field.ty,
+                p,
+                When::Post,
+                false,
+                None,
+                &sibs,
+                &|sp: &Spec, w| pure_clause(sp, w, p),
+            ) {
+                ret_own.push(t);
             }
         }
     }
@@ -8509,12 +8876,18 @@ fn finish_struct(
             view: false,
             inv,
             elem_refine: None,
+            deep_refine: false,
+            tag_arms: HashMap::new(),
         },
     );
     let own = collect_own_items(tds, &tds.structs[&name], &name);
     tds.structs.get_mut(&name).unwrap().own = own;
     let elem_refine = struct_elem_refine(tds, env, &name);
     tds.structs.get_mut(&name).unwrap().elem_refine = elem_refine;
+    let tag_arms = struct_tag_arms(tds, env, &name);
+    tds.structs.get_mut(&name).unwrap().tag_arms = tag_arms;
+    let deep = !deep_refine_parts(tds, &name, "x").is_empty();
+    tds.structs.get_mut(&name).unwrap().deep_refine = deep;
     let mut sc = emit_struct(tds, &name);
     if reach.contains(&format!("struct {}", name))
         && let Some(v) = emit_struct_view(tds, &name)
@@ -8617,9 +8990,10 @@ fn sized_flex_members(
             })
             .collect();
         let bitfields = si.bitfields.clone();
+        let views = flex_fill_views(si, &n.val, &name, k);
         tds.aggregate_layouts
             .insert(format!("struct {}", name), (ssize, align));
-        out.push(finish_struct(
+        let mut chunk = finish_struct(
             tds,
             env,
             reach,
@@ -8629,9 +9003,82 @@ fn sized_flex_members(
             bitfields,
             None,
             None,
-        ));
+        );
+        if let Some(v) = views {
+            chunk.code += &v;
+        }
+        out.push(chunk);
     }
     out
+}
+
+fn flex_fill_viewable(si: &StructInfo) -> bool {
+    si.fields.last().is_some_and(|t| si.size == t.offset)
+        && si.bitfields.is_empty()
+        && si.fields.iter().all(|f| f.inv.is_none())
+}
+
+/// The sized copy a predicate name `struct_S__fill<k>` stands for, when it has
+/// the views `flex_fill_views` gives it.
+fn flex_fill_view(tds: &Typedefs, pn: &str) -> Option<String> {
+    let name = pn.strip_prefix("struct_")?;
+    let (base, k) = name.rsplit_once("__fill")?;
+    k.parse::<u64>().ok()?;
+    let si = tds.structs.get(base)?;
+    (tds.structs.contains_key(name) && flex_fill_viewable(si)).then(|| pn.to_string())
+}
+
+/// The sized copy `S__fill<k>` and the flexible struct `S` it was made from
+/// describe the same bytes, so a member can be lent to a function that takes
+/// an `S *`, and taken back once its tail is again `k` elements long. The two
+/// points-to differ only in their names when `S` has no padding after its
+/// fixed fields -- the tail starts where they end -- and when nothing on its
+/// fields' types needs re-proving, which is when these are emitted.
+fn flex_fill_views(si: &StructInfo, base: &str, name: &str, k: u64) -> Option<String> {
+    if !flex_fill_viewable(si) {
+        return None;
+    }
+    let tail = si.fields.last()?;
+    let (bm, bs, fs) = (
+        format!("Struct_{}", base),
+        format!("struct_{}", base),
+        format!("struct_{}", name),
+    );
+    let rec = |qual: &str, src: &str, srcq: &str| {
+        let fields: Vec<String> = si
+            .fields
+            .iter()
+            .map(|f| format!("{}fld_{} = {}.{}fld_{}", qual, f.name, src, srcq, f.name))
+            .collect();
+        format!("{{ {} }}", fields.join("; "))
+    };
+    let to = rec(&format!("{}.", bm), "x", "");
+    let of = rec("", "y", &format!("{}.", bm));
+    Some(format!(
+        "ghost fn {fs}_to_flex (a: ptr) (#p: perm) (#x: {fs})
+  requires {fs}_pts_to a p x
+  ensures  {bm}.{bs}_pts_to a p ({to})
+{{
+  unfold {fs}_pts_to a p x;
+  unfold {fs}_padding a p;
+  fold ({bm}.{bs}_padding a p);
+  fold ({bm}.{bs}_pts_to a p ({to}));
+}}
+
+ghost fn {fs}_of_flex (a: ptr) (#p: perm)
+    (#y: (y: {bm}.{bs} {{ Seq.length y.{bm}.fld_{t} == {k} }}))
+  requires {bm}.{bs}_pts_to a p y
+  ensures  {fs}_pts_to a p ({of})
+{{
+  unfold ({bm}.{bs}_pts_to a p y);
+  unfold ({bm}.{bs}_padding a p);
+  fold ({fs}_padding a p);
+  fold ({fs}_pts_to a p ({of}));
+}}
+
+",
+        t = tail.name,
+    ))
 }
 
 /// Generate the Palow type for one union. Every member has to have a
@@ -10532,7 +10979,7 @@ fn own_chain(tds: &Typedefs, at: String, name: String, ty: &Type, out: &mut Vec<
         at,
         embedded: false,
         esize: None,
-        inv: None,
+        inv: owned_target_inv(tds, ty),
     });
     if let Some(to) = owned_pointer(tds, ty) {
         let to = to.clone();
@@ -10781,6 +11228,55 @@ fn struct_inv_req(si: &StructInfo, sn: &str, v: &str) -> String {
     }
 }
 
+/// The struct an embedded field holds, by C name.
+fn embedded_struct(tds: &Typedefs, ty: &Type) -> Option<Rc<str>> {
+    let mut ty = tds.resolve(ty);
+    while let TypeT::Refine(t, _)
+    | TypeT::RefineAlways(t, _)
+    | TypeT::RefineUninit(t, _)
+    | TypeT::RefineValue(t, ..) = &ty.val
+    {
+        ty = tds.resolve(t);
+    }
+    match &ty.val {
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => Some(n.val.clone()),
+        _ => None,
+    }
+}
+
+/// The conjuncts of `struct_X__deep_refine x`: the declaration's own
+/// `_refine`, and the deep refinement of each struct embedded in it.
+fn deep_refine_parts(tds: &Typedefs, name: &str, x: &str) -> Vec<String> {
+    let Some(si) = tds.structs.get(name) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if si.elem_refine.is_some() {
+        out.push(format!("struct_{}__refine {}", name, x));
+    }
+    for f in &si.fields {
+        if !matches!(f.shape, FieldShape::One { .. }) {
+            continue;
+        }
+        if let Some(n) = embedded_struct(tds, &f.ty)
+            && tds.structs.get(&*n).is_some_and(|c| c.deep_refine)
+        {
+            out.push(format!("struct_{}__deep_refine ({}).fld_{}", n, x, f.name));
+        }
+    }
+    out
+}
+
+/// What an owned pointer to an object of this type says of the object's
+/// value `v`, beyond its points-to.
+fn owned_target_inv(tds: &Typedefs, ty: &Type) -> Option<String> {
+    let n = embedded_struct(tds, ty)?;
+    tds.structs
+        .get(&*n)
+        .filter(|si| si.deep_refine)
+        .map(|_| format!("struct_{}__deep_refine v", n))
+}
+
 fn refined_ty(ty: &str, inv: Option<&String>) -> String {
     match inv {
         Some(p) => format!("(v: {} {{ {} }})", ty, p),
@@ -11013,6 +11509,14 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     // struct states the same term of its elements, in every module.
     if let Some(p) = &si.elem_refine {
         c += &format!("let {}__refine (x: {}) : prop =\n  {}\n\n", sn, sn, p);
+    }
+    if si.deep_refine {
+        c += &format!(
+            "let {}__deep_refine (x: {}) : prop =\n  {}\n\n",
+            sn,
+            sn,
+            deep_refine_parts(tds, name, "x").join(" /\\ ")
+        );
     }
     let inv_at = |v: &str| struct_inv_req(si, &sn, v);
     c += &format!(
@@ -11715,11 +12219,10 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
         f = flex.name
     );
 
-    // A pointer to an object is a pointer to its first field; see the
-    // general case.
-    if let Some((lemma, f)) = first_field_not_null(tds, si, false) {
+    // An object shares its fields' provenance; see the general case.
+    if let Some((lemma, f)) = field_not_null(tds, si, false) {
         c += &format!(
-            "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n  preserves {sn}_pts_to a p x\n  ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n{{\n  {sn}_focus_{f} a;\n  {lemma} (a +! {sn}_offsetof_{f});\n  {sn}_unfocus_read_{f} a;\n}}\n\n",
+            "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n  preserves {sn}_pts_to a p x\n  ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n{{\n  {sn}_focus_{f} a;\n  {lemma} (a +! {sn}_offsetof_{f});\n  let _ = Pulse.Lib.C.Palow.Ptr.null_addr;\n  {sn}_unfocus_read_{f} a;\n}}\n\n",
             sn = sn,
             lemma = lemma,
             f = f
@@ -12006,18 +12509,19 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // and `gather` puts a value back together out of fields that now hold
     // one. Nothing in between is a struct, which is exactly why neither the
     // focus nor the whole-object write could express it.
-    // A pointer to an object is a pointer to its first field, and a scalar
+    // A pointer to an object shares its fields' provenance, and a scalar
     // points-to already says that its address is not null and has a
     // provenance. That is worth stating at the object, because a predicate
     // over a linked structure is where the null case has to be ruled out and
     // the caller has no reason to know which field sits at offset zero.
-    if let Some((lemma, f)) = first_field_not_null(tds, si, false) {
+    if let Some((lemma, f)) = field_not_null(tds, si, false) {
         c += &format!(
             "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n\
              \x20 preserves {sn}_pts_to a p x\n\
              \x20 ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
              {{\n\x20 {sn}_focus_{f} a;\n\
              \x20 {lemma} (a +! {sn}_offsetof_{f});\n\
+             \x20 let _ = Pulse.Lib.C.Palow.Ptr.null_addr;\n\
              \x20 {sn}_unfocus_read_{f} a;\n}}\n\n",
             sn = sn,
             lemma = lemma,
@@ -12047,13 +12551,14 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     );
     // The same fact for storage not yet written, which is what a caller has
     // in hand when it supplies the object to an optional output.
-    if let Some((lemma, f)) = first_field_not_null(tds, si, true) {
+    if let Some((lemma, f)) = field_not_null(tds, si, true) {
         c += &format!(
             "ghost fn {sn}_pts_to_uninit_not_null (a: ptr)\n\
              \x20 preserves {sn}_pts_to_uninit a\n\
              \x20 ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
              {{\n\x20 {sn}_scatter_uninit a;\n\
              \x20 {lemma} (a +! {sn}_offsetof_{f});\n\
+             \x20 let _ = Pulse.Lib.C.Palow.Ptr.null_addr;\n\
              \x20 {sn}_gather_uninit a;\n}}\n\n",
             sn = sn,
             lemma = lemma,
@@ -12452,7 +12957,33 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     if si.has_read {
         let mut read = String::new();
         let mut guards = Vec::new();
+        // A union whose live member the struct's tag says is read as that
+        // member, by a branch on the tag just read.
+        let tagged = tag_arms(tds, name);
         for f in &si.fields {
+            if let Some(ta) = tagged.get(&f.name)
+                && let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(tds, &f.ty).val
+                && let Some(g) = tag_read_guard(tds, &un.val, ta, "(reveal x)", &f.name)
+            {
+                guards.push(format!("  requires pure ({})\n", g));
+                let at = format!("(a +! {}_offsetof_{})", sn, f.name);
+                let mut arm = format!("union_{}_{}_read {}", un.val, ta.default, at);
+                for (k, m) in ta.cases.iter().rev() {
+                    arm = format!(
+                        "if (v_{} = {}) then union_{}_{}_read {} else {}",
+                        ta.tag,
+                        int_literal(tds, k, &ta.tag_ty).unwrap(),
+                        un.val,
+                        m,
+                        at,
+                        arm
+                    );
+                }
+                read += &format!("  {}_focus_{} a;\n", sn, f.name);
+                read += &format!("  let v_{} = ({});\n", f.name, arm);
+                read += &format!("  {}_unfocus_read_{} a;\n", sn, f.name);
+                continue;
+            }
             let reader = match &f.shape {
                 FieldShape::One { .. } => value_reader(tds, &f.ty).unwrap(),
                 FieldShape::Unaligned { pn } => format!("{}_read_u", pn),
@@ -13994,8 +14525,9 @@ pub fn emit_palow(
                 let mut e = base.clone();
                 e.push_fn_decl_args_for_body(&d.decl);
                 alias_map(&d.body, &|x| ptr_base(&tds, &e, x), &|x| {
-                    returned_place(&e, x)
+                    returned_place_k(&e, x)
                 })
+                .0
             },
             ..Touched::default()
         };
@@ -15427,6 +15959,9 @@ struct Body<'a> {
     /// Set while a call argument for a `const` parameter is focused: the
     /// callee cannot store through it.
     const_lend: bool,
+    /// Set while a call argument for any other parameter is focused: the
+    /// callee may store through it, so what encloses it comes back changed.
+    mut_lend: bool,
     /// How many slots existed when the enclosing loop's body began. A `break`
     /// or `continue` past a slot allocated since then would skip its release.
     loop_mark: Option<usize>,
@@ -15473,6 +16008,10 @@ struct Body<'a> {
     alias_snaps: AliasSnaps,
     /// Fixed aliases whose local pointer cell is named by a contract.
     stored_aliases: HashSet<String>,
+    /// Aliases bound by a getter that may return `NULL`
+    /// (`returned_place_k`). Their value is read from their slot, and every
+    /// other use is preceded by a check that it is not `NULL`.
+    nullable_aliases: HashSet<String>,
     /// Local pointers loaded once out of memory, with what they were loaded
     /// from. See `ptr_source_map`.
     ptr_src: HashMap<String, Rc<Expr>>,
@@ -16179,6 +16718,33 @@ impl<'a> Body<'a> {
     }
 
     /// What a struct's `_own` predicate covers, by C struct name.
+    /// For each pointer of struct `sn` that owns a single object directly,
+    /// the lemma call that says the pointer, read off the struct value
+    /// `value`, is not null.
+    fn owned_targets_not_null(&self, sn: &str, value: &str) -> Vec<String> {
+        let Some(si) = self.tds.structs.get(sn) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for item in &si.own {
+            if item.embedded
+                || item.esize.is_some()
+                || item.at != format!("((x).fld_{})", item.name)
+            {
+                continue;
+            }
+            let Some(f) = si.fields.iter().find(|f| f.name == item.name) else {
+                continue;
+            };
+            if let Some(to) = owned_pointer(self.tds, &f.ty)
+                && let Some(l) = not_null_lemma(self.tds, to, false)
+            {
+                out.push(format!("{} (({}).fld_{});", l, value, item.name));
+            }
+        }
+        out
+    }
+
     fn own_items_of(&self, sn: &str) -> Vec<OwnItem> {
         self.tds
             .structs
@@ -16518,6 +17084,13 @@ impl<'a> Body<'a> {
             }
             self.lines
                 .push(format!("struct_{}_own_scatter {};", sn, value));
+            // What a pointer of the struct owns is now a points-to of its own,
+            // and a points-to says its address is a real one. Pulse does not
+            // draw that out by itself, and without it `&p->ctx->f` is not
+            // known to be non-null.
+            for l in self.owned_targets_not_null(sn, &value) {
+                self.lines.push(l);
+            }
             self.own_open.push(OpenOwn {
                 root: root.clone(),
                 fields: fields.clone(),
@@ -17484,7 +18057,11 @@ impl<'a> Body<'a> {
             ));
         };
         let pn = shape.pn().to_string();
-        let (a, base_close_read, base_close_write) = self.base_addr(base, writing)?;
+        let (a, mut base_close_read, base_close_write) =
+            self.base_addr(base, writing || self.mut_lend)?;
+        if self.mut_lend {
+            base_close_read = base_close_write.clone();
+        }
         if !writing
             && (self.active.get(&a).map(String::as_str) != Some(&*f.val.to_string())
                 || !base_close_read.is_empty())
@@ -20846,7 +21423,9 @@ impl<'a> Body<'a> {
             // one and no focus is opened, so handing it out costs nothing.
             // Whoever accesses through it still has to have the ownership,
             // which is where the obligation belongs.
-            if let Some(place) = self.aliases.get(&v).cloned() {
+            if let Some(place) = self.aliases.get(&v).cloned()
+                && !self.nullable_aliases.contains(&v)
+            {
                 self.uses.insert(v.clone());
                 return self.addr_only(&place);
             }
@@ -22494,12 +23073,29 @@ impl<'a> Body<'a> {
             if !out && !owns_one(i) {
                 continue;
             }
-            let ExprT::Ref(inner) = &strip_vattr(a).val else {
-                continue;
+            // A pointer standing for a union member, `p = &u->m` or one a
+            // getter returned, hands the callee that member just as `&u->m`
+            // does; the arm still has to be focused for it.
+            let aliased = lvalue_name(a)
+                .filter(|v| !self.nullable_aliases.contains(v))
+                .and_then(|v| self.aliases.get(&v).cloned())
+                .filter(|p| match &strip_vattr(p).val {
+                    ExprT::Member(b, _) => self.union_of(b).is_some(),
+                    _ => false,
+                });
+            let inner: &Expr = match (&strip_vattr(a).val, &aliased) {
+                (ExprT::Ref(inner), _) => inner,
+                (_, Some(p)) => p,
+                _ => continue,
             };
             let ExprT::Member(base, f) = &strip_vattr(inner).val else {
                 continue;
             };
+            if let Some(v) = lvalue_name(a)
+                && aliased.is_some()
+            {
+                self.uses.insert(v);
+            }
             if let Ok((sn, _)) = self.struct_of(base)
                 && self.unaligned_field(&sn, &f.val)
             {
@@ -22517,13 +23113,22 @@ impl<'a> Body<'a> {
                     .is_ok_and(|t| matches!(peel(self.tds, &t).val, TypeT::FixedArray(..)))
             {
                 self.const_lend = !out && consts.get(i) == Some(&true);
+                self.mut_lend = !out && !self.const_lend;
                 let fo = self.union_member(base, f, out);
                 self.const_lend = false;
+                self.mut_lend = false;
                 let fo = fo?;
                 self.lines.extend(match out {
                     true => fo.open_write.iter().cloned(),
                     false => fo.open_read.iter().cloned(),
                 });
+                // A flexible struct member is held at its sized copy, and
+                // the callee takes the struct itself.
+                if !out && let Some(fs) = flex_fill_view(self.tds, &fo.pn) {
+                    self.lines.push(format!("{}_to_flex {};", fs, fo.at));
+                    self.pending_close
+                        .push(format!("{}_of_flex {};", fs, fo.at));
+                }
                 self.pending_close.extend(match out {
                     true => fo.close_write,
                     false => fo.close_read,
@@ -22549,9 +23154,37 @@ impl<'a> Body<'a> {
                 self.open_own_path(&path)?;
             }
             let mark = self.lines.len();
+            let (closes, opens) = (self.pending_close.len(), self.own_open.len());
             let key = self.addr_only(base);
             if self.lines.len() != mark {
                 self.lines.truncate(mark);
+                self.pending_close.truncate(closes);
+                self.own_open.truncate(opens);
+                // The place is reached through a pointer read out of memory,
+                // `&p->ctx->f`: it has no fixed key to group by, so it is
+                // opened on its own, the way a read of it would be -- the
+                // ownership the pointer is read out of is scattered, the
+                // pointee focused down to the field, and both closed after
+                // the call. Storage the callee is to fill is not handled.
+                if out {
+                    continue;
+                }
+                let read_only = consts.get(i) == Some(&true);
+                let fo = self.place(inner, !read_only)?;
+                if fo.bits.is_some() {
+                    return Err(format!("the address of bit-field `{}`", f.val));
+                }
+                self.lines.extend(if read_only {
+                    fo.open_read.iter().cloned()
+                } else {
+                    fo.open_write.iter().cloned()
+                });
+                self.pending_close.extend(if read_only {
+                    fo.close_read
+                } else {
+                    fo.close_write
+                });
+                opened.insert(i, fo.at);
                 continue;
             }
             let Ok(key) = key else {
@@ -24613,6 +25246,7 @@ impl<'a> Body<'a> {
                 }
             }
         }
+        let mut deep: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
         for o in self.owned {
             if stated.contains(&o.base) {
                 continue;
@@ -24621,6 +25255,13 @@ impl<'a> Body<'a> {
             // with, so it is still what it was on entry.
             if o.fixed {
                 owns.push(format!("{}{}", o.pre, o.entry));
+                if let Some(d) = &o.own {
+                    owns.push(format!("{}_own {} {} {}", d.sn, o.entry, d.perm, d.entry));
+                    deep.insert(
+                        o.entry.clone(),
+                        (Some(d.entry.clone()), Some(d.entry.clone())),
+                    );
+                }
                 pointees.insert(
                     o.base.clone(),
                     (Some(o.entry.clone()), Some(o.entry.clone())),
@@ -24631,6 +25272,18 @@ impl<'a> Body<'a> {
             let b = format!("inv_val_{}", o.base);
             binders.push(format!("({}: {})", b, o.vty));
             owns.push(format!("{}{}", o.pre, b));
+            // `_own` is about the value, so a fresh value needs a fresh
+            // record: the one the body has now, at whatever the value is now.
+            if let Some(d) = &o.own {
+                let ob = format!("inv_own_{}", o.base);
+                binders.push(format!("({}: {})", ob, d.osty));
+                owns.push(format!("{}_own {} {} {}", d.sn, b, d.perm, ob));
+                deep.insert(b.clone(), (Some(ob.clone()), Some(ob)));
+                deep.insert(
+                    o.entry.clone(),
+                    (Some(d.entry.clone()), Some(d.entry.clone())),
+                );
+            }
             if let Some(r) = &o.elem_refine {
                 owns.push(format!("pure (seq_forall {} {})", r, b));
             }
@@ -24721,10 +25374,9 @@ impl<'a> Body<'a> {
             arrays,
             olens: self.olens.clone(),
             // A loop invariant binds a fresh value for every struct it
-            // carries, and the deep ownership of a fresh value is not
-            // something the invariant has a name for yet, so a clause that
-            // reaches into one is dropped with its own reason.
-            owns: HashMap::new(),
+            // carries, and a fresh ownership record with it, so a clause can
+            // reach through the struct's owned pointers.
+            owns: deep,
             // An ownership clause in a body-level annotation is written about
             // the objects in scope there, and a local in scope there is a
             // slot: `$&(x)` has to be the slot's address, not a parameter's.
@@ -25615,6 +26267,11 @@ impl<'a> Body<'a> {
                 ));
             }
         }
+        // What the checks open is closed again before the statement: they
+        // leave only pure facts, and a call in the statement opens what its
+        // arguments need out of sight of anything opened here.
+        let outer_close = std::mem::take(&mut self.pending_close);
+        let outer_own = std::mem::take(&mut self.own_open);
         let mut done: Vec<Rc<Ident>> = Vec::new();
         for e in exprs {
             for q in self.snapped_alias_in(e) {
@@ -25630,6 +26287,10 @@ impl<'a> Body<'a> {
                 }
             }
         }
+        self.lines.append(&mut self.pending_close);
+        self.close_own();
+        self.pending_close = outer_close;
+        self.own_open = outer_own;
         Ok(())
     }
 
@@ -25758,6 +26419,25 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Assign(lhs, rhs) => {
+                // A getter that may return `NULL`: its result is stored like
+                // any pointer's, and is either `NULL` or the place's address.
+                if let Some(v) = lvalue_name(lhs)
+                    && self.nullable_aliases.contains(&v)
+                    && matches!(&strip_casts(rhs).val, ExprT::FnCall(..))
+                    && let Some(place) = self.aliases.get(&v).cloned()
+                {
+                    self.nullable_aliases.remove(&v);
+                    let stored = self.stmt_inner(s);
+                    self.nullable_aliases.insert(v.clone());
+                    stored?;
+                    let at = self.rvalue(&ExprT::Ref(place).with_loc(rhs.loc.clone()))?;
+                    let q = self.rvalue(lhs)?;
+                    self.lines.push(format!(
+                        "assert (pure ({} == null \\/ {} == {}));",
+                        q, q, at
+                    ));
+                    return Ok(());
+                }
                 // Only contracts that name the pointer cell need its storage;
                 // dereferences still follow the fixed place.
                 if let Some(v) = lvalue_name(lhs) {
@@ -28737,6 +29417,40 @@ fn returned_arg(env: &Env, g: &Ident) -> Option<usize> {
 /// out an interior pointer, and the place is what lets the caller's accesses
 /// through the result go to the field the caller already owns.
 fn returned_place(env: &Env, e: &Expr) -> Option<Rc<Expr>> {
+    returned_place_k(env, e).map(|(p, _)| p)
+}
+
+/// `returned_place`, and whether the getter may also return `NULL`: an
+/// `_ensures(return == NULL || return == &PATH)` conjunct names the same place
+/// as `return == &PATH` does, but only for a result that is not `NULL`.
+fn returned_place_k(env: &Env, e: &Expr) -> Option<(Rc<Expr>, bool)> {
+    fn is_return(e: &Expr) -> bool {
+        matches!(&strip_casts(e).val, ExprT::Var(v) if &*v.val == "return")
+    }
+    fn is_null_lit(e: &Expr) -> bool {
+        matches!(&strip_casts(e).val, ExprT::IntLit(n, _) if **n == BigInt::ZERO)
+    }
+    // `return == &PATH`, either way round.
+    fn ret_ref(c: &Expr) -> Option<&Rc<Expr>> {
+        let ExprT::BinOp(BinOp::Eq, l, r) = &strip_casts(c).val else {
+            return None;
+        };
+        for (a, b) in [(l, r), (r, l)] {
+            if is_return(a)
+                && let ExprT::Ref(p) = &strip_casts(b).val
+            {
+                return Some(p);
+            }
+        }
+        None
+    }
+    // `return == NULL`, either way round.
+    fn ret_null(c: &Expr) -> bool {
+        let ExprT::BinOp(BinOp::Eq, l, r) = &strip_casts(c).val else {
+            return false;
+        };
+        (is_return(l) && is_null_lit(r)) || (is_return(r) && is_null_lit(l))
+    }
     fn conjuncts<'a>(e: &'a Rc<Expr>, out: &mut Vec<&'a Rc<Expr>>) {
         match &strip_casts(e).val {
             ExprT::BinOp(BinOp::LogAnd, l, r) => {
@@ -28781,22 +29495,25 @@ fn returned_place(env: &Env, e: &Expr) -> Option<Rc<Expr>> {
     }
     let mut found = None;
     for c in cs {
-        let ExprT::BinOp(BinOp::Eq, l, r) = &strip_casts(c).val else {
+        let (p, nullable) = if let Some(p) = ret_ref(c) {
+            (p, false)
+        } else if let ExprT::BinOp(BinOp::LogOr, l, r) = &strip_casts(c).val
+            && let Some(p) = (if ret_null(l) { ret_ref(r) } else { None })
+                .or_else(|| if ret_null(r) { ret_ref(l) } else { None })
+        {
+            (p, true)
+        } else {
             continue;
         };
-        for (a, b) in [(l, r), (r, l)] {
-            if matches!(&strip_casts(a).val, ExprT::Var(v) if &*v.val == "return")
-                && let ExprT::Ref(p) = &strip_casts(b).val
-                && place_ok(p, &params)
-            {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some(p.clone());
-            }
+        if !place_ok(p, &params) {
+            continue;
         }
+        if found.is_some() {
+            return None;
+        }
+        found = Some((p.clone(), nullable));
     }
-    let mut place = found?;
+    let (mut place, nullable) = found?;
     // Two steps, so that an argument named like another parameter is not
     // substituted a second time.
     for (k, p) in params.iter().enumerate() {
@@ -28816,7 +29533,7 @@ fn returned_place(env: &Env, e: &Expr) -> Option<Rc<Expr>> {
         }
         place = subst_var(&place, &format!("__pal_param_{}", k), a)?;
     }
-    Some(place)
+    Some((place, nullable))
 }
 
 /// The array parameter each pointer the body walks is a pointer into.
@@ -29211,8 +29928,8 @@ fn ptr_base(tds: &Typedefs, env: &Env, e: &Expr) -> bool {
 fn alias_map(
     body: &Stmts,
     ptr_base: &dyn Fn(&Expr) -> bool,
-    call_place: &dyn Fn(&Expr) -> Option<Rc<Expr>>,
-) -> HashMap<String, Rc<Expr>> {
+    call_place: &dyn Fn(&Expr) -> Option<(Rc<Expr>, bool)>,
+) -> (HashMap<String, Rc<Expr>>, HashSet<String>) {
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
 
@@ -29228,6 +29945,9 @@ fn alias_map(
     // a pointer assigned twice is an object after all.
     let mut cand: Vec<(String, Rc<Expr>)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    // Aliases bound by a getter that may return `NULL` instead: see
+    // `guard_nullable_aliases` for what keeps a use of one honest.
+    let mut nullable: HashSet<String> = HashSet::new();
     for st in body.iter() {
         let StmtT::Assign(lhs, rhs) = &st.val else {
             continue;
@@ -29240,12 +29960,15 @@ fn alias_map(
         let from_call = lvalue_name(lhs)
             .filter(|q| !t.addressed.contains(q))
             .and_then(|_| call_place(rhs));
+        let maybe_null = from_call.as_ref().is_some_and(|(_, n)| *n);
         let (Some(q), Some(place)) = (
             lvalue_name(lhs),
-            from_call.or_else(|| match &strip_vattr(rhs).val {
-                ExprT::Ref(place) => Some(place.clone()),
-                _ => None,
-            }),
+            from_call
+                .map(|(p, _)| p)
+                .or_else(|| match &strip_vattr(rhs).val {
+                    ExprT::Ref(place) => Some(place.clone()),
+                    _ => None,
+                }),
         ) else {
             continue;
         };
@@ -29272,6 +29995,11 @@ fn alias_map(
         // already bound such an index; whatever effect is left is refused.
         if has_effects(place) {
             continue;
+        }
+        if maybe_null {
+            nullable.insert(q.clone());
+        } else {
+            nullable.remove(&q);
         }
         cand.push((q, place.clone()));
     }
@@ -29335,6 +30063,13 @@ fn alias_map(
         if !locals.contains(&q) || t.rebound.get(&q) != Some(&1) || out.contains_key(&q) {
             continue;
         }
+        // A pointer computed from one that may be `NULL` is a pointer object:
+        // only the guarded name itself is checked before a use.
+        let mut used = Touched::default();
+        touch_expr(rhs, &mut used);
+        if used.vars.iter().any(|v| nullable.contains(v)) {
+            continue;
+        }
         // `p = a + i` names the element `a[i]`: pointer arithmetic on an array
         // is the index written another way, and a local that holds the result
         // stands for that element as long as nothing rebinds what it was
@@ -29376,7 +30111,8 @@ fn alias_map(
             ExprT::Deref(rhs.clone()).with_loc(st.loc.clone()) as Rc<Expr>,
         );
     }
-    out
+    nullable.retain(|q| out.contains_key(q));
+    (out, nullable)
 }
 
 /// An expression with its virtual attributes and conversions removed. A
@@ -29818,6 +30554,203 @@ type AliasSnaps = HashMap<String, Vec<(Rc<Expr>, Rc<Ident>)>>;
 ///
 /// An index that reads memory is held to the same terms, since `&a[h->n]`
 /// names element `h->n` of the time `q` was set.
+/// A getter that may return `NULL` binds an alias like any other getter does
+/// (`returned_place_k`), but the result is that place only when it is not
+/// `NULL`. So every statement that uses such a name -- other than to test it
+/// against `NULL` -- is preceded by `_assert(q != NULL)`, and an access through
+/// `q` goes to the place only where `q` is known to be its address. The name
+/// is bound once, so it has the same value at every use, and a use before the
+/// binding reads the slot before it holds anything and is refused.
+///
+/// A test inside a condition is taken at face value: `if (q != NULL && q->a)`
+/// guards the whole `if`, and is then refused. That costs completeness, never
+/// soundness.
+fn guard_nullable_aliases(body: &Stmts, nullable: &HashSet<String>) -> Option<Stmts> {
+    if nullable.is_empty() {
+        return None;
+    }
+    let types: HashMap<String, Rc<Type>> = body
+        .iter()
+        .filter_map(|s| match &s.val {
+            StmtT::Decl(n, ty) if nullable.contains(&*n.val) => {
+                Some((n.val.to_string(), ty.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    fn name<'a>(e: &'a Expr, nullable: &HashSet<String>) -> Option<&'a str> {
+        match &strip_casts(e).val {
+            ExprT::Var(v) if nullable.contains(&*v.val) => Some(&v.val),
+            _ => None,
+        }
+    }
+    fn is_null(e: &Expr) -> bool {
+        matches!(&strip_casts(e).val, ExprT::IntLit(n, _) if **n == BigInt::ZERO)
+    }
+    // The subexpressions that only test a guarded name against `NULL`.
+    fn tests<'a>(e: &'a Rc<Expr>, nullable: &HashSet<String>, out: &mut Vec<&'a Rc<Expr>>) {
+        match &strip_vattr(e).val {
+            ExprT::BinOp(BinOp::Eq, l, r)
+                if (name(l, nullable).is_some() && is_null(r))
+                    || (name(r, nullable).is_some() && is_null(l)) =>
+            {
+                out.push(e);
+                return;
+            }
+            ExprT::UnOp(UnOp::Not, x) if name(x, nullable).is_some() => {
+                out.push(e);
+                return;
+            }
+            ExprT::BinOp(BinOp::LogAnd | BinOp::LogOr, a, b) => {
+                for x in [a, b] {
+                    if name(x, nullable).is_some() {
+                        out.push(x);
+                    }
+                }
+            }
+            ExprT::Cond(c, ..) if name(c, nullable).is_some() => out.push(c),
+            _ => {}
+        }
+        for x in expr_operands(e) {
+            tests(x, nullable, out);
+        }
+    }
+    // The guarded names an expression uses for more than a test.
+    fn used(e: &Rc<Expr>, nullable: &HashSet<String>, out: &mut BTreeSet<String>) {
+        let mut ts = Vec::new();
+        tests(e, nullable, &mut ts);
+        let f: Rc<Expr> = ExprT::BoolLit(false).with_loc(e.loc.clone());
+        let mut rest = e.clone();
+        for t in ts {
+            rest = replace_subexpr(&rest, t, &f);
+        }
+        let mut t = Touched::default();
+        touch_expr(&rest, &mut t);
+        out.extend(t.vars.into_iter().filter(|v| nullable.contains(v)));
+    }
+    fn cond_used(c: &Rc<Expr>, nullable: &HashSet<String>, out: &mut BTreeSet<String>) {
+        if name(c, nullable).is_none() {
+            used(c, nullable, out);
+        }
+    }
+    fn go(
+        body: &Stmts,
+        nullable: &HashSet<String>,
+        types: &HashMap<String, Rc<Type>>,
+        changed: &mut bool,
+    ) -> Stmts {
+        let mut out = Vec::new();
+        for st in body {
+            let mut us = BTreeSet::new();
+            let sub = |b: &Rc<Stmts>, changed: &mut bool| Rc::new(go(b, nullable, types, changed));
+            let st2 = match &st.val {
+                StmtT::Assign(lhs, rhs) => {
+                    if name(lhs, nullable).is_none() {
+                        used(lhs, nullable, &mut us);
+                    }
+                    used(rhs, nullable, &mut us);
+                    st.clone()
+                }
+                StmtT::Call(e) | StmtT::Let(_, _, e) | StmtT::Return(Some(e)) => {
+                    used(e, nullable, &mut us);
+                    st.clone()
+                }
+                StmtT::DeclStackArray { size, .. } => {
+                    used(size, nullable, &mut us);
+                    st.clone()
+                }
+                StmtT::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                    ensures,
+                } => {
+                    cond_used(cond, nullable, &mut us);
+                    StmtT::If {
+                        cond: cond.clone(),
+                        then_branch: sub(then_branch, changed),
+                        else_branch: sub(else_branch, changed),
+                        ensures: ensures.clone(),
+                    }
+                    .with_loc(st.loc.clone())
+                }
+                StmtT::While {
+                    cond,
+                    inv,
+                    requires,
+                    ensures,
+                    body,
+                } => {
+                    cond_used(cond, nullable, &mut us);
+                    StmtT::While {
+                        cond: cond.clone(),
+                        inv: inv.clone(),
+                        requires: requires.clone(),
+                        ensures: ensures.clone(),
+                        body: sub(body, changed),
+                    }
+                    .with_loc(st.loc.clone())
+                }
+                StmtT::Match {
+                    scrutinee,
+                    branches,
+                    default_branch,
+                    ensures,
+                } => {
+                    used(scrutinee, nullable, &mut us);
+                    StmtT::Match {
+                        scrutinee: scrutinee.clone(),
+                        branches: Rc::new(
+                            branches
+                                .iter()
+                                .map(|b| {
+                                    Rc::new(MatchBranch {
+                                        patterns: b.patterns.clone(),
+                                        body: sub(&b.body, changed),
+                                    })
+                                })
+                                .collect(),
+                        ),
+                        default_branch: sub(default_branch, changed),
+                        ensures: ensures.clone(),
+                    }
+                    .with_loc(st.loc.clone())
+                }
+                StmtT::GotoBlock {
+                    body,
+                    label,
+                    ensures,
+                } => StmtT::GotoBlock {
+                    body: sub(body, changed),
+                    label: label.clone(),
+                    ensures: ensures.clone(),
+                }
+                .with_loc(st.loc.clone()),
+                _ => st.clone(),
+            };
+            for q in us {
+                let Some(ty) = types.get(&q) else {
+                    continue;
+                };
+                let l = st.loc.clone();
+                let v: Rc<Expr> =
+                    ExprT::Var(Rc::<str>::from(q.as_str()).with_loc(l.clone())).with_loc(l.clone());
+                let z: Rc<Expr> =
+                    ExprT::IntLit(Rc::new(BigInt::ZERO), ty.clone()).with_loc(l.clone());
+                let eq: Rc<Expr> = ExprT::BinOp(BinOp::Eq, v, z).with_loc(l.clone());
+                let ne: Rc<Expr> = ExprT::UnOp(UnOp::Not, eq).with_loc(l.clone());
+                out.push(StmtT::Assert(ne).with_loc(l));
+                *changed = true;
+            }
+            out.push(st2);
+        }
+        out
+    }
+    let mut changed = false;
+    let out = go(body, nullable, &types, &mut changed);
+    changed.then_some(out)
+}
+
 fn snapshot_alias_loads(
     env: &Env,
     body: &Stmts,
@@ -30154,8 +31087,8 @@ fn emit_body(
         }
         None => defn,
     };
-    let aliases = alias_map(&defn.body, &|x| ptr_base(tds, &env, x), &|x| {
-        returned_place(&env, x)
+    let (aliases, nullable_aliases) = alias_map(&defn.body, &|x| ptr_base(tds, &env, x), &|x| {
+        returned_place_k(&env, x)
     });
     let (snapped, alias_snaps) = snapshot_alias_loads(&env, &defn.body, &aliases);
     let snapshotted;
@@ -30166,6 +31099,17 @@ fn emit_body(
                 ..defn.clone()
             };
             &snapshotted
+        }
+        None => defn,
+    };
+    let guarded;
+    let defn = match guard_nullable_aliases(&defn.body, &nullable_aliases) {
+        Some(body) => {
+            guarded = FnDefn {
+                body,
+                ..defn.clone()
+            };
+            &guarded
         }
         None => defn,
     };
@@ -30358,6 +31302,7 @@ fn emit_body(
         decls: Vec::new(),
         own_open: Vec::new(),
         const_lend: false,
+        mut_lend: false,
         loop_mark: None,
         loop_storage: Vec::new(),
         mirrors: HashMap::new(),
@@ -30368,14 +31313,18 @@ fn emit_body(
         sign_view: false,
         divergent_fns,
         blocks: Vec::new(),
+        // A getter's result that may be `NULL` is kept in its slot as well,
+        // since comparing it with `NULL` has to read the value it really has.
         stored_aliases: {
             let mut t = Touched::default();
             touch_stmts(&defn.body, &mut t);
             t.addressed
                 .into_iter()
                 .filter(|name| aliases.contains_key(name))
+                .chain(nullable_aliases.iter().cloned())
                 .collect()
         },
+        nullable_aliases,
         aliases: aliases,
         alias_snaps,
         ptr_src: ptr_source_map(&defn.body),

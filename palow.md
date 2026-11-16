@@ -1643,6 +1643,15 @@ the `const` lends `peek_flags`, `peek_then_count`, `peek_only`),
 `overlay_union_own_clobber_bad`, `overlay_union_own_lend_bad`,
 `overlay_union_owning_reject`.
 
+A call can also be passed the address of a field of what an owned pointer
+reaches, `f(&p->ctx->seq.v)`, whether `ctx` is a struct field or sits in the
+`_owning` member. The place is opened the way a read of it is: the ownership
+`ctx` is read out of is scattered, the pointee focused down to the field, and
+both closed after the call, so the callee's postcondition about the field is
+what the caller sees afterwards. Storage the callee is to fill (`_out`) is not
+lent this way. Tests: `own_deep_lend` (through a struct and through a union),
+`own_deep_lend_bad`.
+
 Limitations:
 
 - Floats are not leaves; a field of floating type has no view.
@@ -2391,6 +2400,18 @@ Limitations:
    a pointer parameter. Handing the pointer itself
    to something else is still refused, because that hands out ownership of the
    place, which is the focus-across-statements problem again.
+
+   A getter that may also return `NULL` -- `_ensures(return == NULL ||
+   return == &o->in)` -- binds the same alias, but its result is kept in the
+   pointer's slot, since `q == NULL` has to read the value `q` really has.
+   The binding asserts that the result is `NULL` or the place's address, and
+   every later statement that uses `q` for anything but a test against `NULL`
+   (`q == NULL`, `q != NULL`, `!q`, `q` as a condition) is preceded by
+   `_assert(q != NULL)`. So an access through `q` goes to the place only where
+   `q` is known to be its address; whether it is not `NULL` is the caller's to
+   prove, from a test or from the getter's contract. A test inside a larger
+   condition (`q != NULL && q->a`) is not looked through, and such a statement
+   is refused.
 
    Pointer arithmetic is where the low-level model is *simpler* than the one
    it replaces. `p + 3` is `p +! 3 * sizeof elem`, `p < q` compares addresses,
@@ -3725,7 +3746,9 @@ Limitations:
    Palow now generates a `_pts_to_not_null` per struct for the third, which
    is worth having anyway: a predicate over a linked structure is exactly
    where the null case has to be ruled out, and the caller has no reason to
-   know which field sits at offset zero.
+   know which field sits at offset zero. (Any field with a lemma of its own
+   will do, not only the one at offset zero: it shares the struct's
+   provenance, and null has none.)
 
    Two front-end things had to give. A `_letimpure` accessor -- `_elements_of(l)`,
    the list `l` denotes -- is impure by construction and has no F\* definition
@@ -7829,3 +7852,86 @@ Limitations:
     needed that member's bytes to be readable, which callers had no way to know and had to be
     told through a `_requires` on every function on the way. The union is now
     the integer (see "Unions of one integer type") (`union_same_type`).
+95. **Getters that may return `NULL`.** `q = get(o)` with `get` declared
+    `_ensures(return == NULL || return == &o->in)` left `q` a pointer object,
+    so `q->a` needed ownership at whatever `q` held, which the caller only had
+    as part of `o`. `returned_place_k` now accepts that form too; `q` becomes
+    an alias that is also stored (`nullable_aliases`), its value is read from
+    its slot, the binding asserts `q == null \/ q == &o->in`, and
+    `guard_nullable_aliases` puts `_assert(q != NULL)` before each statement
+    that uses `q` other than to test it (`alias_call_maybe_null`,
+    `alias_call_maybe_null_bad`, `alias_call_maybe_null_eq_bad`).
+96. **Lending a field reached through an owned pointer.** `f(&p->ctx->a.b)`
+    was not lent at all: the address was computed and the call made with
+    nothing for the callee's precondition. It is now opened like a read and
+    closed after the call (`own_deep_lend`, `own_deep_lend_bad`). The checks
+    that a stored alias still names the same place open ownership too; they
+    now close it before the statement runs, since a call in the statement
+    opens what its arguments need without seeing anything opened outside it,
+    and the two would scatter the same ownership twice.
+97. **What an owned pointer reaches is not null.** Scattering an object's
+    ownership hands out a points-to for each object its owned pointers reach,
+    and a points-to rules out null, but nothing said so: a getter returning
+    `&o->ctx->in` could not promise `return != NULL`. The scatter is now
+    followed by each such target's `_pts_to_not_null`
+    (`owned_targets_not_null`), and the struct lemma, which needed a field at
+    offset zero with a lemma of its own, may use any single-object field:
+    the field and the struct share a provenance, and null has none
+    (`null_addr`) (`own_target_not_null`, `own_target_not_null_bad`). The
+    snapshot-check case of 96 is covered by `own_deep_lend`'s `read_asserted`.
+98. **Owned pointers across a loop or an `if` with `_ensures`.** The frame
+    of a loop invariant, or of a conditional's `_ensures`, held a parameter's
+    points-to but not the ownership of what its pointers reach, so a body
+    that used it was not translated. The frame now carries that ownership too:
+    at the entry value for a parameter the body cannot change, and otherwise
+    at a fresh value that is bound along with the parameter's, so a clause
+    such as `r->c->has` reaches through the pointer and `_old` refers to the
+    entry state. As with the points-to, what the clause does not restate is
+    forgotten (`own_frame`, `own_frame_bad`).
+99. **A flexible-array union arm lent as its struct.** A union arm whose
+    type ends in a flexible array, padded out by a wider arm, is modeled at a
+    fixed tail length (`S__fill<k>`), while a callee takes the flexible struct
+    `S`. Passing `&u->arm` now converts the arm to `S` for the call and back
+    afterwards (`S__fill<k>_to_flex`, `_of_flex`, emitted with the fill copy
+    when it has no trailing padding, bitfields or invariant). Since the arm
+    must come back at the same length, every function that takes a flexible
+    struct now ensures its tail length is unchanged: a C object keeps its
+    size. A callee that may store through the arm reopens the enclosing
+    struct for writing, so its value is rebuilt from the arm's new value
+    rather than assumed unchanged. This also works through an owned pointer,
+    and for a pointer that stands for the arm -- `b = &r->c->bm`, or one a
+    getter returns with `_ensures(return == &r->c->bm)` -- which is now lent
+    the way `&r->c->bm` is (`union_flex_lend`, `union_flex_lend_bad`).
+100. **Copying a struct whose tag names its union's live member.** Reading a
+    whole struct read each union through its first member, so a copy needed
+    that member to be live whatever the tag said. When the struct's
+    `_refine` ties a union field to a tag field that precedes it -- clauses
+    of the form `this.k != K || this.u.m._active` (or `k == K ==> ...`) for
+    each case, and `this.k == K || ...` (or `k != K ==> ...`) for the member
+    every other tag uses -- the reader now reads the tag first and then the
+    member it names, and requires only what the `_refine` says. `K` may be
+    an integer literal or an enumerator. Without a clause for the remaining
+    tags, they use the first member, which must then be live
+    (`union_tag_copy`, `union_tag_copy_bad`).
+101. **A result satisfies its type's refinements.** A function whose return
+    type carries a pure `_refine` -- a refined scalar typedef, or a struct
+    returned by value with a `_refine` on its declaration or on its fields --
+    promised nothing about the result, so a caller could not use the
+    refinement and the body never had to establish it. The refinements are
+    now stated in the `ensures`, with `this` bound to the result: the body
+    proves them at its `return`s and the caller is given them. A clause that
+    has no translation at the result is left out rather than costing the
+    function its contract (`return_refine`, `return_refine_bad`,
+    `union_tag_return_bad`; `union_tag_copy` now also reads through a
+    returned copy).
+102. **What a struct owns satisfies its type's refinements.** A `_refine` on a
+    struct, or on a struct embedded in it, was stated for a parameter's
+    pointee but not for an object reached through an owned pointer, so
+    `r->c->lead` could not be read through the member its tag names. A struct
+    with such refinements now has `struct_X__deep_refine` -- its own
+    `_refine` and the deep refinement of each embedded struct -- and the
+    value an owned pointer to it holds in the `_own` spec is refined by it,
+    as an owned `_array`'s extent already is by the field's `_refine`. A
+    reader gets it with the ownership; a write has to keep it, and is
+    checked when the ownership is gathered back (`own_target_refine`,
+    `own_target_refine_bad`).
