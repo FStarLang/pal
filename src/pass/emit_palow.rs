@@ -23075,16 +23075,13 @@ impl<'a> Body<'a> {
             if !out && !owns_one(i) {
                 continue;
             }
-            // A pointer standing for a union member, `p = &u->m` or one a
-            // getter returned, hands the callee that member just as `&u->m`
-            // does; the arm still has to be focused for it.
+            // A pointer standing for a member, `p = &u->m` or one a getter
+            // returned, hands the callee that member just as `&u->m` does;
+            // the arm or field still has to be focused for it.
             let aliased = lvalue_name(a)
                 .filter(|v| !self.nullable_aliases.contains(v))
                 .and_then(|v| self.aliases.get(&v).cloned())
-                .filter(|p| match &strip_vattr(p).val {
-                    ExprT::Member(b, _) => self.union_of(b).is_some(),
-                    _ => false,
-                });
+                .filter(|p| matches!(&strip_vattr(p).val, ExprT::Member(..)));
             let inner: &Expr = match (&strip_vattr(a).val, &aliased) {
                 (ExprT::Ref(inner), _) => inner,
                 (_, Some(p)) => p,
