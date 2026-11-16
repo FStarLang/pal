@@ -25573,6 +25573,17 @@ impl<'a> Body<'a> {
             StmtT::If { cond, .. } => vec![cond],
             StmtT::Match { scrutinee, .. } => vec![scrutinee],
             StmtT::DeclStackArray { size, .. } => vec![size],
+            // A specification reads the place as much as code does.
+            StmtT::Assert(e) => vec![e],
+            StmtT::GhostStmt(code) => code
+                .tokens
+                .iter()
+                .filter_map(|t| match t {
+                    InlinePulseToken::RValueAntiquot { expr, .. }
+                    | InlinePulseToken::LValueAntiquot { expr, .. } => Some(expr),
+                    _ => None,
+                })
+                .collect(),
             // The condition is evaluated again after every iteration, where
             // nothing here could check it.
             StmtT::While { cond, .. } => {
@@ -25601,6 +25612,9 @@ impl<'a> Body<'a> {
                 _ => !has_call(e),
             };
             let ordered = match &s.val {
+                // A call in a specification is to a pure function: it changes
+                // nothing the check covers.
+                StmtT::Assert(_) | StmtT::GhostStmt(_) => true,
                 StmtT::Assign(l, r) => {
                     !has_call(l)
                         && single(r)
