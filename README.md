@@ -118,7 +118,10 @@ $env:PAL_FSTAR_ROOT = 'C:\tools\fstar'
 
 The Windows build uses the selected C++ compiler's builtin-header directory.
 Keep Clang and `llvm-config` on the same major version, and rebuild PAL after
-moving or changing the toolchain. The MSYS2 packages must provide the shared
+moving or changing the toolchain. At run time, `pal.exe` prefers
+`$PAL_CLANG_RESOURCE_DIR` if set, then `<dir of pal.exe>\..\lib\clang\<N>` if
+it contains `include` (as in the binary package), then that build-time
+directory. The MSYS2 packages must provide the shared
 `clang-cpp` library; the versioned, static-only LLVM packages are not substitutes.
 Linux continues to use its existing resource discovery and setup.
 
