@@ -7768,6 +7768,8 @@ Limitations:
     `__pal_snap_<n>` local when the alias is set, and every statement that
     uses the alias asserts the load still equals it. `*q = f(h)` is split so
     the check follows the call; other statements that call a function and use
-    such an alias, and loop conditions that use one, are refused
-    (`alias_loaded_pointer`, `alias_loaded_pointer_bad`,
-    `alias_loaded_pointer_call_bad`).
+    such an alias, and loop conditions that use one, are refused. An
+    `_assert` and the `$(...)` of a `_ghost_stmt` read the place too, so they
+    are checked the same way (`alias_loaded_pointer`,
+    `alias_loaded_pointer_bad`, `alias_loaded_pointer_call_bad`,
+    `alias_loaded_pointer_assert_bad`).
