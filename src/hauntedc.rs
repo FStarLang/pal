@@ -754,13 +754,34 @@ fn expr_parser<
                         .or_not(),
                 )
                 .then_ignore(punct(Punct::Comma))
+                // `_trigger(e1, ..., en),` groups before the body: each one is
+                // a multi-pattern, several are alternatives.
+                .then(
+                    select! { Token::Ident("_trigger") => () }
+                        .padded_by(ws())
+                        .ignore_then(
+                            assignment_expression
+                                .clone()
+                                .separated_by(punct(Punct::Comma))
+                                .at_least(1)
+                                .collect::<Vec<Expr>>()
+                                .delimited_by(punct(Punct::LParen), punct(Punct::RParen)),
+                        )
+                        .then_ignore(punct(Punct::Comma))
+                        .repeated()
+                        .collect::<Vec<_>>(),
+                )
                 .then(assignment_expression.clone())
                 .delimited_by(punct(Punct::LParen), punct(Punct::RParen)),
         )
         .try_map(
-            |(is_forall, (((ty, var), witness), body)): (bool, _), span| {
+            |(is_forall, ((((ty, var), witness), triggers), body)): (bool, _), span| {
                 let loc = sift.resolve_source_info(&span);
                 let body: Expr = body;
+                let triggers: Triggers = triggers
+                    .into_iter()
+                    .map(|g: Vec<Expr>| g.into_iter().map(|t| t.to_rvalue()).collect())
+                    .collect();
                 // `_exists(T i = w, p)` names its witness: it is
                 // `_exists(T i, i == w && p)`, a form the emitter proves by
                 // instantiating `i` with `w` instead of leaving the search to
@@ -779,9 +800,13 @@ fn expr_parser<
                 };
                 let body_rv = body.to_rvalue();
                 Ok(if is_forall {
-                    ExprT::Forall(var, ty, body_rv).with_loc(loc).into()
+                    ExprT::Forall(var, ty, triggers, body_rv)
+                        .with_loc(loc)
+                        .into()
                 } else {
-                    ExprT::Exists(var, ty, body_rv).with_loc(loc).into()
+                    ExprT::Exists(var, ty, triggers, body_rv)
+                        .with_loc(loc)
+                        .into()
                 })
             },
         )
@@ -885,8 +910,25 @@ fn expr_parser<
         ))
         .boxed();
         let postfix_expression = left_recursion!(postfix_expression_nonrec, {
-            Index(lhs, idx: Expr: assignment_expression.clone().delimited_by(punct(Punct::LBracket), punct(Punct::RBracket))) = e =>
-                Ok(ExprT::Index(lhs.to_rvalue(), idx.to_rvalue()).with_loc(sift.resolve_source_info(&e.span())).into()),
+            Index(lhs, idx: Expr: assignment_expression.clone().delimited_by(punct(Punct::LBracket), punct(Punct::RBracket))) = e => {
+                let loc = sift.resolve_source_info(&e.span());
+                let lhs = lhs.to_rvalue();
+                // `_base(d)[k]`: the current element `k` of the array a walked
+                // `d` started at, `d[(_specint) k - (d - _old(d))]`.
+                if let ExprT::FnCall(f, args) = &lhs.val
+                    && &*f.val == "_base"
+                {
+                    let [d] = args.as_slice() else {
+                        return Err(Rich::custom(e.span(), "_base takes exactly one argument"));
+                    };
+                    let k = ExprT::Cast(idx.to_rvalue(), TypeT::SpecInt.with_loc(loc.clone())).with_loc(loc.clone());
+                    let old = ExprT::Old(d.clone()).with_loc(loc.clone());
+                    let pos = ExprT::BinOp(BinOp::Sub, d.clone(), old).with_loc(loc.clone());
+                    let i = ExprT::BinOp(BinOp::Sub, k, pos).with_loc(loc.clone());
+                    return Ok(ExprT::Index(d.clone(), i).with_loc(loc).into());
+                }
+                Ok(ExprT::Index(lhs, idx.to_rvalue()).with_loc(loc).into())
+            },
             Dot(lhs, id: Rc<Ident>: punct(Punct::Dot).ignore_then(ident.clone())) = e =>
                 Ok(ExprT::Member(lhs.to_rvalue(), id).with_loc(sift.resolve_source_info(&e.span())).into()),
             Arrow(lhs, id: Rc<Ident>: punct(Punct::DashGt).ignore_then(ident.clone())) = e => {
@@ -1608,6 +1650,7 @@ fn let_signature_parser<
                     name: name_opt,
                     ty,
                     mode,
+                    cursor_from: None,
                 }
             },
         );

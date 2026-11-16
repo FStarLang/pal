@@ -43,6 +43,9 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _array __attribute((annotate("pal-array")))
 #define _arrayptr __attribute((annotate("pal-arrayptr")))
 #define _cursor __attribute((annotate("pal-cursor")))
+/* A `_cursor` that starts from the parameter `s` instead of the incoming
+   `*p` when `s` is not null (`strtok_r(s, sep, p)`). */
+#define _cursor_from(s) __attribute((annotate("pal-cursor", #s)))
 #define _pure __attribute((annotate("pal-pure")))
 #define _total __attribute((annotate("pal-total")))
 #define _pal_ignore __attribute__((annotate("pal-ignore")))
@@ -116,6 +119,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _array
 #define _arrayptr
 #define _cursor
+#define _cursor_from(s)
 #define _pure
 #define _total
 #define _pal_ignore
