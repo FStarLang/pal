@@ -2407,11 +2407,14 @@ Limitations:
    The binding asserts that the result is `NULL` or the place's address, and
    every later statement that uses `q` for anything but a test against `NULL`
    (`q == NULL`, `q != NULL`, `!q`, `q` as a condition) is preceded by
-   `_assert(q != NULL)`. So an access through `q` goes to the place only where
-   `q` is known to be its address; whether it is not `NULL` is the caller's to
-   prove, from a test or from the getter's contract. A test inside a larger
-   condition (`q != NULL && q->a`) is not looked through, and such a statement
-   is refused.
+   `_assert(q != NULL)`. That includes an `_assert` and a `_ghost_stmt`
+   antiquotation, which read through `q` as the place just as code does:
+   `_assert(q->a == 1)` must not hold of the place while `q` is `NULL`. So an
+   access through `q` goes to the place only where `q` is known to be its
+   address; whether it is not `NULL` is the caller's to prove, from a test or
+   from the getter's contract. A test inside a larger condition (`q != NULL &&
+   q->a`, or `_assert(q == NULL || q->a == 1)`) is not looked through, and
+   such a statement is refused.
 
    Pointer arithmetic is where the low-level model is *simpler* than the one
    it replaces. `p + 3` is `p +! 3 * sizeof elem`, `p < q` compares addresses,
@@ -7859,8 +7862,9 @@ Limitations:
     an alias that is also stored (`nullable_aliases`), its value is read from
     its slot, the binding asserts `q == null \/ q == &o->in`, and
     `guard_nullable_aliases` puts `_assert(q != NULL)` before each statement
-    that uses `q` other than to test it (`alias_call_maybe_null`,
-    `alias_call_maybe_null_bad`, `alias_call_maybe_null_eq_bad`).
+    that uses `q` other than to test it, an `_assert` or a `_ghost_stmt`
+    included (`alias_call_maybe_null`, `alias_call_maybe_null_bad`,
+    `alias_call_maybe_null_eq_bad`, `alias_nullable_assert_bad`).
 96. **Lending a field reached through an owned pointer.** `f(&p->ctx->a.b)`
     was not lent at all: the address was computed and the call made with
     nothing for the callee's precondition. It is now opened like a read and

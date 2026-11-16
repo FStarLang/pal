@@ -30616,11 +30616,19 @@ fn guard_nullable_aliases(body: &Stmts, nullable: &HashSet<String>) -> Option<St
     }
     // The guarded names an expression uses for more than a test.
     fn used(e: &Rc<Expr>, nullable: &HashSet<String>, out: &mut BTreeSet<String>) {
-        let mut ts = Vec::new();
-        tests(e, nullable, &mut ts);
         let f: Rc<Expr> = ExprT::BoolLit(false).with_loc(e.loc.clone());
         let mut rest = e.clone();
-        for t in ts {
+        // One test at a time, found afresh: `replace_subexpr` rebuilds the
+        // nodes it passes through, so a second test found in the original
+        // would no longer be there to replace.
+        let mut ts = Vec::new();
+        tests(e, nullable, &mut ts);
+        for _ in 0..ts.len() {
+            let mut ts = Vec::new();
+            tests(&rest, nullable, &mut ts);
+            let Some(t) = ts.first() else {
+                break;
+            };
             rest = replace_subexpr(&rest, t, &f);
         }
         let mut t = Touched::default();
@@ -30650,8 +30658,24 @@ fn guard_nullable_aliases(body: &Stmts, nullable: &HashSet<String>) -> Option<St
                     used(rhs, nullable, &mut us);
                     st.clone()
                 }
-                StmtT::Call(e) | StmtT::Let(_, _, e) | StmtT::Return(Some(e)) => {
+                // An assertion reads through `q` as the place too, so it is
+                // guarded like any other use: `_assert(q->a == 1)` must not
+                // hold of the place while `q` is `NULL`.
+                StmtT::Call(e)
+                | StmtT::Let(_, _, e)
+                | StmtT::Return(Some(e))
+                | StmtT::Assert(e) => {
                     used(e, nullable, &mut us);
+                    st.clone()
+                }
+                StmtT::GhostStmt(code) => {
+                    for t in &code.tokens {
+                        if let InlinePulseToken::RValueAntiquot { expr, .. }
+                        | InlinePulseToken::LValueAntiquot { expr, .. } = t
+                        {
+                            used(expr, nullable, &mut us);
+                        }
+                    }
                     st.clone()
                 }
                 StmtT::DeclStackArray { size, .. } => {
