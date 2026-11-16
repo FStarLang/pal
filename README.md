@@ -136,6 +136,28 @@ PAL emits code against the [Palow](palow.md) memory model.
 82 test directories, each a C file that PAL translates and F\*/Pulse
 verifies. Create a new one with `./test/new.sh my_test`.
 
+### Binary package (Linux)
+
+```bash
+make package                              # dist/pal-<version>-<commit>-linux-<arch>.tar.gz
+make package PACKAGE_OPTS=--check-pulse   # also ship pulse/_cache, checked by fstar.exe
+make package-test                         # unpack and run a few tests with the package
+```
+
+[`opt/package.sh`](opt/package.sh) needs `patchelf` in addition to the build
+dependencies. The package is relocatable: `bin/pal` loads libclang-cpp, LLVM
+and their dependencies from the package's `lib/`, and Clang's builtin headers
+from `lib/clang/<N>/include`; it runs on any distribution with a glibc at
+least as recent as the build host's (CI builds on Ubuntu 22.04, see
+[`.github/workflows/package.yml`](.github/workflows/package.yml)).
+`--llvm system` builds a small package that uses the system's libclang-cpp
+instead. The package also contains `include/pal.h`, the Pulse support library
+in `pulse/`, and `share/pal/run-fstar.sh`, which runs `fstar.exe` (or
+`$PAL_FSTAR_EXE`) with `pulse/` on the include path. F\*/Pulse itself is not
+included. A shipped `pulse/_cache` is only usable with the exact F\* that
+checked it (see `BUILDINFO`); otherwise re-check it with
+`rm -rf pulse/_cache && make -C pulse FSTAR_EXE=fstar.exe`.
+
 ### Translate a file
 
 ```bash
