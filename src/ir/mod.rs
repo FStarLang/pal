@@ -642,6 +642,10 @@ pub struct FnArg {
     pub name: Option<Rc<Ident>>,
     pub ty: Rc<Type>,
     pub mode: ParamMode,
+    /// `_cursor_from(s)` on a `_cursor` parameter: the parameter `s` that,
+    /// when not null, is where the cursor starts instead of the incoming
+    /// `*p`.
+    pub cursor_from: Option<Rc<Ident>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]

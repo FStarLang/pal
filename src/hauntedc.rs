@@ -910,8 +910,25 @@ fn expr_parser<
         ))
         .boxed();
         let postfix_expression = left_recursion!(postfix_expression_nonrec, {
-            Index(lhs, idx: Expr: assignment_expression.clone().delimited_by(punct(Punct::LBracket), punct(Punct::RBracket))) = e =>
-                Ok(ExprT::Index(lhs.to_rvalue(), idx.to_rvalue()).with_loc(sift.resolve_source_info(&e.span())).into()),
+            Index(lhs, idx: Expr: assignment_expression.clone().delimited_by(punct(Punct::LBracket), punct(Punct::RBracket))) = e => {
+                let loc = sift.resolve_source_info(&e.span());
+                let lhs = lhs.to_rvalue();
+                // `_base(d)[k]`: the current element `k` of the array a walked
+                // `d` started at, `d[(_specint) k - (d - _old(d))]`.
+                if let ExprT::FnCall(f, args) = &lhs.val
+                    && &*f.val == "_base"
+                {
+                    let [d] = args.as_slice() else {
+                        return Err(Rich::custom(e.span(), "_base takes exactly one argument"));
+                    };
+                    let k = ExprT::Cast(idx.to_rvalue(), TypeT::SpecInt.with_loc(loc.clone())).with_loc(loc.clone());
+                    let old = ExprT::Old(d.clone()).with_loc(loc.clone());
+                    let pos = ExprT::BinOp(BinOp::Sub, d.clone(), old).with_loc(loc.clone());
+                    let i = ExprT::BinOp(BinOp::Sub, k, pos).with_loc(loc.clone());
+                    return Ok(ExprT::Index(d.clone(), i).with_loc(loc).into());
+                }
+                Ok(ExprT::Index(lhs, idx.to_rvalue()).with_loc(loc).into())
+            },
             Dot(lhs, id: Rc<Ident>: punct(Punct::Dot).ignore_then(ident.clone())) = e =>
                 Ok(ExprT::Member(lhs.to_rvalue(), id).with_loc(sift.resolve_source_info(&e.span())).into()),
             Arrow(lhs, id: Rc<Ident>: punct(Punct::DashGt).ignore_then(ident.clone())) = e => {
@@ -1633,6 +1650,7 @@ fn let_signature_parser<
                     name: name_opt,
                     ty,
                     mode,
+                    cursor_from: None,
                 }
             },
         );
