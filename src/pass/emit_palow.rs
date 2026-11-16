@@ -14189,6 +14189,37 @@ fn spliced_names(e: &Expr, out: &mut HashSet<String>) {
     }
 }
 
+/// An inline clause may refer to a published frame binder directly, not just
+/// through a C antiquotation. Do not elide a binder such a clause names.
+fn spliced_identifier(e: &Expr, name: &str) -> bool {
+    let m = |e: &Expr| spliced_identifier(e, name);
+    match &e.val {
+        ExprT::InlinePulse(code, _) => code.tokens.iter().any(|t| match t {
+            InlinePulseToken::Verbatim(t) | InlinePulseToken::WitnessAntiquot(t) => t
+                .text
+                .val
+                .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
+                .any(|word| word == name),
+            InlinePulseToken::RValueAntiquot { expr, .. }
+            | InlinePulseToken::LValueAntiquot { expr, .. } => m(expr),
+            _ => false,
+        }),
+        ExprT::Cast(e, _)
+        | ExprT::UnOp(_, e)
+        | ExprT::Deref(e)
+        | ExprT::Ref(e)
+        | ExprT::Old(e)
+        | ExprT::Member(e, _)
+        | ExprT::VAttr(_, e)
+        | ExprT::Forall(_, _, e)
+        | ExprT::Exists(_, _, e) => m(e),
+        ExprT::BinOp(_, a, b) | ExprT::Index(a, b) => m(a) || m(b),
+        ExprT::Cond(a, b, c) => m(a) || m(b) || m(c),
+        ExprT::FnCall(_, args) => args.iter().any(|a| m(a)),
+        _ => false,
+    }
+}
+
 /// The C objects a clause's spliced fragments *read*.
 ///
 /// `spliced_names` collects only `$&(x)`, because what it is for is deciding
@@ -17317,6 +17348,17 @@ impl<'a> Body<'a> {
                 Some((path, name))
             }
             _ => None,
+        }
+    }
+
+    fn tracked_field_base(&self, e: &Expr) -> bool {
+        if self.unalias(e).is_some() {
+            return true;
+        }
+        match &strip_vattr(e).val {
+            ExprT::Deref(p) => self.own_item(p).is_some() || self.tracked_field_base(p),
+            ExprT::Member(base, _) => self.tracked_field_base(base),
+            _ => false,
         }
     }
 
@@ -23543,7 +23585,10 @@ impl<'a> Body<'a> {
                 // ownership the pointer is read out of is scattered, the
                 // pointee focused down to the field, and both closed after
                 // the call. Storage the callee is to fill is not handled.
-                if out {
+                // A plain pointer loaded from its local slot may already
+                // have been focused by explicit ghost code. Only recorded
+                // member/getter aliases and deep-owned paths opt in here.
+                if out || (aliased.is_none() && !self.tracked_field_base(base)) {
                     continue;
                 }
                 let read_only = consts.get(i) == Some(&true);
@@ -25673,6 +25718,13 @@ impl<'a> Body<'a> {
             // A `const` pointee is held at a fraction the body cannot write
             // with, so it is still what it was on entry.
             if o.fixed {
+                let b = format!("inv_val_{}", o.base);
+                if clause.iter().any(|e| spliced_identifier(e, &b)) {
+                    // Retain the legacy name requested by hand-written
+                    // invariants without changing the fixed resource key.
+                    binders.push(format!("({}: {})", b, o.vty));
+                    owns.push(format!("pure ({} == {})", b, o.entry));
+                }
                 owns.push(format!("{}{}", o.pre, o.entry));
                 if let Some(d) = &o.own {
                     owns.push(format!("{}_own {} {} {}", d.sn, o.entry, d.perm, d.entry));
