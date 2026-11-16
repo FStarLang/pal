@@ -144,6 +144,23 @@ struct ctx *get_ctx(union req *r)
     return r->params.ctx;
 }
 
+/* A contract reaches through the owned pointer: the union's ownership is the
+   `_owning` member's, so the facts about `ctx->count` come from it. */
+uint32_t count_at_least(union req *r)
+    _requires(r->params.ctx->count >= 1)
+    _ensures(return >= 1)
+    _ensures(r->params.ctx->count == _old(r->params.ctx->count))
+{
+    return r->params.ctx->count;
+}
+
+uint32_t call_count_at_least(union req *r)
+    _requires(r->params.ctx->count >= 2)
+    _ensures(r->params.ctx->count == _old(r->params.ctx->count))
+{
+    return count_at_least(r);
+}
+
 /* A getter macro hands back the owning member's address; a store through it
    is a store into that member, and leaves `ctx` where it was. */
 #define params_of(r) (&(r)->params)

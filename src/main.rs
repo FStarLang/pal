@@ -329,6 +329,12 @@ fn main() {
     }
 
     let t = Instant::now();
+    pass::collapse_unions::collapse_unions(&mut combined_tu);
+    if cli.time_passes {
+        eprintln!("  collapse_unions: {:.3}s", t.elapsed().as_secs_f64());
+    }
+
+    let t = Instant::now();
     pass::normalize_casts::normalize_casts(&mut combined_tu);
     if cli.time_passes {
         eprintln!("  normalize_casts: {:.3}s", t.elapsed().as_secs_f64());

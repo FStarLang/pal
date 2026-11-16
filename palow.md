@@ -1408,6 +1408,18 @@ machine primitives, but note that their *specifications* are written entirely
 in terms of the derived layer-1 predicates, so they add operations rather than
 new facts about memory.
 
+### Unions of one integer type
+
+An `_overlay` union with two or more members that all have the same integer
+type, none refined, and no `_owning` member, is that integer: C uses it to rename a field
+while keeping the old name for readers, and every member reads the same bytes
+the same way. A union that is not `_overlay` is left as it is, since its active
+member is a tag that a specification may rely on.
+A pass before emission (`collapse_unions`) replaces the union type with the
+integer type, `e.m` with `e`, `(U){.m = v}` with `v`, and `e.m._active` with
+`true`, so no contract has to say which member is active
+(`union_same_type`).
+
 ### Overlay unions
 
 An ordinary union is a tagged value: one member is live, and writing another
@@ -1498,6 +1510,17 @@ the whole arm, and a store through it uses `_switch_m`. In contracts,
 `r->A.B.C` means `union_U_get_A(...).B.C`, `_active(r->A)` means
 `union_U_active_A`, and there is no tag guard: the read is well defined
 exactly when its bytes are, which is what the body's read checks.
+
+A struct that holds an overlay union has no whole-value writer either, so
+`x = (T){ ... }` into one is taken apart (`split_overlay_init`): a store per
+field -- the ones the literal leaves out get their C zero -- and, for the
+overlay union's part, a store to the arm the literal initializes, recursively
+while the part still holds an overlay and, inside the arm, down to its scalars,
+since a whole member of an overlay union is not stored (`overlay_struct_literal`).
+C leaves the bytes of the union outside the initialized member unspecified, so
+the split is made only when that member -- an omitted union's first -- covers
+every byte of the union without padding; otherwise the literal is refused
+(`overlay_struct_literal_stale_bad`).
 
 `_unchanged(lv)` in a postcondition says the object `lv` names has the bytes
 it had on entry. Inside an overlay union it is
@@ -2363,7 +2386,13 @@ Limitations:
    leaves the pointer alone says so (`_ensures(h->s == _old(h->s))`) and the
    assertion is the solver's; a call on the right of a store through the alias
    is bound first, and any other call in a statement that uses it is refused.
-   Handing the pointer itself
+   A pointer bound to a call whose contract says what it returns --
+   `q = get(o)` with `get` declared `_ensures(return == &o->in)` -- is an alias
+   of that place, with the call's arguments for the callee's parameters. The
+   call is still made, its result is asserted to be the place's address, and
+   any pointer the place loads is bound after the call. The arguments the
+   place mentions have to be plain names, and `PATH` has to be reached through
+   a pointer parameter. Handing the pointer itself
    to something else is still refused, because that hands out ownership of the
    place, which is the focus-across-statements problem again.
 
@@ -7859,3 +7888,45 @@ Limitations:
     are checked the same way (`alias_loaded_pointer`,
     `alias_loaded_pointer_bad`, `alias_loaded_pointer_call_bad`,
     `alias_loaded_pointer_assert_bad`).
+
+93. **Aliases bound by a getter.** `q = get(o); q->a = 1;` was refused ("a
+    dereference of local `q`, whose target the contract does not grant")
+    even when `get` says `_ensures(return == &o->in)`, while `q = &o->in`
+    went through. `alias_map` now reads such a contract (`returned_place`)
+    and makes `q` an alias of `o->in`; the emitter makes the call and asserts
+    `result == &o->in`, snapshots of loads in the place are taken after the
+    call, and `q = NULL; ... q = get(o)` drops the dead init as for `&`. The
+    binding is no longer mistaken for a store through `q` by
+    `split_alias_stores`. The call's arguments are read before it, so an
+    alias with snapshots among them is checked as at any other use
+    (`alias_call_result`, `alias_call_result_bad`,
+    `alias_getter_arg_stale_bad`).
+94. **Literals stored into a struct that holds an overlay union.**
+    `p->in = (struct s){0}` failed in F* ("Identifier not found:
+    struct_s_write"): such a struct has no whole-value writer, but the
+    emitter called one. The store is now split into a store per field, with
+    omitted fields zeroed and an overlay union's part stored to its
+    initialized arm (an omitted union's first member), field by field when
+    the arm is a struct. C leaves the union's other bytes unspecified, so a
+    store to the arm alone, which keeps them, is the C store only when the
+    arm covers every byte of the union with no padding; any other such
+    literal is refused (`overlay_struct_literal`,
+    `overlay_struct_literal_stale_bad`).
+95. **`_assert(p != NULL)` on an owned parameter.** It failed even though the
+    contract grants `p`'s pointee: Pulse does not derive non-nullness from a
+    points-to by itself. Before an assertion, each `p != NULL` conjunct over a
+    parameter whose pointee is granted whole now calls the type's
+    `_pts_to_not_null` lemma, and an overlay union has one
+    (`union_U_pts_to_not_null`) (`assert_param_not_null`).
+96. **Contracts through an `_owning` member.** A contract that read through an
+    owned pointer of an overlay union's `_owning` member, as in
+    `_requires(r->params.ctx->count >= 1)`, was weakened ("whose ownership
+    the contract does not state"), because contract paths looked only for a
+    struct's ownership. The union's ownership is that member's struct's, so
+    such a path now reads it there (`overlay_union_own`).
+97. **Overlay unions of one integer type.** Reading one member of such a union
+    needed that member's bytes to be readable, which callers had no way to know and had to be
+    told through a `_requires` on every function on the way. The union is now
+    the integer (see "Unions of one integer type") (`union_same_type`). A
+    member with a refinement keeps the union an overlay, since one type
+    would lose the refinement or impose it on the other members.

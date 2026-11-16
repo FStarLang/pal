@@ -2619,7 +2619,9 @@ fn not_null_lemma(tds: &Typedefs, pt: &Type, uninit: bool) -> Option<String> {
         "pts_to_not_null"
     };
     match &peel(tds, pt).val {
-        TypeT::TypeRef(TypeRefKind::Union(_)) => None,
+        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+            (!uninit && is_overlay(tds, &n.val)).then(|| format!("{}_{}", pn, suffix))
+        }
         TypeT::TypeRef(TypeRefKind::Struct(n)) => {
             let si = tds.structs.get(&*n.val)?;
             let flex = matches!(
@@ -3601,6 +3603,28 @@ impl<'a> Spec<'a> {
             {
                 let owner = self.own_field(parent, &field.val, w)?;
                 return Ok(format!("(({}).own_{})", owner, f));
+            }
+            // The `_owning` arm of an overlay union: the union's ownership is
+            // that arm's struct's.
+            if let ExprT::Member(parent, arm) = &strip_vattr(base).val
+                && let Ok(ty) = self.ty_of(parent)
+                && let TypeT::TypeRef(TypeRefKind::Union(n)) = &peel(self.tds, &ty).val
+                && self
+                    .tds
+                    .unions
+                    .get(&*n.val)
+                    .and_then(|u| u.own.as_ref())
+                    .is_some_and(|o| o.arm == *arm.val)
+                && let Some((pre, post)) = self.owns.get(&self.value(parent, w)?)
+            {
+                let chosen = match w {
+                    When::Post => post,
+                    When::Pre | When::Old => pre,
+                };
+                return match chosen {
+                    Some(o) => Ok(format!("(({}).own_{})", o, f)),
+                    None => Err(format!("`.{}` has no value here", f)),
+                };
             }
             return Err(format!(
                 "`.{}`, whose ownership the contract does not state",
@@ -9907,7 +9931,11 @@ fn emit_overlay_union(tds: &Typedefs, name: &str) -> String {
          mem_pts_to a p u ** pure (aligned a {un}_alignof)\n\n\
          let {un}_pts_to_uninit ([@@@mkey] a: ptr) : slprop =\n  \
          exists* b. mem_pts_to a 1.0R b\n             \
-         ** pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof)\n\n"
+         ** pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof)\n\n\
+         ghost fn {un}_pts_to_not_null (a: ptr) (#p: perm) (#u: {un})\n  \
+         preserves {un}_pts_to a p u\n  \
+         ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
+         {{\n  unfold {un}_pts_to a p u;\n  mem_pts_to_not_null a;\n  fold {un}_pts_to a p u;\n}}\n\n"
     );
     // An array member has no functions of its own: its elements are read and
     // written by the scalar accessors below, at constant subscripts.
@@ -14235,7 +14263,9 @@ pub fn emit_palow(
             aliases: {
                 let mut e = base.clone();
                 e.push_fn_decl_args_for_body(&d.decl);
-                alias_map(&d.body, &|x| ptr_base(&tds, &e, x))
+                alias_map(&d.body, &|x| ptr_base(&tds, &e, x), &|x| {
+                    returned_place(&e, x)
+                })
             },
             ..Touched::default()
         };
@@ -25817,6 +25847,12 @@ impl<'a> Body<'a> {
         if let Some(s2) = self.split_byte_field(s)? {
             return self.stmt(&s2);
         }
+        if let Some(parts) = self.split_overlay_init(s)? {
+            for p in &parts {
+                self.stmt(p)?;
+            }
+            return Ok(());
+        }
         self.check_alias_snaps(s)?;
         let r = self.stmt_inner(s);
         let close = std::mem::take(&mut self.pending_close);
@@ -25831,6 +25867,164 @@ impl<'a> Body<'a> {
         Ok(())
     }
 
+    /// Before `_assert(p != NULL)`, the fact that `p` is not null, from the
+    /// points-to of a parameter whose pointee the contract grants whole: Pulse
+    /// does not derive it from the resource by itself.
+    fn not_null_facts(&mut self, e: &Expr) {
+        fn tested(e: &Expr, out: &mut Vec<String>) {
+            match &strip_vattr(strip_casts(e)).val {
+                ExprT::BinOp(BinOp::LogAnd, a, b) => {
+                    tested(a, out);
+                    tested(b, out);
+                }
+                ExprT::UnOp(UnOp::Not, x) => {
+                    if let ExprT::BinOp(BinOp::Eq, a, b) = &strip_vattr(strip_casts(x)).val {
+                        for (v, z) in [(a, b), (b, a)] {
+                            if is_zero(strip_casts(z))
+                                && let ExprT::Var(x) = &strip_vattr(strip_casts(v)).val
+                            {
+                                out.push(x.val.to_string());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut vs = Vec::new();
+        tested(e, &mut vs);
+        for x in vs {
+            if !self.params.contains(&x)
+                || !self.granted.contains(&x)
+                || self.pieces.contains(&x)
+                || (self.guarded.contains(&x) && !self.unguarded.contains(&x))
+                || self.slots.iter().any(|s| s.name == x)
+            {
+                continue;
+            }
+            let Ok(t) = self.ty_of(
+                &ExprT::Var(Rc::<str>::from(x.as_str()).with_loc(e.loc.clone()))
+                    .with_loc(e.loc.clone()),
+            ) else {
+                continue;
+            };
+            if let TypeT::Pointer(pt, _) = &peel(self.tds, &t).val
+                && extent(self.tds, &t) == Some(Extent::One)
+                && let Some(l) = not_null_lemma(self.tds, pt, false)
+            {
+                self.lines.push(format!("{} var_{};", l, x));
+            }
+        }
+    }
+
+    /// `x = (T){...}` for a `T` with an overlay union in it, one field at a
+    /// time. Such a value is bytes and has no whole-value writer (see
+    /// `holds_overlay`), so the literal is taken apart into a store per
+    /// field, and an overlay union's literal into a store to the arm it
+    /// initializes. `None` when the statement is not one of these.
+    ///
+    /// C leaves the bytes of a union outside the member a literal initializes
+    /// unspecified -- an omitted union's first member included -- so a store
+    /// to that member alone, which keeps the old bytes, is the C store only
+    /// when the member is every byte of the union. Any other is refused.
+    fn split_overlay_init(&self, s: &Stmt) -> Result<Option<Vec<Rc<Stmt>>>, String> {
+        fn go(
+            b: &Body,
+            lhs: &Rc<Expr>,
+            rhs: &Rc<Expr>,
+            loc: &Rc<SourceInfo>,
+            in_arm: bool,
+            out: &mut Vec<Rc<Stmt>>,
+        ) -> Result<bool, String> {
+            // Inside an arm of an overlay union a struct is taken apart too:
+            // a store of a whole member is refused there (C11 6.2.6.1p7).
+            let whole = in_arm || b.ty_of(lhs).is_ok_and(|t| holds_overlay(b.tds, &t));
+            match &strip_vattr(rhs).val {
+                ExprT::StructInit(n, fs) if whole => {
+                    let Some(si) = b.tds.structs.get(&*n.val) else {
+                        return Ok(false);
+                    };
+                    for f in &si.fields {
+                        let name = Rc::<str>::from(f.name.as_str()).with_loc(lhs.loc.clone());
+                        let m = ExprT::Member(lhs.clone(), name).with_loc(lhs.loc.clone());
+                        // C zeroes the fields an initialiser leaves out.
+                        let e = match fs.iter().find(|(i, _)| *i.val == *f.name) {
+                            Some((_, e)) => e.clone(),
+                            None => match zero_expr(b.tds, &f.ty, &lhs.loc) {
+                                Some(z) => z,
+                                None => return Ok(false),
+                            },
+                        };
+                        if !go(b, &m, &e, loc, in_arm, out)? {
+                            return Ok(false);
+                        }
+                    }
+                }
+                ExprT::UnionInit(n, arm, e) if whole => {
+                    let m = ExprT::Member(lhs.clone(), arm.clone()).with_loc(lhs.loc.clone());
+                    let ui = b.tds.unions.get(&*n.val);
+                    let overlay = ui.is_some_and(|u| u.overlay);
+                    if let Some(ui) = ui
+                        && overlay
+                        && !ui.members.iter().any(|x| {
+                            *x.name == *arm.val && x.size == ui.size && fills(b.tds, &x.ty)
+                        })
+                    {
+                        return Err(format!(
+                            "a literal that initializes `.{}` of union `{}`, which leaves bytes of the union unspecified",
+                            arm.val, n.val
+                        ));
+                    }
+                    return go(b, &m, e, loc, in_arm || overlay, out);
+                }
+                _ => out.push(StmtT::Assign(lhs.clone(), rhs.clone()).with_loc(loc.clone())),
+            }
+            Ok(true)
+        }
+        // Whether a store of every scalar in a value of `ty` writes all of its
+        // bytes: no padding, no bit-fields.
+        fn fills(tds: &Typedefs, ty: &Rc<Type>) -> bool {
+            match &peel(tds, ty).val {
+                TypeT::Int { .. }
+                | TypeT::Bool
+                | TypeT::SizeT
+                | TypeT::PtrdiffT
+                | TypeT::Pointer(..)
+                | TypeT::FnPtr { .. } => true,
+                TypeT::FixedArray(t, _) => fills(tds, t),
+                TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+                    let Some(si) = tds.structs.get(&*n.val) else {
+                        return false;
+                    };
+                    let mut at = 0;
+                    for f in &si.fields {
+                        if f.offset != at || !fills(tds, &f.ty) {
+                            return false;
+                        }
+                        at += f.size;
+                    }
+                    si.bitfields.is_empty() && at == si.size
+                }
+                // A union member is stored through one of its own arms,
+                // which is checked when it is.
+                TypeT::TypeRef(TypeRefKind::Union(n)) => tds.unions.contains_key(&*n.val),
+                _ => false,
+            }
+        }
+        let StmtT::Assign(lhs, rhs) = &s.val else {
+            return Ok(None);
+        };
+        if !matches!(
+            &strip_vattr(rhs).val,
+            ExprT::StructInit(..) | ExprT::UnionInit(..)
+        ) || !self.ty_of(lhs).is_ok_and(|t| holds_overlay(self.tds, &t))
+        {
+            return Ok(None);
+        }
+        let mut out = Vec::new();
+        Ok(go(self, lhs, rhs, &s.loc, false, &mut out)?.then_some(out))
+    }
+
     /// Prove, before a statement that uses an alias, that each pointer its
     /// place loads still holds what it held when the alias was bound. Only
     /// then is re-evaluating the place the same as reading C's pointer.
@@ -25839,11 +26033,16 @@ impl<'a> Body<'a> {
             return Ok(());
         }
         let exprs: Vec<&Rc<Expr>> = match &s.val {
-            // Binding the alias is not a use of it.
-            StmtT::Assign(lhs, _)
+            // Binding the alias is not a use of it, but a getter's arguments
+            // are read before the call that binds it.
+            StmtT::Assign(lhs, rhs)
                 if lvalue_name(lhs).is_some_and(|q| self.aliases.contains_key(&q)) =>
             {
-                vec![]
+                if matches!(&strip_casts(rhs).val, ExprT::FnCall(..)) {
+                    vec![rhs]
+                } else {
+                    vec![]
+                }
             }
             StmtT::Call(e) | StmtT::Let(_, _, e) | StmtT::Return(Some(e)) => vec![e],
             StmtT::Assign(l, r) => vec![l, r],
@@ -25892,6 +26091,11 @@ impl<'a> Body<'a> {
                 // A call in a specification is to a pure function: it changes
                 // nothing the check covers.
                 StmtT::Assert(_) | StmtT::GhostStmt(_) => true,
+                StmtT::Assign(l, r)
+                    if lvalue_name(l).is_some_and(|q| self.aliases.contains_key(&q)) =>
+                {
+                    single(r)
+                }
                 StmtT::Assign(l, r) => {
                     !has_call(l)
                         && single(r)
@@ -26055,6 +26259,15 @@ impl<'a> Body<'a> {
                     if (self.aliases.contains_key(&v) && !self.stored_aliases.contains(&v))
                         || self.is_array_alias(&v)
                     {
+                        // An alias bound to a call's result: the call still
+                        // runs, and its result has to be the place's address.
+                        if matches!(&strip_casts(rhs).val, ExprT::FnCall(..))
+                            && let Some(place) = self.aliases.get(&v).cloned()
+                        {
+                            let r = self.rvalue(rhs)?;
+                            let at = self.rvalue(&ExprT::Ref(place).with_loc(rhs.loc.clone()))?;
+                            self.lines.push(format!("assert (pure ({} == {}));", r, at));
+                        }
                         return Ok(());
                     }
                 }
@@ -26301,6 +26514,7 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Assert(e) => {
+                self.not_null_facts(e);
                 let p = self.stmt_assertion(e)?;
                 self.lines.push(format!("assert ({});", p));
                 if is_false_lit(e) {
@@ -29121,6 +29335,98 @@ fn returned_arg(env: &Env, g: &Ident) -> Option<usize> {
     }
 }
 
+/// The place a call returns the address of, by its callee's contract: the
+/// `PATH` of an `_ensures(return == &PATH)` conjunct, with the call's arguments
+/// for the callee's parameters. `PATH` has to be reached through a pointer
+/// parameter -- `&p->f`, `&p->a->b`, never the callee's own copy of a
+/// parameter -- and each argument it mentions has to be a plain name, so that
+/// re-reading the place after the call reads it through the same pointers the
+/// callee was given. A getter returning the address of a field is how C hands
+/// out an interior pointer, and the place is what lets the caller's accesses
+/// through the result go to the field the caller already owns.
+fn returned_place(env: &Env, e: &Expr) -> Option<Rc<Expr>> {
+    fn conjuncts<'a>(e: &'a Rc<Expr>, out: &mut Vec<&'a Rc<Expr>>) {
+        match &strip_casts(e).val {
+            ExprT::BinOp(BinOp::LogAnd, l, r) => {
+                conjuncts(l, out);
+                conjuncts(r, out);
+            }
+            _ => out.push(e),
+        }
+    }
+    fn place_ok(p: &Expr, params: &[Option<String>]) -> bool {
+        match &strip_vattr(p).val {
+            ExprT::Member(b, _) => place_ok(b, params),
+            ExprT::Index(b, i) => {
+                matches!(&strip_vattr(i).val, ExprT::IntLit(..)) && place_ok(b, params)
+            }
+            ExprT::Deref(x) => ptr_ok(x, params),
+            _ => false,
+        }
+    }
+    fn ptr_ok(x: &Expr, params: &[Option<String>]) -> bool {
+        match &strip_vattr(x).val {
+            ExprT::Var(v) => params.iter().any(|p| p.as_deref() == Some(&*v.val)),
+            ExprT::Cast(y, _) => ptr_ok(y, params),
+            _ => place_ok(x, params),
+        }
+    }
+    let ExprT::FnCall(g, args) = &strip_casts(e).val else {
+        return None;
+    };
+    let decl = env.lookup_fn(g)?;
+    if decl.args.len() != args.len() {
+        return None;
+    }
+    let params: Vec<Option<String>> = decl
+        .args
+        .iter()
+        .map(|a| a.name.as_ref().map(|n| n.val.to_string()))
+        .collect();
+    let mut cs = Vec::new();
+    for e in decl.ensures.iter() {
+        conjuncts(e, &mut cs);
+    }
+    let mut found = None;
+    for c in cs {
+        let ExprT::BinOp(BinOp::Eq, l, r) = &strip_casts(c).val else {
+            continue;
+        };
+        for (a, b) in [(l, r), (r, l)] {
+            if matches!(&strip_casts(a).val, ExprT::Var(v) if &*v.val == "return")
+                && let ExprT::Ref(p) = &strip_casts(b).val
+                && place_ok(p, &params)
+            {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(p.clone());
+            }
+        }
+    }
+    let mut place = found?;
+    // Two steps, so that an argument named like another parameter is not
+    // substituted a second time.
+    for (k, p) in params.iter().enumerate() {
+        let Some(p) = p else { continue };
+        let tmp = ExprT::Var(Rc::<str>::from(format!("__pal_param_{}", k)).with_loc(g.loc.clone()))
+            .with_loc(place.loc.clone());
+        place = subst_var(&place, p, &tmp)?;
+    }
+    for (k, a) in args.iter().enumerate() {
+        let mut used = Touched::default();
+        touch_expr(&place, &mut used);
+        if !used.vars.contains(&format!("__pal_param_{}", k)) {
+            continue;
+        }
+        if !matches!(&strip_casts(a).val, ExprT::Var(_)) {
+            return None;
+        }
+        place = subst_var(&place, &format!("__pal_param_{}", k), a)?;
+    }
+    Some(place)
+}
+
 /// The array parameter each pointer the body walks is a pointer into.
 ///
 /// `for (; *s; s++)` moves `s` rather than indexing it, so the ownership the
@@ -29519,7 +29825,11 @@ fn ptr_base(tds: &Typedefs, env: &Env, e: &Expr) -> bool {
     }
 }
 
-fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, Rc<Expr>> {
+fn alias_map(
+    body: &Stmts,
+    ptr_base: &dyn Fn(&Expr) -> bool,
+    call_place: &dyn Fn(&Expr) -> Option<Rc<Expr>>,
+) -> HashMap<String, Rc<Expr>> {
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
 
@@ -29539,9 +29849,24 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
         let StmtT::Assign(lhs, rhs) = &st.val else {
             continue;
         };
-        let (Some(q), ExprT::Ref(place)) = (lvalue_name(lhs), &strip_vattr(rhs).val) else {
+        // `q = get(o)`, where `get`'s contract says it returns `&o->f`, is
+        // `q = &o->f` with a call in front. The emitter makes the call and
+        // proves its result is that address, so the alias is checked like
+        // any other. Taking `q`'s address would store the result, which the
+        // alias does not, so that case stays a pointer object.
+        let from_call = lvalue_name(lhs)
+            .filter(|q| !t.addressed.contains(q))
+            .and_then(|_| call_place(rhs));
+        let (Some(q), Some(place)) = (
+            lvalue_name(lhs),
+            from_call.or_else(|| match &strip_vattr(rhs).val {
+                ExprT::Ref(place) => Some(place.clone()),
+                _ => None,
+            }),
+        ) else {
             continue;
         };
+        let place = &place;
         if !locals.contains(&q) {
             continue;
         }
@@ -29860,12 +30185,23 @@ fn derived_ptr(e: &Expr) -> bool {
 /// of a block and binding it later, and the `NULL` is never read: the next
 /// top-level statement to mention `q` overwrites it. That dead store is a
 /// second rebinding of `q`, which would make it an object in `alias_map`'s
-/// eyes, so it is dropped here. `None` when there was nothing to do.
-fn drop_dead_alias_inits(body: &Stmts) -> Option<Stmts> {
+/// eyes, so it is dropped here. `q = get(o)`, for a `get` that returns the
+/// address of a place (`returned_place`), binds an alias the same way.
+/// `None` when there was nothing to do.
+fn drop_dead_alias_inits(
+    body: &Stmts,
+    call_place: &dyn Fn(&Expr) -> Option<Rc<Expr>>,
+) -> Option<Stmts> {
     let assigned_ref = |st: &Stmt| match &st.val {
         StmtT::Assign(lhs, rhs) if matches!(&strip_vattr(rhs).val, ExprT::Ref(_)) => {
             lvalue_name(lhs)
         }
+        // The call reads its arguments, so `q = get(q)` reads the `NULL`.
+        StmtT::Assign(lhs, rhs) if call_place(rhs).is_some() => lvalue_name(lhs).filter(|q| {
+            let mut t = Touched::default();
+            touch_expr(rhs, &mut t);
+            !t.vars.contains(q)
+        }),
         _ => None,
     };
     let mut dead = HashSet::new();
@@ -30186,6 +30522,13 @@ fn snapshot_alias_loads(
             };
             place(&mut cx, at);
             let (found, mut held) = (cx.found, cx.inherited);
+            // A place a call returned is read in the state the call leaves.
+            let after_call = matches!(&st.val, StmtT::Assign(_, rhs)
+                if matches!(&strip_casts(rhs).val, ExprT::FnCall(..)));
+            if after_call {
+                env.push_stmt(st);
+                out.push(st.clone());
+            }
             for l in found {
                 if held.iter().any(|(h, _)| **h == *l) {
                     continue;
@@ -30203,6 +30546,9 @@ fn snapshot_alias_loads(
             }
             if !held.is_empty() {
                 snaps.insert(q, held);
+            }
+            if after_call {
+                continue;
             }
         }
         env.push_stmt(st);
@@ -30239,8 +30585,12 @@ fn split_alias_stores(env: &Env, body: &Stmts, snaps: &AliasSnaps, k: &mut usize
     for st in body {
         let loc = &st.loc;
         let v = match &st.val {
+            // `q = get(h)` binds the alias rather than storing through it.
             StmtT::Assign(lhs, rhs)
-                if has_call(rhs) && !has_call(lhs) && mentions_snapped(lhs, snaps) =>
+                if has_call(rhs)
+                    && !has_call(lhs)
+                    && mentions_snapped(lhs, snaps)
+                    && !lvalue_name(lhs).is_some_and(|q| snaps.contains_key(&q)) =>
             {
                 if let Ok(ty) = env.infer_expr(rhs) {
                     *k += 1;
@@ -30579,7 +30929,7 @@ fn emit_body(
         None => defn,
     };
     let undead;
-    let defn = match drop_dead_alias_inits(&defn.body) {
+    let defn = match drop_dead_alias_inits(&defn.body, &|x| returned_place(&env, x)) {
         Some(body) => {
             undead = FnDefn {
                 body,
@@ -30637,7 +30987,9 @@ fn emit_body(
         }
         None => defn,
     };
-    let aliases = alias_map(&defn.body, &|x| ptr_base(tds, &env, x));
+    let aliases = alias_map(&defn.body, &|x| ptr_base(tds, &env, x), &|x| {
+        returned_place(&env, x)
+    });
     let (snapped, alias_snaps) = snapshot_alias_loads(&env, &defn.body, &aliases);
     let snapshotted;
     let defn = match snapped {
@@ -31038,6 +31390,35 @@ fn int_lit(e: &Expr) -> Option<u64> {
         ExprT::Cast(inner, _) => int_lit(inner),
         _ => None,
     }
+}
+
+/// The C zero of `ty` as an expression: what a field an initialiser leaves
+/// out holds. A union's zero is its first member's, as in C. `None` for a
+/// type with no such expression (an array, a float).
+fn zero_expr(tds: &Typedefs, ty: &Rc<Type>, loc: &Rc<SourceInfo>) -> Option<Rc<Expr>> {
+    let lit = |t: Rc<Type>| ExprT::IntLit(Rc::new(BigInt::from(0)), t).with_loc(loc.clone());
+    Some(match &peel(tds, ty).val {
+        TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT => lit(ty.clone()),
+        TypeT::Bool => ExprT::BoolLit(false).with_loc(loc.clone()),
+        TypeT::Pointer(..) | TypeT::FnPtr { .. } => {
+            let int = TypeT::Int {
+                signed: true,
+                width: 32,
+            }
+            .with_loc(loc.clone());
+            ExprT::Cast(lit(int), ty.clone()).with_loc(loc.clone())
+        }
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+            ExprT::StructInit(n.clone(), Vec::new()).with_loc(loc.clone())
+        }
+        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+            let m = tds.unions.get(&*n.val)?.members.first()?;
+            let z = zero_expr(tds, &m.ty, loc)?;
+            let arm = Rc::<str>::from(m.name.as_str()).with_loc(loc.clone());
+            ExprT::UnionInit(n.clone(), arm, z).with_loc(loc.clone())
+        }
+        _ => return None,
+    })
 }
 
 fn is_zero(e: &Expr) -> bool {
