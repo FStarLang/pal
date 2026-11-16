@@ -1,2 +1,3 @@
-Subtyping check failed
-Pulse.Lib.C.Palow.Array.walk_ok (FStar.SizeT.v 1sz)
+Func_sep_bad.fst(
+Ill-typed term
+Pulse.Lib.C.Palow.Array.walk_idx 1

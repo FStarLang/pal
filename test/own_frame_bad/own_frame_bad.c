@@ -2,8 +2,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* The record is rebound, so what was known about it before the conditional
-   is not known after it unless the `_ensures` says so. */
+/* The callee may clear `has`. A join cannot recover a fact that one arm
+   does not establish. In particular, do not rely on the checker forgetting
+   a fact that both arms preserve: the consolidated F* retains such facts. */
 
 struct ctx {
     bool has;
@@ -18,7 +19,6 @@ struct req {
 uint32_t get_v(struct req *r)
     _requires(r->c->has)
     _ensures(r->c == _old(r->c))
-    _ensures(r->c->has)
     _ensures(return == r->c->v);
 
 uint32_t pick(struct req *r, bool f)

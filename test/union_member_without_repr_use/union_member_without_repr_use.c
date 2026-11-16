@@ -1,11 +1,11 @@
 #include "pal.h"
 #include <stdint.h>
 
-// Using a union member that has no byte-level representation is rejected
-// at the use.
+// A nested flexible struct still has no byte-level representation. Unlike
+// a direct flexible union member, it cannot get a sized union-arm view.
 typedef struct bitmap {
   uint64_t count;
-  uint64_t data[];
+  struct { uint64_t size; uint64_t data[]; } tail;
 } bitmap;
 
 typedef struct ctx {

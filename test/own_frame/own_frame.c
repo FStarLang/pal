@@ -61,3 +61,17 @@ uint32_t loop(struct req *r, uint32_t k)
     x = get_v(r);
     return x;
 }
+
+/* The stronger Pulse join retains a fact established by both arms even
+   when the annotation only names a live local. */
+uint32_t inferred_pick(struct req *r, bool f)
+    _requires(r->c->has)
+{
+    uint32_t x = 0;
+    if (f)
+        _ensures(_live(x))
+    {
+        x = get_v(r);
+    }
+    return get_v(r);
+}
