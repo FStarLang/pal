@@ -18330,14 +18330,13 @@ impl<'a> Body<'a> {
                 )
             })?;
             let (a, base_close_read, base_close_write) = self.base_addr(base, writing)?;
-            // A nested overlay union lent to a callee that cannot store
-            // through it comes back as the very bytes it was, so the union
-            // keeps its value term, and what is keyed on it -- its ownership
-            // -- still matches.
+            // A struct arm or nested overlay union lent read-only comes
+            // back as the very bytes it was (including padding), so the
+            // union keeps its value term and the ownership keyed on it.
             let rd = if self.const_lend
                 && matches!(
                     peel(self.tds, &fty).val,
-                    TypeT::TypeRef(TypeRefKind::Union(_))
+                    TypeT::TypeRef(TypeRefKind::Struct(_) | TypeRefKind::Union(_))
                 ) {
                 "_read"
             } else {
@@ -27765,7 +27764,10 @@ impl<'a> Body<'a> {
                 // the whole state at the join: the author's ownership plus
                 // everything they did not speak for.
                 let pure_join = !states_own && ensures.iter().any(|e| !live_only(e));
-                let join = if states_own || pure_join {
+                // Pure clauses travel in `if_fact`, introduced by each arm
+                // and eliminated below. An explicit frame here would omit
+                // that resource (and unrelated caller-owned resources).
+                let join = if states_own {
                     Some(self.join_slprop(
                         ensures,
                         Some(cond),
