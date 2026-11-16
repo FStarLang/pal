@@ -3201,12 +3201,13 @@ impl<'a> Spec<'a> {
             // total is normally the quantifier's own antecedent, so hoisting
             // the condition out would both be ill-typed and claim something
             // much stronger than the source does.
-            ExprT::Forall(v, ty, body) | ExprT::Exists(v, ty, body) => {
+            ExprT::Forall(v, ty, trigs, body) | ExprT::Exists(v, ty, trigs, body) => {
                 let all = matches!(&e.val, ExprT::Forall(..));
                 let fty = fstar_type(self.tds, ty).ok_or_else(|| {
                     format!("a quantifier over {}", describe(self.tds.resolve(ty)))
                 })?;
                 let bound = format!("var_{}", v.val);
+                let pattern;
                 let mut env = self.env.clone();
                 env.push_var_decl(v, ty.clone(), crate::env::LocalDeclKind::RValue);
                 let mut locals = self.locals.clone();
@@ -3236,6 +3237,14 @@ impl<'a> Spec<'a> {
                         walks: self.walks.clone(),
                     };
                     let p = inner.prop(body, w)?;
+                    // A trigger is the term the body reads, translated the
+                    // same way so the pattern matches it, but it states
+                    // nothing: what its translation needs to be defined is
+                    // the body's business, not the pattern's.
+                    let (gm, dm) = (inner.guards.borrow().len(), inner.defined.borrow().len());
+                    pattern = trigger_pattern(v, &bound, trigs, |t| inner.value(t, w))?;
+                    inner.guards.borrow_mut().truncate(gm);
+                    inner.defined.borrow_mut().truncate(dm);
                     // The witness stands for `v` only if the comparison
                     // pinning it reads `v` as just its value: a conversion
                     // that wraps would make `v == w` a congruence instead.
@@ -3274,10 +3283,11 @@ impl<'a> Spec<'a> {
                     }
                 }
                 Ok(format!(
-                    "({} ({}: {}). {})",
+                    "({} ({}: {}). {}{})",
                     if all { "forall" } else { "exists" },
                     bound,
                     fty,
+                    pattern,
                     body
                 ))
             }
@@ -12749,8 +12759,11 @@ fn collect_array_fill_expr(tds: &Typedefs, e: &Expr, out: &mut BTreeMap<String, 
             collect_array_fill_expr(tds, c, out);
         }
         ExprT::MemsetZero(_, x) | ExprT::Free(x) => collect_array_fill_expr(tds, x, out),
-        ExprT::Forall(_, ty, body) | ExprT::Exists(_, ty, body) => {
+        ExprT::Forall(_, ty, trigs, body) | ExprT::Exists(_, ty, trigs, body) => {
             collect_array_fill_type(tds, ty, out);
+            for t in trigs.iter().flatten() {
+                collect_array_fill_expr(tds, t, out);
+            }
             collect_array_fill_expr(tds, body, out);
         }
         _ => {}
@@ -13245,6 +13258,12 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
                 touch_expr(a, t);
             }
         }
+        ExprT::Forall(_, _, trigs, x) | ExprT::Exists(_, _, trigs, x) => {
+            for a in trigs.iter().flatten() {
+                touch_expr(a, t);
+            }
+            touch_expr(x, t);
+        }
         ExprT::Deref(x)
         | ExprT::Member(x, _)
         | ExprT::VAttr(_, x)
@@ -13253,8 +13272,6 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         | ExprT::ContainerOf(x, _, _)
         | ExprT::Old(x)
         | ExprT::Unchanged(x)
-        | ExprT::Forall(_, _, x)
-        | ExprT::Exists(_, _, x)
         | ExprT::UnionInit(_, _, x)
         | ExprT::MallocArray(_, x)
         | ExprT::CallocArray(_, x)
@@ -19852,7 +19869,7 @@ impl<'a> Body<'a> {
             // quantified assertion is translated only when its body turns out
             // to need no memory at all, and the check is made after the fact by
             // seeing whether anything was emitted.
-            ExprT::Forall(v, ty, body) | ExprT::Exists(v, ty, body) => {
+            ExprT::Forall(v, ty, trigs, body) | ExprT::Exists(v, ty, trigs, body) => {
                 let all = matches!(&e.val, ExprT::Forall(..));
                 let fty = fstar_type(self.tds, ty).ok_or_else(|| {
                     format!("a quantifier over {}", describe(self.tds.resolve(ty)))
@@ -19865,6 +19882,12 @@ impl<'a> Body<'a> {
                 let before = self.lines.len();
                 let r = self.prop(body);
                 let emitted = self.lines.len() != before;
+                let mark = self.lines.len();
+                let pattern = match &r {
+                    Ok(_) => trigger_pattern(v, &bound, trigs, |t| self.inline(t)),
+                    Err(_) => Ok(String::new()),
+                };
+                let trigger_reads = self.lines.len() != mark;
                 // As for a contract: the witness is used only when `v == w`
                 // reads `v` as just its value.
                 let witness = match (all, &r) {
@@ -19885,8 +19908,12 @@ impl<'a> Body<'a> {
                     None => self.spec_binders.remove(v.val.as_ref()),
                 };
                 let p = r?;
+                let pattern = pattern?;
                 if emitted {
                     return Err("a quantified assertion whose body reads memory".to_string());
+                }
+                if trigger_reads {
+                    return Err("a `_trigger` that reads memory".to_string());
                 }
                 if let Some((pd, wt)) = witness {
                     let wv = if pd { self.pos_num(wt)? } else { self.num(wt)? };
@@ -19895,10 +19922,11 @@ impl<'a> Body<'a> {
                     }
                 }
                 Ok(format!(
-                    "({} ({}: {}). {})",
+                    "({} ({}: {}). {}{})",
                     if all { "forall" } else { "exists" },
                     bound,
                     fty,
+                    pattern,
                     p
                 ))
             }
@@ -28213,9 +28241,10 @@ fn old_mentions(e: &Expr, names: &HashSet<String>, under: bool) -> bool {
         | ExprT::Deref(a)
         | ExprT::Ref(a)
         | ExprT::Member(a, _)
-        | ExprT::VAttr(_, a)
-        | ExprT::Forall(_, _, a)
-        | ExprT::Exists(_, _, a) => m(a),
+        | ExprT::VAttr(_, a) => m(a),
+        ExprT::Forall(_, _, ts, a) | ExprT::Exists(_, _, ts, a) => {
+            m(a) || ts.iter().flatten().any(|t| m(t))
+        }
         ExprT::BinOp(_, a, b) | ExprT::Index(a, b) => m(a) || m(b),
         ExprT::Cond(a, b, c) => m(a) || m(b) || m(c),
         ExprT::FnCall(_, args) => args.iter().any(|a| m(a)),
@@ -28250,6 +28279,79 @@ fn exists_witness<'a>(v: &Ident, body: &'a Expr) -> Option<(&'a Expr, &'a Expr)>
         }
         _ => None,
     }
+}
+
+/// The `{:pattern ...}` annotation a quantifier's `_trigger`s become, or
+/// nothing when it has none. Each `_trigger(e1, ..., en)` is a multi-pattern
+/// and several are alternatives. `term` translates a trigger exactly as the
+/// body's translation reads the same expression, which is what lets the
+/// pattern match the body's terms once both reach the solver.
+fn trigger_pattern(
+    v: &Ident,
+    bound: &str,
+    trigs: &Triggers,
+    mut term: impl FnMut(&Expr) -> Result<String, String>,
+) -> Result<String, String> {
+    if trigs.is_empty() {
+        return Ok(String::new());
+    }
+    let mut alts = Vec::new();
+    for group in trigs {
+        let mut terms = Vec::new();
+        let mut mentions = false;
+        for t in group {
+            if let Some(why) = not_a_trigger(t) {
+                return Err(format!("a `_trigger` that is {}{}", why, shown_at(t)));
+            }
+            let s = term(t)?;
+            let s = unparen(&s);
+            if s == bound {
+                return Err(format!(
+                    "a `_trigger` that is just the bound variable `{}`{}",
+                    v.val,
+                    shown_at(t)
+                ));
+            }
+            mentions |= mentions_word(s, bound);
+            terms.push(format!("({})", s));
+        }
+        if !mentions {
+            let first = &group[0];
+            return Err(format!(
+                "a `_trigger` that does not mention the bound variable `{}`{}",
+                v.val,
+                shown_at(first)
+            ));
+        }
+        alts.push(terms.join("; "));
+    }
+    Ok(format!("{{:pattern {}}} ", alts.join(r" \/ ")))
+}
+
+/// Why `t` cannot be an SMT pattern, if it plainly cannot: a pattern is a
+/// term to match, and the solver will not match on connectives, comparisons,
+/// conditionals or binders.
+fn not_a_trigger(t: &Expr) -> Option<&'static str> {
+    match &strip_vattr(t).val {
+        ExprT::BinOp(
+            BinOp::LogAnd | BinOp::LogOr | BinOp::Implies | BinOp::Eq | BinOp::Lt | BinOp::LEq,
+            ..,
+        )
+        | ExprT::UnOp(UnOp::Not, _) => Some("a proposition, not a term"),
+        ExprT::Forall(..) | ExprT::Exists(..) => Some("a quantifier"),
+        ExprT::Cond(..) => Some("a conditional expression"),
+        ExprT::BoolLit(_) | ExprT::IntLit(..) | ExprT::FloatLit(..) => Some("a constant"),
+        _ => None,
+    }
+}
+
+/// Whether the F* term `s` mentions the name `x` as a whole identifier.
+fn mentions_word(s: &str, x: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '\'' || c == '.';
+    s.match_indices(x).any(|(i, _)| {
+        !s[..i].chars().next_back().is_some_and(ident)
+            && !s[i + x.len()..].chars().next().is_some_and(ident)
+    })
 }
 
 /// `s` without parentheses that enclose all of it.
@@ -28442,8 +28544,8 @@ fn returned_arg(env: &Env, g: &Ident) -> Option<usize> {
             }
             ExprT::UnOp(_, x)
             | ExprT::Cast(x, _)
-            | ExprT::Forall(_, _, x)
-            | ExprT::Exists(_, _, x) => find(x, params, out),
+            | ExprT::Forall(_, _, _, x)
+            | ExprT::Exists(_, _, _, x) => find(x, params, out),
             ExprT::Cond(a, b, c) => {
                 find(a, params, out);
                 find(b, params, out);

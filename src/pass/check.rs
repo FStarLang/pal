@@ -458,10 +458,13 @@ impl<'a> Checker<'a> {
             ExprT::Live(lval) => self.check_rvalue(env, lval),
             ExprT::Unchanged(lval) => self.check_lvalue(env, lval),
             ExprT::Old(rval) => self.check_rvalue(env, rval),
-            ExprT::Forall(var, ty, body) | ExprT::Exists(var, ty, body) => {
+            ExprT::Forall(var, ty, trigs, body) | ExprT::Exists(var, ty, trigs, body) => {
                 self.check_type(env, ty);
                 let mut env = env.clone();
                 env.push_var_decl(var, ty.clone(), LocalDeclKind::RValue);
+                for t in trigs.iter().flatten() {
+                    self.check_rvalue(&env, t);
+                }
                 self.check_rvalue(&env, body);
             }
             ExprT::StructInit(name, fields) => {

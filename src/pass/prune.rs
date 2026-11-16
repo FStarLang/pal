@@ -270,8 +270,11 @@ fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
         ExprT::BoolLit(_) => {}
         ExprT::Live(v) | ExprT::Unchanged(v) => scan_expr(deps, v),
         ExprT::Old(v) => scan_expr(deps, v),
-        ExprT::Forall(_, ty, body) | ExprT::Exists(_, ty, body) => {
+        ExprT::Forall(_, ty, trigs, body) | ExprT::Exists(_, ty, trigs, body) => {
             scan_type(deps, ty);
+            for t in trigs.iter().flatten() {
+                scan_expr(deps, t);
+            }
             scan_expr(deps, body);
         }
         ExprT::StructInit(name, fields) => {
