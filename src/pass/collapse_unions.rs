@@ -183,9 +183,12 @@ fn expr(env: &Env, c: &Collapsed, e: &mut Expr) {
             expr(env, c, Rc::make_mut(v));
             ty(env, c, t);
         }
-        ExprT::Forall(x, t, body) | ExprT::Exists(x, t, body) => {
+        ExprT::Forall(x, t, triggers, body) | ExprT::Exists(x, t, triggers, body) => {
             let mut inner = env.clone();
             inner.push_var_decl(x, t.clone(), LocalDeclKind::RValue);
+            for g in triggers.iter_mut() {
+                exprs(&inner, c, g);
+            }
             expr(&inner, c, Rc::make_mut(body));
             ty(env, c, t);
         }

@@ -33,6 +33,11 @@ ifneq ($(wildcard pal_opts),)
 PAL_OPTS += $(shell cat pal_opts)
 endif
 
+# Extra F* options for this test, such as a higher `--z3rlimit_factor`.
+ifneq ($(wildcard fstar_opts),)
+FSTAR_EXE += $(shell cat fstar_opts)
+endif
+
 all: verify compile
 
 ifneq ($(wildcard native-check.c),)

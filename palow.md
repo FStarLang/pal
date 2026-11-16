@@ -7786,8 +7786,94 @@ Limitations:
     need only congruence, so each is checked under `--using_facts_from`
     that hides the nested `_repr` definitions; a zero-size field's is left
     visible, since its proof is the definition.
-
-89. **Aliases through loaded pointers.** An alias `q = &h->s->seq` was
+89. **`_cursor_from(s)`: a cursor seeded by an array parameter.** musl's
+    `strtok_r(char *s, const char *sep, char **p)` tokenises `s` when it
+    is not null and resumes from `*p` otherwise; on the first call `*p` is
+    uninitialised. `_nullable _array char *s, ..., _cursor_from(s) char
+    **p` says so: the cursor starts at `s` if `s` is not null and at the
+    incoming `*p` if it is, and only then is `*p` read. The slot's entry
+    ownership is `null_or var_s (ptr_pts_to var_p 1.0R var_p__arr)
+    (ptr_pts_to_uninit var_p)` (`Pulse.Lib.C.Palow.Nullable.null_or`:
+    the first resource when `var_s` is null, the second otherwise), and
+    the cursor's array `p__arr` is owned at `var_s` when it is not null,
+    at the incoming `*p` otherwise; `s` owns nothing of its own. On exit
+    the slot is an ordinary `_cursor`'s. In the contract `_old(*p)` and
+    `(*p)` (in a `_requires`) name that effective start, so the clauses are
+    `_cursor` clauses: `_old((*p)[k])` the entry contents, `_old(*p)[k]`
+    the exit contents, `*p - _old(*p)` where the cursor ended up. The body
+    is musl's unchanged: the test `!s && !(s = *p)` is split so that the
+    seed test is an `if` of its own (`split_seed_and`), whose arms settle
+    the slot (`elim_null_or_null` / `elim_null_or`), the seed becomes the
+    array's base where it is not null, and `s = *p` walks it where it is.
+    `**p` and `*(*p)++ = 0` are hoisted into a fresh local read out of the
+    slot (`hoist_cursor_derefs`), so they are walks of the cursor's array;
+    `(*p)++` itself is a walk. Calls of read-only callees on a cursor
+    position (`strspn(s, sep)`) lend the array as for an `_array`
+    parameter, and a lend to a `const` parameter now hands the array back
+    whole at its old value (`array_lend_whole_at` /
+    `array_return_whole_at`) instead of as an append of the lent slices,
+    which the token clauses could not see through (`lent_index_back`,
+    `append_lent_slices` in Palow.Array). Writable lends keep
+    `array_lend_at` without `lent_index_back`, whose extra facts slowed
+    `wcscat`'s postcondition (`test/array_walk_lend`) past its limit.
+    Three contract changes came with it:
+    - `return - X`, where `X` is a position in an array (`_old(*p)`), is
+      the returned pointer's position in that array (`ret_pos`), so a
+      token's start can be named: `_exists(size_t l0 = return -
+      _old(*p), ...)`. Z3 does not find a `SizeT` witness that no term
+      names, such as `l0 + l`.
+    - Guards (the well-formedness conditions of a subscript or a
+      division) that `&&`, `||` or `==>` copy up from the right operand
+      are marked as implied, and only a `forall`'s premise repeats them;
+      conjunctions, `exists` and whole clauses use the unmarked ones.
+      Along a chain of `&&` this kept the clause linear, not quadratic,
+      in its length. The marking is undone where it would be unsound: under
+      `!`, in the left operand of `||` or `==>`, and on both sides of a
+      `_Bool` `==` (`<==>`), where a guard the right operand implied is no
+      longer implied (`test/contract_guard_negation`,
+      `test/contract_guard_iff_bad`), and loop invariants keep only the
+      guards they need, never the marker.
+    - A test case may carry an `fstar_opts` file whose contents the test
+      Makefile appends to the F\* command line (`cursor_strtok` needs
+      `--z3rlimit_factor 5`, as musl's `strtok_r` does).
+    `test/cursor_strtok` states `strtok_r`'s full behaviour (leading
+    separators skipped, token up to a separator or the terminator, the
+    separator overwritten, `*p` past it or null, null when only
+    separators remain) and verifies in about 7.5 min;
+    `test/cursor_strtok_bad` reads `*p` when `s` is not null and fails
+    (`ptr_pts_to var_p` is not held).
+90. **`_base(d)[k]`: a walked parameter's current contents from its entry
+    position.** musl's `__stpcpy` walks `d` itself, so item 80's
+    `d[(_specint)k - (d - _old(d))]` was the only way to name the current
+    element `k` of the array from where `d` started. `_base(d)[k]` is
+    sugar for exactly that, expanded by the parser, for any expression
+    that is a walked array parameter `d`; it is the current contents, not
+    `_old(d)[k]` (the entry contents). Either spelling is emitted as
+    `Seq.index val_d k`, the array's element `k` with `k` as the index
+    term, not `walk_idx .. + (k - walk_idx ..)`: the same term as a base
+    local's `a[k]` and as the contract's `d[k]`, so the quantifiers over
+    `k` trigger alike and the solver has no arithmetic to undo (musl's
+    `__stpcpy` loops timed out on the long form). `test/array_walk_base_sugar` is
+    stpcpy's byte loop `for (; (*d = *s); s++, d++); return d;` with its
+    full contract; `test/array_walk_base_sugar_bad` is off by one.
+91. **`p += k` over wide elements by a variable count.** A walk step
+    `s += wcsspn(s, sep)` on a `wchar_t *` emitted `array_walk_next ... k
+    (4sz `SizeT.mul` k)`, whose conclusion is conditional on
+    `SizeT.v n == 4 * k`; in `wcstok`'s larger context Z3 did not recover
+    that product for `SizeT.mul`, and the token's position in the array was
+    lost. A step by a variable count over elements wider than a byte now
+    emits `array_walk_next_mul ... q k`, whose conclusion states, from the
+    array's ownership, that `esize * k` fits and the stepped pointer
+    `q +! SizeT.mul esize k` is at index `idx + k` (when that is within
+    the array), so the product is never left to the solver. Constant and
+    byte steps are unchanged. With it musl's `wcstok` (item 89's
+    `strtok_r` over `wchar_t`) keeps the token's position, and every
+    obligation but one return's postcondition verifies; that one times
+    out even at `--z3rlimit_factor 20`, although each of its clauses,
+    asserted separately just before it, verifies: the postcondition
+    (an `exists` over five clauses, with `wcscspn`'s `exists m`) is too
+    large a query, not a missing fact.
+92. **Aliases through loaded pointers.** An alias `q = &h->s->seq` was
     re-evaluated at each use, but `stable_names` only kept the *names* in the
     place fixed, not the pointers it loads through them. After a call that
     stored another pointer into `h->s`, `*q = 5` was emitted as a store to the
@@ -7803,7 +7889,7 @@ Limitations:
     `alias_loaded_pointer_bad`, `alias_loaded_pointer_call_bad`,
     `alias_loaded_pointer_assert_bad`).
 
-90. **Aliases bound by a getter.** `q = get(o); q->a = 1;` was refused ("a
+93. **Aliases bound by a getter.** `q = get(o); q->a = 1;` was refused ("a
     dereference of local `q`, whose target the contract does not grant")
     even when `get` says `_ensures(return == &o->in)`, while `q = &o->in`
     went through. `alias_map` now reads such a contract (`returned_place`)
@@ -7815,7 +7901,7 @@ Limitations:
     alias with snapshots among them is checked as at any other use
     (`alias_call_result`, `alias_call_result_bad`,
     `alias_getter_arg_stale_bad`).
-91. **Literals stored into a struct that holds an overlay union.**
+94. **Literals stored into a struct that holds an overlay union.**
     `p->in = (struct s){0}` failed in F* ("Identifier not found:
     struct_s_write"): such a struct has no whole-value writer, but the
     emitter called one. The store is now split into a store per field, with
@@ -7826,19 +7912,19 @@ Limitations:
     arm covers every byte of the union with no padding; any other such
     literal is refused (`overlay_struct_literal`,
     `overlay_struct_literal_stale_bad`).
-92. **`_assert(p != NULL)` on an owned parameter.** It failed even though the
+95. **`_assert(p != NULL)` on an owned parameter.** It failed even though the
     contract grants `p`'s pointee: Pulse does not derive non-nullness from a
     points-to by itself. Before an assertion, each `p != NULL` conjunct over a
     parameter whose pointee is granted whole now calls the type's
     `_pts_to_not_null` lemma, and an overlay union has one
     (`union_U_pts_to_not_null`) (`assert_param_not_null`).
-93. **Contracts through an `_owning` member.** A contract that read through an
+96. **Contracts through an `_owning` member.** A contract that read through an
     owned pointer of an overlay union's `_owning` member, as in
     `_requires(r->params.ctx->count >= 1)`, was weakened ("whose ownership
     the contract does not state"), because contract paths looked only for a
     struct's ownership. The union's ownership is that member's struct's, so
     such a path now reads it there (`overlay_union_own`).
-94. **Overlay unions of one integer type.** Reading one member of such a union
+97. **Overlay unions of one integer type.** Reading one member of such a union
     needed that member's bytes to be readable, which callers had no way to know and had to be
     told through a `_requires` on every function on the way. The union is now
     the integer (see "Unions of one integer type") (`union_same_type`). A

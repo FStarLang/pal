@@ -58,3 +58,25 @@ ghost fn elim_unless_null (a: ptr) (p: slprop)
 {
   rewrite (unless_null a p) as p;
 }
+
+(* `null_or a p q` is `p` if `a` is null and `q` otherwise. A `_cursor_from(s)`
+   parameter's slot is one: when the seed `s` is null the slot holds the
+   cursor, and when it is not, the slot is only storage. *)
+let null_or (a: ptr) (p q: slprop) : slprop =
+  if is_null a then p else q
+
+ghost fn elim_null_or_null (a: ptr) (p q: slprop)
+  requires null_or a p q
+  requires pure (is_null a)
+  ensures  p
+{
+  rewrite (null_or a p q) as p;
+}
+
+ghost fn elim_null_or (a: ptr) (p q: slprop)
+  requires null_or a p q
+  requires pure (not (is_null a))
+  ensures  q
+{
+  rewrite (null_or a p q) as q;
+}
