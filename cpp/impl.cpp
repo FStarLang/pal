@@ -4160,8 +4160,8 @@ public:
             dyn_cast<StringLiteral>(ann->args_begin()[0]->IgnoreParenCasts());
         if (!lit)
           continue;
-        builder.cursor_from(ctx.mk_ident(toStr(lit->getString()),
-                                         getRange(ann->getRange())));
+        builder.cursor_from(
+            ctx.mk_ident(toStr(lit->getString()), getRange(ann->getRange())));
         break;
       }
     }
