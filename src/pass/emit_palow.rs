@@ -27553,7 +27553,7 @@ impl<'a> Body<'a> {
                     .any(|x| matches!(x.val, StmtT::If { .. }));
                 let c = if nt.is_none()
                     && (matches!(strip_vattr(cond).val, ExprT::FnCall(..))
-                        || (nested && !is_fstar_name(&c)))
+                        || ((nested || !facts.is_empty()) && !is_fstar_name(&c)))
                 {
                     let t = self.fresh("cond");
                     self.lines.push(format!("let {} = {};", t, c));
@@ -28289,6 +28289,11 @@ impl<'a> Body<'a> {
                         .join(r" /\ ");
                     self.lines
                         .push(format!("Pulse.Lib.C.Palow.Local.intro_if_fact ({});", p));
+                    // A fact may read through an owned pointer. Those reads
+                    // are part of this arm, not of the next arm or the join.
+                    let close = std::mem::take(&mut self.pending_close);
+                    self.lines.extend(close);
+                    self.close_own();
                     fact = true;
                 }
                 // Validity seeded inside the arm is the arm's to put down:
