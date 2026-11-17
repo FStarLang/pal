@@ -1,8 +1,9 @@
 name: Package
 
 # Builds the relocatable binary packages (opt/package.sh) for Linux, macOS and
-# Windows, and smoke-tests them on machines without LLVM (opt/package-test.sh).
-# The packages are available as workflow artifacts.
+# Windows, with F* and z3 bundled, and tests them (opt/package-test.sh:
+# translate and verify) on fresh machines without LLVM or F*. The packages are
+# available as workflow artifacts.
 
 on:
   workflow_dispatch:
@@ -30,13 +31,10 @@ jobs:
       run: rustup update stable && rustup default stable
 
     - name: Install F*
-      run: ./opt/install-fstar.sh --link-dir /usr/local/bin
+      run: ./opt/install-fstar.sh --dest "$RUNNER_TEMP/fstar" --no-link
 
     - name: Build package
-      run: make package PACKAGE_OPTS=--check-pulse
-
-    - name: Test package (translate and verify)
-      run: VERIFY=1 make package-test
+      run: make package PACKAGE_OPTS="--fstar $RUNNER_TEMP/fstar"
 
     - uses: actions/upload-artifact@v4
       with:
@@ -47,11 +45,12 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         image: ['ubuntu:22.04', 'ubuntu:24.04', 'debian:12']
     container: ${{ matrix.image }}
     steps:
-    - name: Install test prerequisites (no LLVM)
+    - name: Install test prerequisites (no LLVM, no F*)
       run: apt-get update && apt-get install -y make libc6-dev
 
     - uses: actions/checkout@v4
@@ -61,17 +60,16 @@ jobs:
         name: pal-linux-x86_64
         path: dist
 
-    - name: Test package (translate)
-      run: VERIFY=0 make package-test
+    - name: Test package (translate and verify)
+      run: VERIFY=1 make package-test
 
   macos:
     strategy:
       fail-fast: false
       matrix:
         include:
-        # The F* nightlies have no macOS arm64 build: translate only there.
-        - { runner: macos-15, arch: arm64, verify: 0 }
-        - { runner: macos-15-intel, arch: x86_64, verify: 1 }
+        - { runner: macos-15, arch: arm64 }
+        - { runner: macos-15-intel, arch: x86_64 }
     runs-on: ${{ matrix.runner }}
     steps:
     - uses: actions/checkout@v4
@@ -84,17 +82,30 @@ jobs:
     - name: Install Rust
       run: rustup update stable && rustup default stable
 
-    - name: Install F*
-      if: matrix.verify == 1
+    # The pinned F* nightly is only built for x86_64 macOS: arm64 packages
+    # bundle it too, and it runs under Rosetta 2.
+    - name: Install F* (x86_64)
+      run: arch -x86_64 /bin/bash ./opt/install-fstar.sh --dest "$RUNNER_TEMP/fstar" --no-link
+
+    - name: Fetch the x86_64 Homebrew libraries that F* links
       run: |
-        ./opt/install-fstar.sh --link-dir "$HOME/.local/bin"
-        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        dir="$RUNNER_TEMP/fstar-libs"
+        mkdir -p "$dir"
+        # The libraries' own dependencies too (bundled only if linked).
+        for formula in gmp zstd $(brew deps --formula gmp zstd); do
+          # An x86_64 macOS bottle tag, e.g. sequoia (not arm64_sequoia).
+          tag="$(brew info --json=v2 "$formula" | python3 -c '
+        import json, sys
+        files = json.load(sys.stdin)["formulae"][0]["bottle"]["stable"]["files"]
+        print(next(t for t in files if not t.startswith("arm64_") and "linux" not in t))')"
+          brew fetch --force --bottle-tag="$tag" "$formula"
+          tar -xzf "$(brew --cache --bottle-tag="$tag" "$formula")" -C "$dir"
+        done
+        libdirs="$(find "$dir" -name '*.dylib' -exec dirname {} \; | sort -u | paste -sd: -)"
+        echo "FSTAR_LIB_PATH=$libdirs" >> "$GITHUB_ENV"
 
     - name: Build package
-      run: make package PACKAGE_OPTS="${{ matrix.verify == 1 && '--check-pulse' || '' }}"
-
-    - name: Test package
-      run: VERIFY=${{ matrix.verify }} make package-test
+      run: make package PACKAGE_OPTS="--fstar $RUNNER_TEMP/fstar"
 
     - uses: actions/upload-artifact@v4
       with:
@@ -102,7 +113,7 @@ jobs:
         path: dist/pal-*.tar.gz*
 
   macos-test:
-    # A fresh runner, without Homebrew's llvm@20.
+    # Fresh runners, without Homebrew's llvm@20 or F*.
     needs: macos
     strategy:
       fail-fast: false
@@ -119,8 +130,8 @@ jobs:
         name: pal-macos-${{ matrix.arch }}
         path: dist
 
-    - name: Test package (translate)
-      run: VERIFY=0 make package-test
+    - name: Test package (translate and verify)
+      run: VERIFY=1 make package-test
 
   windows:
     runs-on: windows-latest
@@ -155,16 +166,10 @@ jobs:
         git status --short
 
     - name: Install F*
-      run: |
-        dest="$(cygpath -u "$RUNNER_TEMP")/fstar"
-        ./opt/install-fstar.sh --dest "$dest" --no-link
-        echo "FSTAR_EXE=$dest/bin/fstar.exe" >> "$GITHUB_ENV"
+      run: ./opt/install-fstar.sh --dest "$(cygpath -u "$RUNNER_TEMP")/fstar" --no-link
 
     - name: Build package
-      run: make package PACKAGE_OPTS=--check-pulse
-
-    - name: Test package (translate and verify)
-      run: VERIFY=1 make package-test
+      run: make package PACKAGE_OPTS="--fstar $(cygpath -u "$RUNNER_TEMP")/fstar"
 
     - uses: actions/upload-artifact@v4
       with:
@@ -172,7 +177,8 @@ jobs:
         path: dist/pal-*.zip*
 
   windows-test:
-    # A clean environment: MSYS2 tools (make, unzip), but no clang or LLVM.
+    # A clean environment: MSYS2 tools (make, unzip) and the MinGW-w64 C
+    # library headers, but no clang, LLVM, gcc or F*.
     needs: windows
     runs-on: windows-latest
     defaults:
@@ -190,13 +196,17 @@ jobs:
     - uses: msys2/setup-msys2@v2
       with:
         msystem: UCRT64
-        install: make unzip
+        install: make unzip mingw-w64-ucrt-x86_64-headers
+
+    # Without a MinGW gcc on PATH, pal.exe's clang finds no C library headers
+    # (stdlib.h, ...) unless told where they are.
+    - name: Point pal.exe to the MinGW-w64 headers
+      run: echo "PAL_SYSROOT=$(cygpath -m "$MINGW_PREFIX")" >> "$GITHUB_ENV"
 
     - uses: actions/download-artifact@v4
       with:
         name: pal-windows-x86_64
         path: dist
 
-    - name: Test package (translate)
-      run: VERIFY=0 make package-test
-
+    - name: Test package (translate and verify)
+      run: VERIFY=1 make package-test
