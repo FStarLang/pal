@@ -5,6 +5,12 @@ payloads. The C implementation manipulates embedded links; PAL annotations and
 the Pulse helpers describe the links, element order, and ownership of the
 enclosing objects and their resources.
 
+The eight generic `IntrusiveList{NodeRef,Indexed,Context,Ops,Validate,Items,Insert,Remove}`
+helpers are symlinks to the shared theory in
+[`examples/doubly-linked-list`](../../examples/doubly-linked-list). That example
+uses the same model with public header contracts and a separate proof overlay;
+the payload-specific helpers and additional clients remain in this test.
+
 ## C implementation
 
 [`intrusive_list.c`](intrusive_list.c) implements the operations declared in
