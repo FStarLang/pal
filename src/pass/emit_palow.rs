@@ -20424,7 +20424,14 @@ impl<'a> Body<'a> {
                 return Ok(v);
             };
             let head = d.split_whitespace().next().unwrap_or("");
-            let inlinable = self.in_guard
+            // An overreading word read needs its first byte inside the array,
+            // which a guard often knows only from the left of an `&&`
+            // (`n >= 8 && !HASZERO(*w)`). Substituted into the guard term,
+            // Pulse lifts the read out ahead of the `&&` and the short circuit
+            // is lost; left a statement, the guard takes the block form below,
+            // which keeps it.
+            let overread = head.starts_with("Pulse.Lib.C.Palow.Overread.");
+            let inlinable = self.in_guard && !overread
                 || head.ends_with("_read")
                 // A ghost statement keeps its loads as statements, and this
                 // one must not run.
@@ -20448,9 +20455,17 @@ impl<'a> Body<'a> {
                 }
             }
         }
-        if self.keep_reads && bound.iter().all(|(_, _, i)| *i) {
+        let all_inlined = bound.iter().all(|(_, _, i)| *i);
+        if self.keep_reads && all_inlined {
             // The names are still bound by the lines that were emitted, so
             // nothing has to be substituted and nothing is thrown away.
+            self.lines.truncate(before);
+            self.lines.extend(added);
+            return Ok(v0);
+        }
+        if self.in_guard && !all_inlined {
+            // A guard keeps what it cannot substitute as statements, and so
+            // takes the block form, which runs them where the source does.
             self.lines.truncate(before);
             self.lines.extend(added);
             return Ok(v0);
