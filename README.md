@@ -139,27 +139,41 @@ PAL emits code against the [Palow](palow.md) memory model.
 82 test directories, each a C file that PAL translates and F\*/Pulse
 verifies. Create a new one with `./test/new.sh my_test`.
 
-### Binary package (Linux)
+### Binary packages
 
 ```bash
-make package                              # dist/pal-<version>-<commit>-linux-<arch>.tar.gz
+make package                              # dist/pal-<version>-<commit>-<os>-<arch>.tar.gz (.zip on Windows)
 make package PACKAGE_OPTS=--check-pulse   # also ship pulse/_cache, checked by fstar.exe
 make package-test                         # unpack and run a few tests with the package
 ```
 
-[`opt/package.sh`](opt/package.sh) needs `patchelf` in addition to the build
-dependencies. The package is relocatable: `bin/pal` loads libclang-cpp, LLVM
-and their dependencies from the package's `lib/`, and Clang's builtin headers
-from `lib/clang/<N>/include`; it runs on any distribution with a glibc at
-least as recent as the build host's (CI builds on Ubuntu 22.04, see
-[`.github/workflows/package.yml`](.github/workflows/package.yml)).
-`--llvm system` builds a small package that uses the system's libclang-cpp
-instead. The package also contains `include/pal.h`, the Pulse support library
-in `pulse/`, and `share/pal/run-fstar.sh`, which runs `fstar.exe` (or
-`$PAL_FSTAR_EXE`) with `pulse/` on the include path. F\*/Pulse itself is not
-included. A shipped `pulse/_cache` is only usable with the exact F\* that
-checked it (see `BUILDINFO`); otherwise re-check it with
-`rm -rf pulse/_cache && make -C pulse FSTAR_EXE=fstar.exe`.
+[`opt/package.sh`](opt/package.sh) builds a relocatable package on the
+current platform, with `bin/pal`, the libclang-cpp and LLVM libraries it
+loads (and their dependencies), and Clang's builtin headers in
+`lib/clang/<N>/include`:
+
+- **Linux**: needs `patchelf`. `bin/pal` loads its libraries from `lib/`; the
+  package runs on any distribution with a glibc at least as recent as the
+  build host's. `--llvm system` builds a small package that uses the
+  system's libclang-cpp instead.
+- **macOS**: build with Homebrew's `llvm@20`
+  (`LLVM_CONFIG=$(brew --prefix llvm@20)/bin/llvm-config`). The dylibs in
+  `lib/` are found via `@rpath` and ad-hoc signed. Packages are per
+  architecture and need the macOS version of the build host or later, and
+  the Xcode command line tools (PAL finds the SDK with `xcrun`).
+- **Windows**: build from an MSYS2 UCRT64 shell (see above) with `zip`
+  installed. The package is a zip with the DLLs next to `bin\pal.exe`; it
+  needs no MSYS2 installation to run.
+
+The package also contains `include/pal.h`, the Pulse support library in
+`pulse/`, and `share/pal/run-fstar.sh` (and `run-fstar.cmd` on Windows),
+which runs `fstar.exe` (or `$PAL_FSTAR_EXE`) with `pulse/` on the include
+path. F\*/Pulse itself is not included. A shipped `pulse/_cache` is only
+usable with the exact F\* that checked it (see `BUILDINFO`); otherwise
+re-check it with `rm -rf pulse/_cache && make -C pulse FSTAR_EXE=fstar.exe`.
+[`.github/workflows/package.yml`](.github/workflows/package.yml) builds the
+packages on Ubuntu 22.04, macOS 15 (arm64 and x86\_64) and Windows, tests
+them on clean machines, and attaches them to the release of a `v*` tag.
 
 ### Translate a file
 

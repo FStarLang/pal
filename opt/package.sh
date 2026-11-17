@@ -1,28 +1,32 @@
 #!/usr/bin/env bash
 #
-# Build a relocatable binary package of PAL:
+# Build a relocatable binary package of PAL for Linux, macOS or Windows (MSYS2
+# UCRT64):
 #
 #   pal-<version>-<commit>-<os>-<arch>/
-#     bin/pal                  RUNPATH $ORIGIN/../lib (bundled mode)
-#     lib/                     clang-cpp, LLVM and their non-base deps (bundled)
+#     bin/pal[.exe]            the translator
+#     lib/                     clang-cpp, LLVM and their non-base deps (bundled;
+#                              on Windows the DLLs are in bin/ instead)
 #     lib/clang/<N>/include    clang builtin headers (bundled)
 #     include/pal.h            annotation macros
 #     pulse/                   the Pulse support library (+ _cache with --check-pulse)
 #     share/pal/run-fstar.sh   fstar.exe (or $PAL_FSTAR_EXE) with pulse/ included
+#     share/pal/run-fstar.cmd  the same, for cmd.exe/PowerShell (Windows)
 #     BUILDINFO
 #
-# In bundled mode, clang finds its resource directory relative to the
-# libclang-cpp that PAL loads (cpp/impl.cpp getResourcesPath), so shipping the
-# library in lib/ and the headers in lib/clang/<N> keeps the package
-# relocatable. In system mode, the package needs libclang-cpp<N> installed.
+# Clang finds its resource directory relative to the libclang-cpp that PAL
+# loads (Linux, macOS) or to pal.exe (Windows) (cpp/impl.cpp getResourcesPath),
+# so the package is relocatable. In system mode, the package needs the build
+# host's libclang-cpp<N> installed instead.
 #
 # Usage: opt/package.sh [--out DIR] [--llvm bundled|system] [--check-pulse]
 #                       [--allow-dirty]
 # Environment: LLVM_CONFIG, FSTAR_EXE (for --check-pulse), CARGO.
+# Output: dist/<name>.tar.gz (Linux, macOS) or .zip (Windows), and .sha256.
 
 set -euo pipefail
 
-usage() { sed -n '3,21p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 OUT=dist
 LLVM_MODE=bundled
@@ -46,16 +50,28 @@ die() { echo "package.sh: $*" >&2; exit 1; }
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-[[ "$(uname -s)" == Linux ]] || die "only Linux is supported for now"
-for tool in patchelf tar sha256sum ldd; do
+EXE=pal
+ARCH="$(uname -m)"
+case "$(uname -s)" in
+    Linux) OS=linux; TOOLS="patchelf tar ldd" ;;
+    Darwin) OS=macos; TOOLS="otool install_name_tool codesign tar" ;;
+    MINGW*|MSYS*|CYGWIN*)
+        OS=windows; EXE=pal.exe; TOOLS="ldd zip"
+        [[ -n "${MINGW_PREFIX:-}" ]] || die "run from an MSYS2 UCRT64 shell (MINGW_PREFIX is unset)" ;;
+    *) die "unsupported OS: $(uname -s)" ;;
+esac
+for tool in $TOOLS; do
     command -v "$tool" >/dev/null || die "missing tool: $tool"
 done
 
+sha256() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
+
 LLVM_CONFIG="${LLVM_CONFIG:-$(command -v llvm-config-20 || command -v llvm-config || true)}"
 [[ -n "$LLVM_CONFIG" ]] || die "llvm-config not found (set LLVM_CONFIG)"
-LLVM_VERSION="$("$LLVM_CONFIG" --version)"
+LLVM_VERSION="$("$LLVM_CONFIG" --version | tr -d '\r')"
 LLVM_MAJOR="${LLVM_VERSION%%.*}"
-LLVM_LIBDIR="$("$LLVM_CONFIG" --libdir)"
+LLVM_LIBDIR="$("$LLVM_CONFIG" --libdir | tr -d '\r')"
 
 REV="$(git rev-parse HEAD)"
 DIRTY=""
@@ -63,22 +79,36 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
     [[ $ALLOW_DIRTY == 1 ]] || die "working tree is dirty (--allow-dirty to package anyway)"
     DIRTY="-dirty"
 fi
-VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
-NAME="pal-${VERSION}-${REV:0:7}${DIRTY}-linux-$(uname -m)"
+VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | sed -n 1p)"
+NAME="pal-${VERSION}-${REV:0:7}${DIRTY}-${OS}-${ARCH}"
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 STAGE="$OUT/$NAME"
-rm -rf "$STAGE" "$STAGE.tar.gz" "$STAGE.tar.gz.sha256"
+rm -rf "$STAGE" "$STAGE".tar.gz* "$STAGE".zip*
 mkdir -p "$STAGE"/{bin,lib,include,pulse,share/pal}
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
 
 echo "== building pal (release)"
-LLVM_CONFIG_PATH="$(dirname "$LLVM_CONFIG")"
-PATH="$LLVM_CONFIG_PATH:$PATH" "${CARGO:-cargo}" build --release --locked
-install -m 755 "${CARGO_TARGET_DIR:-target}/release/pal" "$STAGE/bin/pal"
-strip "$STAGE/bin/pal"
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+if [[ $OS == macos ]]; then
+    # build.rs runs `llvm-config` and `clang++` from PATH. Expose only
+    # llvm-config, so that Apple's clang++ compiles against the system libc++
+    # that pal links with; leave room in the Mach-O header for install_name_tool.
+    ln -s "$LLVM_CONFIG" "$WORK/llvm-config"
+    PATH="$WORK:$PATH" RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-headerpad_max_install_names" \
+        "${CARGO:-cargo}" build --release --locked
+else
+    PATH="$(dirname "$LLVM_CONFIG"):$PATH" "${CARGO:-cargo}" build --release --locked
+fi
+install -m 755 "$TARGET_DIR/release/$EXE" "$STAGE/bin/$EXE"
+STRIP="$(command -v strip || command -v llvm-strip || true)"
+if [[ -n "$STRIP" ]]; then
+    if [[ $OS == macos ]]; then "$STRIP" -x "$STAGE/bin/$EXE"; else "$STRIP" "$STAGE/bin/$EXE"; fi
+fi
 
-# Libraries that every target system provides; everything else that pal
-# (transitively) loads is copied into lib/.
+# --- Linux: copy the ldd closure minus the base system, set RUNPATHs. ---------
+
 is_base_lib() {
     case "$1" in
         linux-vdso.so*|ld-linux*|libc.so*|libm.so*|libdl.so*|libpthread.so*|\
@@ -87,8 +117,7 @@ is_base_lib() {
     esac
 }
 
-if [[ "$LLVM_MODE" == bundled ]]; then
-    echo "== bundling shared libraries"
+bundle_linux() {
     # ldd resolves the full transitive closure; copy each non-base library
     # under its soname.
     while read -r soname path; do
@@ -102,15 +131,105 @@ if [[ "$LLVM_MODE" == bundled ]]; then
         patchelf --set-rpath '$ORIGIN' "$lib"
     done
     ls "$STAGE"/lib/libclang-cpp.so* >/dev/null 2>&1 || die "libclang-cpp was not bundled"
+}
+
+# --- macOS: copy the otool -L closure minus the OS, rewrite install names to --
+# --- @rpath/<name>, and ad-hoc sign every modified Mach-O file. --------------
+
+SRC_EXE_DIR="$ROOT/$TARGET_DIR/release"
+
+macho_rpaths() { otool -l "$1" | awk '$1 == "cmd" && $2 == "LC_RPATH" { getline; getline; print $2 }'; }
+
+# Resolve a load command $1 found in the (original, unmodified) file $2.
+macho_resolve() {
+    local ref="$1" from="$2" dir rp
+    dir="$(dirname "$from")"
+    case "$ref" in
+        @rpath/*)
+            while read -r rp; do
+                rp="${rp/#@loader_path/$dir}"
+                rp="${rp/#@executable_path/$SRC_EXE_DIR}"
+                [[ -f "$rp/${ref#@rpath/}" ]] && { echo "$rp/${ref#@rpath/}"; return; }
+            done < <(macho_rpaths "$from")
+            [[ -f "$LLVM_LIBDIR/${ref#@rpath/}" ]] && { echo "$LLVM_LIBDIR/${ref#@rpath/}"; return; } ;;
+        @loader_path/*) [[ -f "$dir/${ref#@loader_path/}" ]] && { echo "$dir/${ref#@loader_path/}"; return; } ;;
+        @executable_path/*) [[ -f "$SRC_EXE_DIR/${ref#@executable_path/}" ]] && { echo "$SRC_EXE_DIR/${ref#@executable_path/}"; return; } ;;
+        *) [[ -f "$ref" ]] && { echo "$ref"; return; } ;;
+    esac
+    return 1
+}
+
+# Bundle the dependencies of $2 (staged copy of the original file $1).
+macho_bundle() {
+    local from="$1" staged="$2" deps ref name src
+    deps="$(otool -L "$staged" | tail -n +2 | awk '{ print $1 }')"
+    while read -r ref; do
+        [[ -n "$ref" ]] || continue
+        case "$ref" in /usr/lib/*|/System/*) continue ;; esac
+        # A dylib's own install name is listed first.
+        [[ "$(basename "$ref")" == "$(basename "$staged")" ]] && continue
+        src="$(macho_resolve "$ref" "$from")" || die "cannot resolve $ref (from $from)"
+        # Name the copy after the library's install name, so that references
+        # through different symlinks share a single copy.
+        name="$(otool -D "$src" | sed -n 2p)"
+        name="$(basename "${name:-$ref}")"
+        install_name_tool -change "$ref" "@rpath/$name" "$staged"
+        if [[ ! -f "$STAGE/lib/$name" ]]; then
+            cp -L "$src" "$STAGE/lib/$name"
+            chmod 644 "$STAGE/lib/$name"
+            install_name_tool -id "@rpath/$name" "$STAGE/lib/$name"
+            macho_bundle "$src" "$STAGE/lib/$name"
+        fi
+    done <<<"$deps"
+}
+
+macho_set_rpath() {
+    local rp
+    while read -r rp; do
+        [[ -n "$rp" ]] && install_name_tool -delete_rpath "$rp" "$1"
+    done < <(macho_rpaths "$1")
+    install_name_tool -add_rpath "$2" "$1"
+}
+
+bundle_macos() {
+    macho_bundle "$SRC_EXE_DIR/pal" "$STAGE/bin/pal"
+    macho_set_rpath "$STAGE/bin/pal" @executable_path/../lib
+    for lib in "$STAGE"/lib/*.dylib; do
+        macho_set_rpath "$lib" @loader_path
+    done
+    # Editing load commands invalidates signatures; arm64 refuses to run
+    # unsigned code.
+    codesign -f -s - "$STAGE/bin/pal" "$STAGE"/lib/*.dylib
+    ls "$STAGE"/lib/libclang-cpp*.dylib >/dev/null 2>&1 || die "libclang-cpp was not bundled"
+}
+
+# --- Windows: copy the DLLs that come from the MSYS2 environment next to -----
+# --- pal.exe (the exe's directory is searched first). -------------------------
+
+bundle_windows() {
+    local mingw_bin
+    mingw_bin="$(cd "$MINGW_PREFIX/bin" && pwd -P)"
+    while read -r dll path; do
+        case "$(cd "$(dirname "$path")" 2>/dev/null && pwd -P)" in
+            "$mingw_bin") cp "$path" "$STAGE/bin/$dll" ;;
+        esac
+    done < <(ldd "$STAGE/bin/pal.exe" | awk '$2 == "=>" { print $1, $3 }')
+    ls "$STAGE"/bin/libclang-cpp*.dll >/dev/null 2>&1 || die "libclang-cpp was not bundled"
+}
+
+if [[ "$LLVM_MODE" == bundled ]]; then
+    echo "== bundling shared libraries"
+    "bundle_$OS"
 
     echo "== bundling clang resource headers"
     RESOURCE_DIR=""
-    for cand in "$LLVM_LIBDIR/clang/$LLVM_MAJOR" "$LLVM_LIBDIR/clang/$LLVM_VERSION"; do
-        [[ -f "$cand/include/stddef.h" ]] && { RESOURCE_DIR="$cand"; break; }
+    for cand in "$LLVM_LIBDIR/clang/$LLVM_MAJOR" "$LLVM_LIBDIR/clang/$LLVM_VERSION" \
+                "$(clang++ -print-resource-dir 2>/dev/null | tr -d '\r' || true)"; do
+        [[ -n "$cand" && -f "$cand/include/stddef.h" ]] && { RESOURCE_DIR="$cand"; break; }
     done
     [[ -n "$RESOURCE_DIR" ]] || die "clang resource headers not found under $LLVM_LIBDIR/clang"
     mkdir -p "$STAGE/lib/clang/$LLVM_MAJOR"
-    cp -rL "$RESOURCE_DIR/include" "$STAGE/lib/clang/$LLVM_MAJOR/include"
+    cp -RL "$RESOURCE_DIR/include" "$STAGE/lib/clang/$LLVM_MAJOR/include"
 fi
 
 echo "== staging the Pulse library and headers"
@@ -125,31 +244,57 @@ exec "${PAL_FSTAR_EXE:-fstar.exe}" $OTHERFLAGS \
     --include "$PAL_HOME/pulse" --include "$PAL_HOME/pulse/_cache" "$@"
 EOF
 chmod 755 "$STAGE/share/pal/run-fstar.sh"
+if [[ $OS == windows ]]; then
+    printf '%s\r\n' \
+        '@echo off' \
+        'rem fstar.exe with this package'"'"'s Pulse support library on the include path.' \
+        'setlocal' \
+        'set "PAL_HOME=%~dp0..\.."' \
+        'if not defined PAL_FSTAR_EXE set "PAL_FSTAR_EXE=fstar.exe"' \
+        '"%PAL_FSTAR_EXE%" %OTHERFLAGS% --include "%PAL_HOME%\pulse" --include "%PAL_HOME%\pulse\_cache" %*' \
+        > "$STAGE/share/pal/run-fstar.cmd"
+fi
 
 FSTAR_INFO="not checked (run: make -C pulse FSTAR_EXE=<fstar.exe>)"
 if [[ $CHECK_PULSE == 1 ]]; then
     echo "== checking the Pulse library"
     FSTAR_EXE="${FSTAR_EXE:-$(command -v fstar.exe || true)}"
     [[ -x "$FSTAR_EXE" ]] || die "fstar.exe not found (set FSTAR_EXE)"
-    make --no-print-directory -C "$STAGE/pulse" FSTAR_EXE="$FSTAR_EXE" -j"$(nproc)"
+    make --no-print-directory -C "$STAGE/pulse" FSTAR_EXE="$FSTAR_EXE" -j"$NPROC"
     rm -f "$STAGE/pulse/.depend"
-    sha256sum < "$FSTAR_EXE" > "$STAGE/pulse/_cache/.fstar-exe.sha256"
-    FSTAR_INFO="$("$FSTAR_EXE" --version | head -1), sha256 $(cut -d' ' -f1 "$STAGE/pulse/_cache/.fstar-exe.sha256")"
+    sha256 < "$FSTAR_EXE" > "$STAGE/pulse/_cache/.fstar-exe.sha256"
+    FSTAR_INFO="$("$FSTAR_EXE" --version | sed -n 1p | tr -d '\r'), sha256 $(cut -d' ' -f1 "$STAGE/pulse/_cache/.fstar-exe.sha256")"
 fi
 
+case $OS in
+    linux) PLATFORM="glibc $(ldd --version | awk 'NR == 1 { print $NF }')" ;;
+    macos) PLATFORM="macOS $(sw_vers -productVersion) (minimum: $(otool -l "$STAGE/bin/pal" |
+                awk '$1 == "minos" && !m { m = $2 } END { print m }'); needs the Xcode command line tools)" ;;
+    windows) PLATFORM="$MSYSTEM $(uname -r)" ;;
+esac
 cat > "$STAGE/BUILDINFO" <<EOF
 pal_version: $VERSION
 pal_commit: $REV$DIRTY
 llvm: $LLVM_VERSION ($LLVM_MODE)
-rustc: $(rustc --version)
-glibc: $(ldd --version | head -1 | awk '{ print $NF }')
+rustc: $(rustc --version | tr -d '\r')
+platform: $PLATFORM
 pulse_cache: $FSTAR_INFO
 EOF
 
 echo "== creating archive"
 MTIME="$(git log -1 --format=%ct)"
-tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$MTIME" \
-    -C "$OUT" -czf "$STAGE.tar.gz" "$NAME"
-(cd "$OUT" && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+if [[ $OS == windows ]]; then
+    ARCHIVE="$NAME.zip"
+    find "$STAGE" -exec touch -h -d "@$MTIME" {} +
+    (cd "$OUT" && find "$NAME" | LC_ALL=C sort | zip -qX "$ARCHIVE" -@)
+elif tar --version 2>/dev/null | grep -q GNU; then
+    ARCHIVE="$NAME.tar.gz"
+    tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$MTIME" \
+        -C "$OUT" -czf "$OUT/$ARCHIVE" "$NAME"
+else
+    ARCHIVE="$NAME.tar.gz"
+    tar --uid 0 --gid 0 -C "$OUT" -czf "$OUT/$ARCHIVE" "$NAME"
+fi
+(cd "$OUT" && sha256 "$ARCHIVE" > "$ARCHIVE.sha256")
 rm -rf "$STAGE"
-echo "$STAGE.tar.gz"
+echo "$OUT/$ARCHIVE"

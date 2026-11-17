@@ -47,4 +47,4 @@ package:
 # Smoke-test the most recent package (run `make package` first).
 .PHONY: package-test
 package-test:
-	./opt/package-test.sh $$(ls -t dist/pal-*.tar.gz | head -1)
+	./opt/package-test.sh $$(ls -t dist/pal-*.tar.gz dist/pal-*.zip 2>/dev/null | head -1)
