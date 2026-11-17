@@ -119,9 +119,9 @@ fn wrapper_discovery_follows_supplied_headers_without_leaking_between_sources() 
     fs::write(root.join("b.c"), b).unwrap();
     success(run(root, &["--extract", "a.c", "b.c", "proofs.h"]));
     assert!(
-        fs::read_to_string(root.join("a.c"))
+        !fs::read_to_string(root.join("a.c"))
             .unwrap()
-            .contains("((void)0);")
+            .contains("STEP(x);")
     );
     assert_eq!(fs::read_to_string(root.join("b.c")).unwrap(), b);
     success(run(root, &["--apply", "out.annotations"]));

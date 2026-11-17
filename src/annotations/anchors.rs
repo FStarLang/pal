@@ -83,6 +83,32 @@ fn parse(source: &str) -> Result<tree_sitter::Tree> {
         .ok_or("C syntax parser did not return a tree".into())
 }
 
+pub fn standalone_statements(source: &str) -> Result<std::collections::BTreeMap<usize, usize>> {
+    fn visit(node: Node<'_>, statements: &mut std::collections::BTreeMap<usize, usize>) {
+        // Recovery around macros or preprocessor branches can misidentify
+        // controlled statements as free-standing. Keep their no-op bodies.
+        if node.kind() == "compound_statement" && node.has_error() {
+            return;
+        }
+        if node.kind() == "expression_statement"
+            && !node.has_error()
+            && node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "compound_statement")
+        {
+            statements.insert(node.start_byte(), node.end_byte());
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            visit(child, statements);
+        }
+    }
+    let tree = parse(source)?;
+    let mut statements = std::collections::BTreeMap::new();
+    visit(tree.root_node(), &mut statements);
+    Ok(statements)
+}
+
 pub fn declared_names(source: &str) -> Result<Vec<String>> {
     fn visit(node: Node<'_>, source: &str, names: &mut Vec<String>) {
         if matches!(

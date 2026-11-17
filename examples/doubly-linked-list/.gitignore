@@ -1,0 +1,3 @@
+/_build/
+!/theory/*.fst
+!/theory/*.fsti

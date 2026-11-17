@@ -26,6 +26,8 @@ struct FileOverlay {
     path: String,
     original_sha256: String,
     stripped_sha256: String,
+    #[serde(default)]
+    compact_statements: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     macros: Vec<Macro>,
     annotations: Vec<Annotation>,
@@ -409,7 +411,63 @@ fn edit_source(source: &str, edits: &[Edit]) -> Result<String> {
 }
 
 fn extract_source(path: String, source: &str, macros: &[Macro]) -> Result<(FileOverlay, String)> {
-    let removals = removals(source, macros)?;
+    extract_source_mode(path, source, macros, true)
+}
+
+fn compact_statements(source: &str, removals: &mut [Removal]) -> Result<()> {
+    let mut skeleton = String::new();
+    let mut cursor = 0;
+    let mut positions = Vec::new();
+    for removal in removals.iter() {
+        skeleton.push_str(&source[cursor..removal.edit.start]);
+        positions.push(skeleton.len());
+        skeleton.push_str(&removal.edit.text);
+        cursor = removal.edit.end;
+    }
+    skeleton.push_str(&source[cursor..]);
+    let statements = anchors::standalone_statements(&skeleton)?;
+    for (removal, position) in removals.iter_mut().zip(positions) {
+        let edit = &mut removal.edit;
+        if removal.kind == "expression" {
+            let Some(&end) = statements.get(&position) else {
+                continue;
+            };
+            let tail = &skeleton[position + edit.text.len()..end];
+            if tail.trim() != ";" || source.get(edit.end..edit.end + tail.len()) != Some(tail) {
+                continue;
+            }
+            edit.end += tail.len();
+            edit.text.clear();
+            removal.kind = "statement";
+        } else if removal.kind != "declaration" {
+            continue;
+        }
+        // Remove a whole proof-only line, including its indentation, but never
+        // consume an adjacent comment or the body of an unbraced control flow.
+        let line_start = source[..edit.start].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = source[edit.end..]
+            .find('\n')
+            .map_or(source.len(), |i| edit.end + i + 1);
+        if source[line_start..edit.start].trim().is_empty()
+            && source[edit.end..line_end].trim().is_empty()
+        {
+            edit.start = line_start;
+            edit.end = line_end;
+        }
+    }
+    Ok(())
+}
+
+fn extract_source_mode(
+    path: String,
+    source: &str,
+    macros: &[Macro],
+    compact: bool,
+) -> Result<(FileOverlay, String)> {
+    let mut removals = removals(source, macros)?;
+    if compact {
+        compact_statements(source, &mut removals)?;
+    }
     let mut stripped = String::new();
     let mut cursor = 0;
     let mut offsets = Vec::new();
@@ -448,6 +506,7 @@ fn extract_source(path: String, source: &str, macros: &[Macro]) -> Result<(FileO
             path,
             original_sha256: hash(source),
             stripped_sha256: hash(&stripped),
+            compact_statements: compact,
             macros: macros.to_vec(),
             annotations,
         },
@@ -534,10 +593,13 @@ fn apply_source(file: &FileOverlay, source: &str, macros: &[Macro]) -> Result<St
     }
     let existing = removals(source, macros)?;
     if !existing.is_empty() {
-        let (current, clean) = extract_source(file.path.clone(), source, macros)?;
+        let (current, clean) =
+            extract_source_mode(file.path.clone(), source, macros, file.compact_statements)?;
         let restored = restore_clean(file, &clean)?;
-        let mut expected_payloads: Vec<_> = file.annotations.iter().map(|a| &a.text).collect();
-        let mut actual_payloads: Vec<_> = current.annotations.iter().map(|a| &a.text).collect();
+        let mut expected_payloads: Vec<_> =
+            file.annotations.iter().map(|a| a.text.trim()).collect();
+        let mut actual_payloads: Vec<_> =
+            current.annotations.iter().map(|a| a.text.trim()).collect();
         expected_payloads.sort();
         actual_payloads.sort();
         let expected = lex(&restored)?.tokens;

@@ -60,11 +60,18 @@ remains a runtime macro. Annotation-only wrapper names must not also name C
 declarations or be undefined in their include context; such cases are rejected
 before writing rather than guessing which uses are annotations.
 
-Expression annotations (`_assert`, `_ghost_stmt`, and their recognized
-wrappers) become `((void)0)`. This is intentional ordinary-C scaffolding, not
-a PAL annotation: it keeps empty controlled statements, comma expressions,
-and `for` clauses well-formed. Applying restores the original invocation.
-Other annotations are removed without reformatting surrounding text.
+Standalone proof statements inside a parsed compound statement are removed, together
+with their semicolons and (when they occupy a whole line) indentation and line
+ending. Expression annotations (`_assert`, `_ghost_stmt`, and their recognized
+wrappers) in other positions become `((void)0)`. This ordinary-C scaffolding
+keeps unbraced controlled bodies, comma expressions, and `for` clauses
+well-formed. Blocks with parser errors (for example around conditional
+preprocessing or opaque macros) conservatively retain these no-ops.
+Applying restores the original text. Older overlays retain their
+original no-op behavior; each file records the `compact_statements` mode.
+Proof-only attribute lines (such as a loop invariant on its own line) are
+removed in the same way. Other annotations are removed without reformatting
+surrounding text.
 
 ## Format and matching
 

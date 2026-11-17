@@ -32,11 +32,16 @@ format-check:
 annotations-test: rust
 	cargo test --bin pal_annotations --test annotations
 
+.PHONY: doubly-linked-list-test
+doubly-linked-list-test: rust lib
+	$(MAKE) -C examples/doubly-linked-list TOOLCHAIN_READY=1
+
 .PHONY: test
-test: rust lib -testsuite annotations-test
+test: rust lib -testsuite annotations-test doubly-linked-list-test
 # Only run formatting checks when tests succeed
 	$(MAKE) comment-check format-check
 
 .PHONY: clean
 clean:
 	$(MAKE) -C test clean
+	$(MAKE) -C examples/doubly-linked-list clean

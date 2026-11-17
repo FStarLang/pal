@@ -125,6 +125,84 @@ fn nested_snippets_line_splices_and_crlf_roundtrip() {
 }
 
 #[test]
+fn standalone_proof_lines_disappear_but_controlled_bodies_remain() {
+    let source = "void f(int x)
+    _requires(x >= 0)
+{
+    _ghost_stmt(before ());
+    _assert(x >= 0);
+    x++;
+    if (x) _ghost_stmt(yes ()); else _assert(x == 0);
+    while (x) _ghost_stmt(step ());
+    for (_ghost_stmt(start ()); x; _ghost_stmt(next ())) {}
+    _ghost_stmt(after ()); // keep this comment
+}
+"
+    .replace('\n', "\r\n");
+    let (_, stripped, _) = extract(&source);
+    assert!(stripped.starts_with("void f(int x)\r\n{\r\n    x++;\r\n"));
+    assert!(stripped.contains("if (x) ((void)0); else ((void)0);"));
+    assert!(stripped.contains("while (x) ((void)0);"));
+    assert!(stripped.contains("for (((void)0); x; ((void)0)) {}"));
+    assert!(stripped.contains("// keep this comment"));
+}
+
+#[test]
+fn older_overlays_keep_their_noop_roundtrip() {
+    let source = "void f(void)\n    _requires(1)\n{\n    _ghost_stmt(step ());\n}\n";
+    let (overlay, stripped) = extract_source_mode("old.c".into(), source, &[], false).unwrap();
+    let serialized = toml::to_string(&overlay)
+        .unwrap()
+        .replace("compact_statements = false\n", "");
+    let overlay: FileOverlay = toml::from_str(&serialized).unwrap();
+    assert!(stripped.contains("((void)0);"));
+    assert_eq!(apply_source(&overlay, &stripped, &[]).unwrap(), source);
+    assert_eq!(apply_source(&overlay, source, &[]).unwrap(), source);
+}
+
+#[test]
+fn compact_proofs_preserve_preprocessor_controlled_and_labeled_bodies() {
+    let source = "void f(int x) {
+    if (x)
+#ifdef ENABLED
+        _assert(x > 0);
+#else
+        _ghost_stmt(step ());
+#endif
+    x++;
+    label: _ghost_stmt(labeled ());
+    do _ghost_stmt(body ()); while (x);
+}
+";
+    let (_, stripped, _) = extract(source);
+    assert!(stripped.contains("#ifdef ENABLED\n        ((void)0);\n#else\n        ((void)0);"));
+    assert!(stripped.contains("label: ((void)0);"));
+    assert!(stripped.contains("do ((void)0); while (x);"));
+}
+
+#[test]
+fn consecutive_compact_proofs_relocate_and_reapply_after_indentation_changes() {
+    let source = "void f(int x) {
+    _ghost_stmt(first ());
+    _ghost_stmt(second ());
+    x++;
+    _ghost_stmt(last ());
+}
+";
+    let (overlay, stripped, macros) = extract(source);
+    let edited = stripped.replace("    x++;", "\tx++;") + "\nint unrelated;\n";
+    let restored = apply_source(&overlay, &edited, &macros).unwrap();
+    let first = restored.find("_ghost_stmt(first ())").unwrap();
+    let second = restored.find("_ghost_stmt(second ())").unwrap();
+    assert!(first < second && second < restored.find("x++;").unwrap());
+    assert!(restored.ends_with("\nint unrelated;\n"));
+    assert_eq!(
+        apply_source(&overlay, &restored, &macros).unwrap(),
+        restored
+    );
+}
+
+#[test]
 fn toml_preserves_pulse_quotes_and_multiline_payloads() {
     let source = r#"void f(void) {
 _ghost_stmt(

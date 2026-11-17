@@ -153,6 +153,11 @@ sites. `--check` does not write files or run verification.
 See [annotation overlays](doc/annotations.md) for the format, guarantees,
 and current limitations.
 
+The [doubly linked list example](examples/doubly-linked-list) keeps public
+contracts in `dll.h` and implementation/client proofs in `proofs.annotations`.
+`make -C examples/doubly-linked-list -j8` reapplies the overlay to build copies,
+verifies the library and client, and runs native and roundtrip checks.
+
 ### Translate a file
 
 ```bash

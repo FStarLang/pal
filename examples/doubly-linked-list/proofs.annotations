@@ -1,0 +1,9245 @@
+format_version = 1
+
+[[files]]
+path = "client.c"
+original_sha256 = "1c729188674edcadd4eaff1aab7ca7032c5b60945572d518275fe95277eb0eff"
+stripped_sha256 = "5b784a1b5b45bc37afc4b52a382c4c1354c270044b23c058f50b6487e7062cc3"
+compact_statements = true
+
+[[files.annotations]]
+id = "items_find-1"
+offset = 452
+text = """
+    _ghost_stmt(IntrusiveListIndexed.head_open Dll.Client.item_ipl
+        $(head) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_find"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "head",
+    ",",
+    "int",
+    "value",
+    ")",
+    "{",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "node",
+    "=",
+    "head",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_find-2"
+offset = 493
+text = """
+    _ghost_stmt(IntrusiveListItems.find_start Dll.Client.item_ipl
+        (Dll.Client.matches_value $(value)) $(head) $(node) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_find"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "node",
+    "=",
+    "head",
+    "->",
+    "next",
+    ";",
+]
+after = [
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+    "{",
+    "struct",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_find-3"
+offset = 518
+text = """
+        _invariant(_live(node))
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_find"
+
+[files.annotations.site]
+kind = "declaration"
+before = [
+    "next",
+    ";",
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+]
+after = [
+    "{",
+    "struct",
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "node",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_find-4"
+offset = 518
+text = """
+        _invariant(_inline_pulse(IntrusiveListItems.find_inv Dll.Client.item_ipl
+            (Dll.Client.matches_value $(value)) $(head) $(node) (reveal $(entries))))
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_find"
+
+[files.annotations.site]
+kind = "declaration"
+before = [
+    "next",
+    ";",
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+]
+after = [
+    "{",
+    "struct",
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "node",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_find-5"
+offset = 524
+text = """
+        _ghost_stmt(IntrusiveListItems.find_open Dll.Client.item_ipl
+            (Dll.Client.matches_value $(value)) $(head) $(node) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_find"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+    "{",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "node",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = """
+        /* Save the successor before recovering the enclosing item. */
+        """
+
+[[files.annotations]]
+id = "items_find-6"
+offset = 524
+text = """
+        _ghost_stmt(with description. assert Dll.Client.item_ipl $(node) description);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_find"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+    "{",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "node",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = """
+        /* Save the successor before recovering the enclosing item. */
+        """
+
+[[files.annotations]]
+id = "items_find-7"
+offset = 690
+text = """
+        _ghost_stmt(Dll.Client.value_open $(node) $(item));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_find"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "*",
+    "item",
+    "=",
+    "item_from_link",
+    "(",
+    "node",
+    ")",
+    ";",
+]
+after = [
+    "int",
+    "current_value",
+    "=",
+    "item",
+    "->",
+    "value",
+    ";",
+    "if",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_find-8"
+offset = 769
+text = """
+            _ghost_stmt(Dll.Client.value_close $(node) $(item));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_find"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "if",
+    "(",
+    "current_value",
+    "==",
+    "value",
+    ")",
+    "{",
+]
+after = [
+    "return",
+    "item",
+    ";",
+    "}",
+    "node",
+    "=",
+    "next",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "            "
+
+[[files.annotations]]
+id = "items_find-9"
+offset = 769
+text = """
+            _ghost_stmt(IntrusiveListItems.find_found Dll.Client.item_ipl
+                (Dll.Client.matches_value $(value))
+                $(head) $(node) (reveal $(entries)) description);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_find"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "if",
+    "(",
+    "current_value",
+    "==",
+    "value",
+    ")",
+    "{",
+]
+after = [
+    "return",
+    "item",
+    ";",
+    "}",
+    "node",
+    "=",
+    "next",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "            "
+
+[[files.annotations]]
+id = "items_find-10"
+offset = 804
+text = """
+        _ghost_stmt(Dll.Client.value_close $(node) $(item));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_find"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "==",
+    "value",
+    ")",
+    "{",
+    "return",
+    "item",
+    ";",
+    "}",
+]
+after = [
+    "node",
+    "=",
+    "next",
+    ";",
+    "}",
+    "return",
+    "NULL",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_find-11"
+offset = 804
+text = """
+        _ghost_stmt(IntrusiveListItems.find_step Dll.Client.item_ipl
+            (Dll.Client.matches_value $(value))
+            $(head) $(node) $(next) (reveal $(entries)) description);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_find"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "==",
+    "value",
+    ")",
+    "{",
+    "return",
+    "item",
+    ";",
+    "}",
+]
+after = [
+    "node",
+    "=",
+    "next",
+    ";",
+    "}",
+    "return",
+    "NULL",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_find-12"
+offset = 831
+text = """
+    _ghost_stmt(IntrusiveListItems.find_end Dll.Client.item_ipl
+        (Dll.Client.matches_value $(value)) $(head) $(node) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_find"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "item",
+    ";",
+    "}",
+    "node",
+    "=",
+    "next",
+    ";",
+    "}",
+]
+after = [
+    "return",
+    "NULL",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_pop_front-13"
+offset = 906
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_empty Dll.Client.item_ipl
+        $(head) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_pop_front"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "items_pop_front",
+    "(",
+    "struct",
+    "list_node",
+    "*",
+    "head",
+    ")",
+    "{",
+]
+after = [
+    "bool",
+    "empty",
+    "=",
+    "list_empty",
+    "(",
+    "head",
+    ")",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_pop_front-14"
+offset = 941
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_empty Dll.Client.item_ipl
+        $(head) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_pop_front"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "bool",
+    "empty",
+    "=",
+    "list_empty",
+    "(",
+    "head",
+    ")",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "empty",
+    ")",
+    "{",
+    "return",
+    "NULL",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_pop_front-15"
+offset = 958
+text = """
+        _ghost_stmt(IntrusiveListItems.pop_empty Dll.Client.item_ipl
+            $(head) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_pop_front"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ")",
+    ";",
+    "if",
+    "(",
+    "empty",
+    ")",
+    "{",
+]
+after = [
+    "return",
+    "NULL",
+    ";",
+    "}",
+    "else",
+    "{",
+    "struct",
+    "list_node",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_pop_front-16"
+offset = 958
+text = """
+        _ghost_stmt(Dll.Client.close_pop_empty $(head) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_pop_front"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ")",
+    ";",
+    "if",
+    "(",
+    "empty",
+    ")",
+    "{",
+]
+after = [
+    "return",
+    "NULL",
+    ";",
+    "}",
+    "else",
+    "{",
+    "struct",
+    "list_node",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_pop_front-17"
+offset = 992
+text = """
+        _ghost_stmt(IntrusiveListContext.prepare_pop Dll.Client.item_ipl
+            $(head) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_pop_front"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ")",
+    "{",
+    "return",
+    "NULL",
+    ";",
+    "}",
+    "else",
+    "{",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "node",
+    "=",
+    "list_remove_head",
+    "(",
+    "head",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_pop_front-18"
+offset = 1049
+text = """
+        _ghost_stmt(IntrusiveListItems.pop_finish Dll.Client.item_ipl
+            $(head) $(node) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_pop_front"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "*",
+    "node",
+    "=",
+    "list_remove_head",
+    "(",
+    "head",
+    ")",
+    ";",
+]
+after = [
+    "return",
+    "item_from_link",
+    "(",
+    "node",
+    ")",
+    ";",
+    "}",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_pop_front-19"
+offset = 1049
+text = """
+        _ghost_stmt(Dll.Client.close_pop $(head) $(node) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_pop_front"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "*",
+    "node",
+    "=",
+    "list_remove_head",
+    "(",
+    "head",
+    ")",
+    ";",
+]
+after = [
+    "return",
+    "item_from_link",
+    "(",
+    "node",
+    ")",
+    ";",
+    "}",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_insert_sorted-20"
+offset = 1246
+text = """
+    _ghost_stmt(Dll.Client.value_order ());
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ",",
+    "struct",
+    "item",
+    "*",
+    "item",
+    ")",
+    "{",
+]
+after = [
+    "int",
+    "new_value",
+    "=",
+    "item",
+    "->",
+    "value",
+    ";",
+    "struct",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = """
+    /* The new item's value is constant throughout the scan. */
+    """
+
+[[files.annotations]]
+id = "items_insert_sorted-21"
+offset = 1386
+text = """
+    _ghost_stmt(Dll.Client.prepare_item $(item) $(entry));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "*",
+    "entry",
+    "=",
+    "&",
+    "item",
+    "->",
+    "link",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "node",
+    "=",
+    "head",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_insert_sorted-22"
+offset = 1386
+text = """
+    _ghost_stmt(IntrusiveListIndexed.head_open Dll.Client.item_ipl
+        $(head) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "*",
+    "entry",
+    "=",
+    "&",
+    "item",
+    "->",
+    "link",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "node",
+    "=",
+    "head",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_insert_sorted-23"
+offset = 1427
+text = """
+    _ghost_stmt(IntrusiveListInsert.start Dll.Client.item_ipl
+        Dll.Client.value_le $(head) $(node) $(entry)
+        (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "node",
+    "=",
+    "head",
+    "->",
+    "next",
+    ";",
+]
+after = [
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+    "{",
+    "struct",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_insert_sorted-24"
+offset = 1427
+text = """
+    _ghost_stmt(let stopped = Pulse.Lib.GhostReference.alloc (0 = 1));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "node",
+    "=",
+    "head",
+    "->",
+    "next",
+    ";",
+]
+after = [
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+    "{",
+    "struct",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_insert_sorted-25"
+offset = 1452
+text = """
+        _invariant(_live(node))
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "declaration"
+before = [
+    "next",
+    ";",
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+]
+after = [
+    "{",
+    "struct",
+    "item",
+    "*",
+    "current",
+    "=",
+    "item_from_link",
+    "(",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_insert_sorted-26"
+offset = 1452
+text = """
+        _invariant(new_value == description)
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "declaration"
+before = [
+    "next",
+    ";",
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+]
+after = [
+    "{",
+    "struct",
+    "item",
+    "*",
+    "current",
+    "=",
+    "item_from_link",
+    "(",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_insert_sorted-27"
+offset = 1452
+text = """
+        _invariant(_inline_pulse(live stopped))
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "declaration"
+before = [
+    "next",
+    ";",
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+]
+after = [
+    "{",
+    "struct",
+    "item",
+    "*",
+    "current",
+    "=",
+    "item_from_link",
+    "(",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_insert_sorted-28"
+offset = 1452
+text = """
+        _invariant(_inline_pulse(
+            IntrusiveListInsert.inv Dll.Client.item_ipl
+                Dll.Client.value_le $(head) $(node) $(entry)
+                (reveal $(description)) (reveal $(entries))
+                (Pulse.Lib.GhostReference.op_Bang stopped) **
+            Dll.Client.item_ipl $(entry) (reveal $(description)) **
+            IntrusiveListIndexed.lpts_to_uninit $(entry)))
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "declaration"
+before = [
+    "next",
+    ";",
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+]
+after = [
+    "{",
+    "struct",
+    "item",
+    "*",
+    "current",
+    "=",
+    "item_from_link",
+    "(",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_insert_sorted-29"
+offset = 1452
+text = '''
+        _ensures(_inline_pulse(
+            (Pulse.Lib.GhostReference.op_Bang stopped) == (0 = 0) \/
+            $(node) == $(head)))
+'''
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "declaration"
+before = [
+    "next",
+    ";",
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+]
+after = [
+    "{",
+    "struct",
+    "item",
+    "*",
+    "current",
+    "=",
+    "item_from_link",
+    "(",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_insert_sorted-30"
+offset = 1458
+text = """
+        _ghost_stmt(IntrusiveListInsert.expose Dll.Client.item_ipl
+            Dll.Client.value_le $(head) $(node) $(entry)
+            (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+    "{",
+]
+after = [
+    "struct",
+    "item",
+    "*",
+    "current",
+    "=",
+    "item_from_link",
+    "(",
+    "node",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_insert_sorted-31"
+offset = 1511
+text = """
+        _ghost_stmt(Dll.Client.value_open $(node) $(current));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "*",
+    "current",
+    "=",
+    "item_from_link",
+    "(",
+    "node",
+    ")",
+    ";",
+]
+after = [
+    "int",
+    "current_value",
+    "=",
+    "current",
+    "->",
+    "value",
+    ";",
+    "if",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_insert_sorted-32"
+offset = 1555
+text = """
+        _ghost_stmt(Dll.Client.value_close $(node) $(current));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "int",
+    "current_value",
+    "=",
+    "current",
+    "->",
+    "value",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "current_value",
+    ">",
+    "new_value",
+    ")",
+    "{",
+    "break",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_insert_sorted-33"
+offset = 1596
+text = """
+            _ghost_stmt(IntrusiveListInsert.unexpose Dll.Client.item_ipl
+                Dll.Client.value_le $(head) $(node) $(entry)
+                (reveal $(description)) (reveal $(entries)) (0 = 0));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "if",
+    "(",
+    "current_value",
+    ">",
+    "new_value",
+    ")",
+    "{",
+]
+after = [
+    "break",
+    ";",
+    "}",
+    "else",
+    "{",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "            "
+
+[[files.annotations]]
+id = "items_insert_sorted-34"
+offset = 1596
+text = """
+            _ghost_stmt(Pulse.Lib.GhostReference.write stopped (hide (0 = 0)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "if",
+    "(",
+    "current_value",
+    ">",
+    "new_value",
+    ")",
+    "{",
+]
+after = [
+    "break",
+    ";",
+    "}",
+    "else",
+    "{",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "            "
+
+[[files.annotations]]
+id = "items_insert_sorted-35"
+offset = 1681
+text = """
+            _ghost_stmt(IntrusiveListInsert.mid_repack Dll.Client.item_ipl
+                Dll.Client.value_le $(head) $(node) $(entry)
+                (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "node",
+    "->",
+    "next",
+    ";",
+]
+after = [
+    "node",
+    "=",
+    "next",
+    ";",
+    "}",
+    "}",
+    "bool",
+    "at_head",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "            "
+
+[[files.annotations]]
+id = "items_insert_sorted-36"
+offset = 1681
+text = """
+            _ghost_stmt(IntrusiveListInsert.step Dll.Client.item_ipl
+                Dll.Client.value_le $(head) $(node) $(next) $(entry)
+                (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "node",
+    "->",
+    "next",
+    ";",
+]
+after = [
+    "node",
+    "=",
+    "next",
+    ";",
+    "}",
+    "}",
+    "bool",
+    "at_head",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "            "
+
+[[files.annotations]]
+id = "items_insert_sorted-37"
+offset = 1706
+text = """
+            _ghost_stmt(Pulse.Lib.GhostReference.write stopped (hide (0 = 1)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "node",
+    "->",
+    "next",
+    ";",
+    "node",
+    "=",
+    "next",
+    ";",
+]
+after = [
+    "}",
+    "}",
+    "bool",
+    "at_head",
+    "=",
+    "node",
+    "==",
+    "head",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_insert_sorted-38"
+offset = 1755
+text = """
+    _ghost_stmt(IntrusiveListInsert.settle Dll.Client.item_ipl
+        Dll.Client.value_le $(head) $(node) $(entry)
+        (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "}",
+    "bool",
+    "at_head",
+    "=",
+    "node",
+    "==",
+    "head",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "at_head",
+    ")",
+    "{",
+    "list_insert_tail",
+    "(",
+    "head",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = """
+
+    """
+
+[[files.annotations]]
+id = "items_insert_sorted-39"
+offset = 1755
+text = """
+    _ghost_stmt(Pulse.Lib.GhostReference.free stopped);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "}",
+    "bool",
+    "at_head",
+    "=",
+    "node",
+    "==",
+    "head",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "at_head",
+    ")",
+    "{",
+    "list_insert_tail",
+    "(",
+    "head",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = """
+
+    """
+
+[[files.annotations]]
+id = "items_insert_sorted-40"
+offset = 1775
+text = """
+        _ghost_stmt(IntrusiveListInsert.prepare_tail Dll.Client.item_ipl
+            Dll.Client.value_le $(head) $(node) $(entry)
+            (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "==",
+    "head",
+    ";",
+    "if",
+    "(",
+    "at_head",
+    ")",
+    "{",
+]
+after = [
+    "list_insert_tail",
+    "(",
+    "head",
+    ",",
+    "entry",
+    ")",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_insert_sorted-41"
+offset = 1814
+text = """
+        _ghost_stmt(IntrusiveListInsert.finish_tail Dll.Client.item_ipl
+            Dll.Client.value_le $(head) $(entry)
+            (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "{",
+    "list_insert_tail",
+    "(",
+    "head",
+    ",",
+    "entry",
+    ")",
+    ";",
+]
+after = [
+    "}",
+    "else",
+    "{",
+    "struct",
+    "list_node",
+    "*",
+    "first",
+    "=",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_insert_sorted-42"
+offset = 1827
+text = """
+        _ghost_stmt(IntrusiveListInsert.head_open Dll.Client.item_ipl
+            Dll.Client.value_le $(head) $(node) $(entry)
+            (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ",",
+    "entry",
+    ")",
+    ";",
+    "}",
+    "else",
+    "{",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "first",
+    "=",
+    "head",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_insert_sorted-43"
+offset = 1873
+text = """
+        _ghost_stmt(IntrusiveListInsert.head_close Dll.Client.item_ipl
+            Dll.Client.value_le $(head) $(node) $(entry)
+            (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "first",
+    "=",
+    "head",
+    "->",
+    "next",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "node",
+    "==",
+    "first",
+    ")",
+    "{",
+    "list_insert_head",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_insert_sorted-44"
+offset = 1902
+text = """
+            _ghost_stmt(IntrusiveListInsert.prepare_head Dll.Client.item_ipl
+                Dll.Client.value_le $(head) $(node) $(entry)
+                (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "if",
+    "(",
+    "node",
+    "==",
+    "first",
+    ")",
+    "{",
+]
+after = [
+    "list_insert_head",
+    "(",
+    "head",
+    ",",
+    "entry",
+    ")",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "            "
+
+[[files.annotations]]
+id = "items_insert_sorted-45"
+offset = 1945
+text = """
+            _ghost_stmt(IntrusiveListInsert.finish_head Dll.Client.item_ipl
+                Dll.Client.value_le $(head) $(entry)
+                (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "{",
+    "list_insert_head",
+    "(",
+    "head",
+    ",",
+    "entry",
+    ")",
+    ";",
+]
+after = [
+    "}",
+    "else",
+    "{",
+    "struct",
+    "list_node",
+    "*",
+    "previous",
+    "=",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_insert_sorted-46"
+offset = 1962
+text = """
+            _ghost_stmt(IntrusiveListInsert.position_open Dll.Client.item_ipl
+                Dll.Client.value_le $(head) $(node) $(entry)
+                (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ",",
+    "entry",
+    ")",
+    ";",
+    "}",
+    "else",
+    "{",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "previous",
+    "=",
+    "node",
+    "->",
+    "prev",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "            "
+
+[[files.annotations]]
+id = "items_insert_sorted-47"
+offset = 2015
+text = """
+            _ghost_stmt(IntrusiveListInsert.position_close Dll.Client.item_ipl
+                Dll.Client.value_le $(head) $(node) $(previous) $(entry)
+                (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "previous",
+    "=",
+    "node",
+    "->",
+    "prev",
+    ";",
+]
+after = [
+    "list_insert_after",
+    "(",
+    "previous",
+    ",",
+    "entry",
+    ")",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "            "
+
+[[files.annotations]]
+id = "items_insert_sorted-48"
+offset = 2015
+text = """
+            _ghost_stmt(IntrusiveListInsert.prepare_after Dll.Client.item_ipl
+                Dll.Client.value_le $(head) $(previous) $(entry)
+                (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "previous",
+    "=",
+    "node",
+    "->",
+    "prev",
+    ";",
+]
+after = [
+    "list_insert_after",
+    "(",
+    "previous",
+    ",",
+    "entry",
+    ")",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "            "
+
+[[files.annotations]]
+id = "items_insert_sorted-49"
+offset = 2063
+text = """
+            _ghost_stmt(IntrusiveListInsert.finish Dll.Client.item_ipl
+                Dll.Client.value_le $(head) $(entry)
+                (reveal $(description)) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_insert_sorted"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "list_insert_after",
+    "(",
+    "previous",
+    ",",
+    "entry",
+    ")",
+    ";",
+]
+after = [
+    "}",
+    "}",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_remove_value-50"
+offset = 2143
+text = """
+    _ghost_stmt(IntrusiveListIndexed.head_open Dll.Client.item_ipl
+        $(head) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_remove_value"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "head",
+    ",",
+    "int",
+    "value",
+    ")",
+    "{",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "node",
+    "=",
+    "head",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_remove_value-51"
+offset = 2184
+text = """
+    _ghost_stmt(IntrusiveListRemove.start Dll.Client.item_ipl
+        (Dll.Client.matches_value $(value)) $(head) $(node) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_remove_value"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "node",
+    "=",
+    "head",
+    "->",
+    "next",
+    ";",
+]
+after = [
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+    "{",
+    "struct",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_remove_value-52"
+offset = 2209
+text = """
+        _invariant(_live(node))
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_remove_value"
+
+[files.annotations.site]
+kind = "declaration"
+before = [
+    "next",
+    ";",
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+]
+after = [
+    "{",
+    "struct",
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "node",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_remove_value-53"
+offset = 2209
+text = """
+        _invariant(_inline_pulse(IntrusiveListRemove.inv Dll.Client.item_ipl
+            (Dll.Client.matches_value $(value)) $(head) $(node) (reveal $(entries))))
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_remove_value"
+
+[files.annotations.site]
+kind = "declaration"
+before = [
+    "next",
+    ";",
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+]
+after = [
+    "{",
+    "struct",
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "node",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "items_remove_value-54"
+offset = 2215
+text = """
+        _ghost_stmt(IntrusiveListRemove.expose Dll.Client.item_ipl
+            (Dll.Client.matches_value $(value)) $(head) $(node) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_remove_value"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "while",
+    "(",
+    "node",
+    "!=",
+    "head",
+    ")",
+    "{",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "node",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_remove_value-55"
+offset = 2310
+text = """
+        _ghost_stmt(Dll.Client.value_open $(node) $(item));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_remove_value"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "*",
+    "item",
+    "=",
+    "item_from_link",
+    "(",
+    "node",
+    ")",
+    ";",
+]
+after = [
+    "int",
+    "current_value",
+    "=",
+    "item",
+    "->",
+    "value",
+    ";",
+    "if",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_remove_value-56"
+offset = 2351
+text = """
+        _ghost_stmt(Dll.Client.value_close $(node) $(item));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_remove_value"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "int",
+    "current_value",
+    "=",
+    "item",
+    "->",
+    "value",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "current_value",
+    "==",
+    "value",
+    ")",
+    "{",
+    "list_remove",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_remove_value-57"
+offset = 2389
+text = """
+            _ghost_stmt(IntrusiveListRemove.drop_prepare Dll.Client.item_ipl
+                (Dll.Client.matches_value $(value))
+                $(head) $(node) $(next) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_remove_value"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "if",
+    "(",
+    "current_value",
+    "==",
+    "value",
+    ")",
+    "{",
+]
+after = [
+    "list_remove",
+    "(",
+    "node",
+    ")",
+    ";",
+    "}",
+    "else",
+    "{",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "            "
+
+[[files.annotations]]
+id = "items_remove_value-58"
+offset = 2420
+text = """
+            _ghost_stmt(IntrusiveListRemove.drop_finish Dll.Client.item_ipl
+                (Dll.Client.matches_value $(value))
+                $(head) $(node) $(next) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_remove_value"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "value",
+    ")",
+    "{",
+    "list_remove",
+    "(",
+    "node",
+    ")",
+    ";",
+]
+after = [
+    "}",
+    "else",
+    "{",
+    "}",
+    "node",
+    "=",
+    "next",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_remove_value-59"
+offset = 2437
+text = """
+            _ghost_stmt(IntrusiveListRemove.keep Dll.Client.item_ipl
+                (Dll.Client.matches_value $(value))
+                $(head) $(node) $(next) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_remove_value"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_remove",
+    "(",
+    "node",
+    ")",
+    ";",
+    "}",
+    "else",
+    "{",
+]
+after = [
+    "}",
+    "node",
+    "=",
+    "next",
+    ";",
+    "}",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "items_remove_value-60"
+offset = 2474
+text = """
+    _ghost_stmt(IntrusiveListRemove.finish Dll.Client.item_ipl
+        (Dll.Client.matches_value $(value)) $(head) $(node) (reveal $(entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_remove_value"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "else",
+    "{",
+    "}",
+    "node",
+    "=",
+    "next",
+    ";",
+    "}",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "items_remove_value-61"
+offset = 2474
+text = """
+    _ghost_stmt(Dll.Client.close_detached
+        (IntrusiveListIndexed.matching (Dll.Client.matches_value $(value))
+            (reveal $(entries))));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "items_remove_value"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "else",
+    "{",
+    "}",
+    "node",
+    "=",
+    "next",
+    ";",
+    "}",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_example-62"
+offset = 2795
+text = """
+    _ghost_stmt(Dll.Client.fold_item $(&first));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "struct",
+    "item",
+    "*",
+    "assertion_item",
+    "=",
+    "NULL",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "third_link",
+    "=",
+    "&",
+    "third",
+    ".",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-63"
+offset = 2795
+text = """
+    _ghost_stmt(Dll.Client.fold_item $(&second));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "struct",
+    "item",
+    "*",
+    "assertion_item",
+    "=",
+    "NULL",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "third_link",
+    "=",
+    "&",
+    "third",
+    ".",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-64"
+offset = 2843
+text = """
+    _ghost_stmt(Dll.Client.fold_item $(&third));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "*",
+    "third_link",
+    "=",
+    "&",
+    "third",
+    ".",
+    "link",
+    ";",
+]
+after = [
+    "list_init",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_init",
+    "(",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-65"
+offset = 2843
+text = """
+    _ghost_stmt(Dll.Client.fold_item $(&fourth));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "*",
+    "third_link",
+    "=",
+    "&",
+    "third",
+    ".",
+    "link",
+    ";",
+]
+after = [
+    "list_init",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_init",
+    "(",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-66"
+offset = 2843
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_init
+        (IntrusiveListContext.make Dll.Client.item_ipl []) $(&source));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "*",
+    "third_link",
+    "=",
+    "&",
+    "third",
+    ".",
+    "link",
+    ";",
+]
+after = [
+    "list_init",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_init",
+    "(",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-67"
+offset = 2867
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_ring
+        (IntrusiveListContext.make Dll.Client.item_ipl []) $(&source));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "link",
+    ";",
+    "list_init",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "list_init",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-68"
+offset = 2867
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_init
+        (IntrusiveListContext.make Dll.Client.item_ipl []) $(&destination));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "link",
+    ";",
+    "list_init",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "list_init",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-69"
+offset = 2896
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_ring
+        (IntrusiveListContext.make Dll.Client.item_ipl []) $(&destination));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ")",
+    ";",
+    "list_init",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-70"
+offset = 2896
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_validation Dll.Client.item_ipl
+        $(&source) $(&source) [] []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ")",
+    ";",
+    "list_init",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-71"
+offset = 2924
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_validation Dll.Client.item_ipl
+        $(&source) $(&source) [] []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_init",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-72"
+offset = 2924
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_validation Dll.Client.item_ipl
+        $(&destination) $(&destination) [] []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_init",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-73"
+offset = 2957
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_validation Dll.Client.item_ipl
+        $(&destination) $(&destination) [] []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "*",
+    "third_link",
+    "=",
+    "&",
+    "third",
+    ".",
+    "link",
+    ";",
+    "list_init",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_init",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "assert",
+    "(",
+    "assertion_empty",
+    ")",
+    ";",
+    "assertion_empty",
+    "=",
+    "false",
+    ";",
+    "}",
+    "struct",
+    "item",
+    "*",
+    "removed",
+    "=",
+    "items_pop_front",
+    "(",
+    "&",
+    "source",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-74"
+offset = 2957
+text = """
+    _ghost_stmt(IntrusiveListOps.indexed_normalize Dll.Client.item_ipl $(&source) []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "*",
+    "third_link",
+    "=",
+    "&",
+    "third",
+    ".",
+    "link",
+    ";",
+    "list_init",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_init",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "assert",
+    "(",
+    "assertion_empty",
+    ")",
+    ";",
+    "assertion_empty",
+    "=",
+    "false",
+    ";",
+    "}",
+    "struct",
+    "item",
+    "*",
+    "removed",
+    "=",
+    "items_pop_front",
+    "(",
+    "&",
+    "source",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-75"
+offset = 2957
+text = """
+    _ghost_stmt(IntrusiveListOps.indexed_normalize Dll.Client.item_ipl $(&destination) []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "*",
+    "third_link",
+    "=",
+    "&",
+    "third",
+    ".",
+    "link",
+    ";",
+    "list_init",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_init",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "assert",
+    "(",
+    "assertion_empty",
+    ")",
+    ";",
+    "assertion_empty",
+    "=",
+    "false",
+    ";",
+    "}",
+    "struct",
+    "item",
+    "*",
+    "removed",
+    "=",
+    "items_pop_front",
+    "(",
+    "&",
+    "source",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-76"
+offset = 2989
+text = """
+        _ghost_stmt(IntrusiveListContext.prepare_empty Dll.Client.item_ipl $(&source) []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ".",
+    "link",
+    ";",
+    "list_init",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_init",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+]
+after = [
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "assert",
+    "(",
+    "assertion_empty",
+    ")",
+    ";",
+    "assertion_empty",
+    "=",
+    "false",
+    ";",
+    "}",
+    "struct",
+    "item",
+    "*",
+    "removed",
+    "=",
+    "items_pop_front",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "assert",
+    "(",
+    "removed",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "list_example-77"
+offset = 3036
+text = """
+        _ghost_stmt(IntrusiveListContext.finish_empty Dll.Client.item_ipl $(&source) []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "assert",
+    "(",
+    "assertion_empty",
+    ")",
+    ";",
+    "assertion_empty",
+    "=",
+    "false",
+    ";",
+    "}",
+    "struct",
+    "item",
+    "*",
+    "removed",
+    "=",
+    "items_pop_front",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "list_example-78"
+offset = 3161
+text = """
+    _ghost_stmt(Dll.Client.pop_empty_result $(&source) $(removed));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "removed",
+    "=",
+    "items_pop_front",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "assert",
+    "(",
+    "removed",
+    "==",
+    "NULL",
+    ")",
+    ";",
+    "items_insert_sorted",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-79"
+offset = 3318
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_validation Dll.Client.item_ipl
+        $(&source) $(&source) []
+        [((Dll.Client.item_link $(&second)), 1l); ($(third_link), 2l); ((Dll.Client.item_link $(&first)), 3l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "third",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-80"
+offset = 3346
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_validation Dll.Client.item_ipl
+        $(&source) $(&source) []
+        [((Dll.Client.item_link $(&second)), 1l); ($(third_link), 2l); ((Dll.Client.item_link $(&first)), 3l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "third_link",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-81"
+offset = 3346
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_validation Dll.Client.item_ipl
+        $(&source) $(third_link) [((Dll.Client.item_link $(&second)), 1l); ($(third_link), 2l)]
+        [((Dll.Client.item_link $(&first)), 3l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "third_link",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-82"
+offset = 3377
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_validation Dll.Client.item_ipl
+        $(&source) $(third_link) [((Dll.Client.item_link $(&second)), 1l); ($(third_link), 2l)]
+        [((Dll.Client.item_link $(&first)), 3l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "third_link",
+    ")",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_item",
+    "=",
+    "items_find",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-83"
+offset = 3696
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_move Dll.Client.item_ipl
+        $(&source) $(&destination)
+        [((Dll.Client.item_link $(&second)), 1l); ($(third_link), 2l); ((Dll.Client.item_link $(&first)), 3l)] []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "NULL",
+    ")",
+    ";",
+    "assertion_item",
+    "=",
+    "NULL",
+    ";",
+    "}",
+]
+after = [
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-84"
+offset = 3734
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_move Dll.Client.item_ipl
+        $(&source) $(&destination)
+        [((Dll.Client.item_link $(&second)), 1l); ($(third_link), 2l); ((Dll.Client.item_link $(&first)), 3l)] []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ")",
+    ";",
+    "assertion_item",
+    "=",
+    "NULL",
+    ";",
+    "}",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-85"
+offset = 3734
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_validation Dll.Client.item_ipl
+        $(&source) $(&source) [] []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ")",
+    ";",
+    "assertion_item",
+    "=",
+    "NULL",
+    ";",
+    "}",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-86"
+offset = 3762
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_validation Dll.Client.item_ipl
+        $(&source) $(&source) [] []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "}",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-87"
+offset = 3762
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_validation Dll.Client.item_ipl
+        $(&destination) $(&destination) []
+        [((Dll.Client.item_link $(&second)), 1l); ($(third_link), 2l); ((Dll.Client.item_link $(&first)), 3l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "}",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-88"
+offset = 3795
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_validation Dll.Client.item_ipl
+        $(&destination) $(&destination) []
+        [((Dll.Client.item_link $(&second)), 1l); ($(third_link), 2l); ((Dll.Client.item_link $(&first)), 3l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "(",
+    "assertion_item",
+    "==",
+    "NULL",
+    ")",
+    ";",
+    "assertion_item",
+    "=",
+    "NULL",
+    ";",
+    "}",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "assert",
+    "(",
+    "assertion_empty",
+    ")",
+    ";",
+    "assertion_empty",
+    "=",
+    "false",
+    ";",
+    "}",
+    "items_insert_sorted",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "fourth",
+    ")",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-89"
+offset = 3827
+text = """
+        _ghost_stmt(IntrusiveListContext.prepare_empty Dll.Client.item_ipl $(&source) []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "assertion_item",
+    "=",
+    "NULL",
+    ";",
+    "}",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+]
+after = [
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "assert",
+    "(",
+    "assertion_empty",
+    ")",
+    ";",
+    "assertion_empty",
+    "=",
+    "false",
+    ";",
+    "}",
+    "items_insert_sorted",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "fourth",
+    ")",
+    ";",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "list_example-90"
+offset = 3874
+text = """
+        _ghost_stmt(IntrusiveListContext.finish_empty Dll.Client.item_ipl $(&source) []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "assert",
+    "(",
+    "assertion_empty",
+    ")",
+    ";",
+    "assertion_empty",
+    "=",
+    "false",
+    ";",
+    "}",
+    "items_insert_sorted",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "list_example-91"
+offset = 3989
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_move Dll.Client.item_ipl
+        $(&source) $(&destination) [((Dll.Client.item_link $(&fourth)), 4l)]
+        [((Dll.Client.item_link $(&second)), 1l); ($(third_link), 2l); ((Dll.Client.item_link $(&first)), 3l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "fourth",
+    ")",
+    ";",
+]
+after = [
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-92"
+offset = 4027
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_move Dll.Client.item_ipl
+        $(&source) $(&destination) [((Dll.Client.item_link $(&fourth)), 4l)]
+        [((Dll.Client.item_link $(&second)), 1l); ($(third_link), 2l); ((Dll.Client.item_link $(&first)), 3l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "&",
+    "source",
+    ",",
+    "&",
+    "fourth",
+    ")",
+    ";",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-93"
+offset = 4027
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_validation Dll.Client.item_ipl
+        $(&source) $(&source) [] []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "&",
+    "source",
+    ",",
+    "&",
+    "fourth",
+    ")",
+    ";",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-94"
+offset = 4055
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_validation Dll.Client.item_ipl
+        $(&source) $(&source) [] []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-95"
+offset = 4055
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_validation Dll.Client.item_ipl
+        $(&destination) $(&destination) []
+        [((Dll.Client.item_link $(&second)), 1l); ($(third_link), 2l); ((Dll.Client.item_link $(&first)), 3l); ((Dll.Client.item_link $(&fourth)), 4l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-96"
+offset = 4088
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_validation Dll.Client.item_ipl
+        $(&destination) $(&destination) []
+        [((Dll.Client.item_link $(&second)), 1l); ($(third_link), 2l); ((Dll.Client.item_link $(&first)), 3l); ((Dll.Client.item_link $(&fourth)), 4l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "}",
+    "items_insert_sorted",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "fourth",
+    ")",
+    ";",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "assert",
+    "(",
+    "assertion_empty",
+    ")",
+    ";",
+    "assertion_empty",
+    "=",
+    "false",
+    ";",
+    "}",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-97"
+offset = 4120
+text = """
+        _ghost_stmt(IntrusiveListContext.prepare_empty Dll.Client.item_ipl $(&source) []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "source",
+    ",",
+    "&",
+    "fourth",
+    ")",
+    ";",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+]
+after = [
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+    "assert",
+    "(",
+    "assertion_empty",
+    ")",
+    ";",
+    "assertion_empty",
+    "=",
+    "false",
+    ";",
+    "}",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "items_remove_value",
+    "(",
+    "&",
+    "destination",
+    ",",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "list_example-98"
+offset = 4167
+text = """
+        _ghost_stmt(IntrusiveListContext.finish_empty Dll.Client.item_ipl $(&source) []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "destination",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "assert",
+    "(",
+    "assertion_empty",
+    ")",
+    ";",
+    "assertion_empty",
+    "=",
+    "false",
+    ";",
+    "}",
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "list_example-99"
+offset = 4239
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_move Dll.Client.item_ipl
+        $(&source) $(&destination) []
+        [((Dll.Client.item_link $(&second)), 1l); ($(third_link), 2l); ((Dll.Client.item_link $(&first)), 3l); ((Dll.Client.item_link $(&fourth)), 4l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "assertion_empty",
+    ")",
+    ";",
+    "assertion_empty",
+    "=",
+    "false",
+    ";",
+    "}",
+]
+after = [
+    "list_move",
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-100"
+offset = 4277
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_move Dll.Client.item_ipl
+        $(&source) $(&destination) []
+        [((Dll.Client.item_link $(&second)), 1l); ($(third_link), 2l); ((Dll.Client.item_link $(&first)), 3l); ((Dll.Client.item_link $(&fourth)), 4l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "(",
+    "&",
+    "source",
+    ",",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "items_remove_value",
+    "(",
+    "&",
+    "destination",
+    ",",
+    "2",
+    ")",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = """
+
+    """
+
+[[files.annotations]]
+id = "list_example-101"
+offset = 4319
+text = """
+    _ghost_stmt(Dll.Client.detached_one $(&third) 2l);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "items_remove_value",
+    "(",
+    "&",
+    "destination",
+    ",",
+    "2",
+    ")",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_item",
+    "=",
+    "items_find",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-102"
+offset = 4319
+text = """
+    _ghost_stmt(IntrusiveListOps.indexed_normalize Dll.Client.item_ipl
+        $(&destination) [((Dll.Client.item_link $(&second)), 1l); ((Dll.Client.item_link $(&first)), 3l); ((Dll.Client.item_link $(&fourth)), 4l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "items_remove_value",
+    "(",
+    "&",
+    "destination",
+    ",",
+    "2",
+    ")",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+    "assertion_item",
+    "=",
+    "items_find",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-103"
+offset = 4527
+text = """
+    _ghost_stmt(Dll.Client.pop_one $(&destination) $(&second) $(removed) 1l
+        [((Dll.Client.item_link $(&first)), 3l); ((Dll.Client.item_link $(&fourth)), 4l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "removed",
+    "=",
+    "items_pop_front",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "assert",
+    "(",
+    "removed",
+    "==",
+    "&",
+    "second",
+    ")",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-104"
+offset = 4604
+text = """
+    _ghost_stmt(Dll.Client.pop_one $(&destination) $(&first) $(removed) 3l
+        [((Dll.Client.item_link $(&fourth)), 4l)]);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "removed",
+    "=",
+    "items_pop_front",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "assert",
+    "(",
+    "removed",
+    "==",
+    "&",
+    "first",
+    ")",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-105"
+offset = 4680
+text = """
+    _ghost_stmt(Dll.Client.pop_one $(&destination) $(&fourth) $(removed) 4l []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "removed",
+    "=",
+    "items_pop_front",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "assert",
+    "(",
+    "removed",
+    "==",
+    "&",
+    "fourth",
+    ")",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-106"
+offset = 4744
+text = """
+        _ghost_stmt(IntrusiveListContext.prepare_empty Dll.Client.item_ipl $(&destination) []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "fourth",
+    ")",
+    ";",
+    "if",
+    "(",
+    "ITEMS_ASSERT_ENABLED",
+    ")",
+    "{",
+]
+after = [
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "list_example-107"
+offset = 4796
+text = """
+        _ghost_stmt(IntrusiveListContext.finish_empty Dll.Client.item_ipl $(&destination) []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "assertion_empty",
+    "=",
+    "list_empty",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "assert",
+    "(",
+    "assertion_empty",
+    ")",
+    ";",
+    "assertion_empty",
+    "=",
+    "false",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "list_example-108"
+offset = 4868
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_validation Dll.Client.item_ipl
+        $(&destination) $(&destination) [] []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "assertion_empty",
+    ")",
+    ";",
+    "assertion_empty",
+    "=",
+    "false",
+    ";",
+    "}",
+]
+after = [
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+    "(",
+    "void",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-109"
+offset = 4901
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_validation Dll.Client.item_ipl
+        $(&destination) $(&destination) [] []);
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "}",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "(",
+    "void",
+    ")",
+    "assertion_empty",
+    ";",
+    "(",
+    "void",
+    ")",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-110"
+offset = 4901
+text = """
+    _ghost_stmt(IntrusiveListOps.indexed_release_empty Dll.Client.item_ipl $(&source));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "}",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "(",
+    "void",
+    ")",
+    "assertion_empty",
+    ";",
+    "(",
+    "void",
+    ")",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_example-111"
+offset = 4901
+text = """
+    _ghost_stmt(IntrusiveListOps.indexed_release_empty Dll.Client.item_ipl $(&destination));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_example"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "}",
+    "list_validate",
+    "(",
+    "&",
+    "destination",
+    ")",
+    ";",
+]
+after = [
+    "(",
+    "void",
+    ")",
+    "assertion_empty",
+    ";",
+    "(",
+    "void",
+    ")",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files]]
+path = "dll.c"
+original_sha256 = "33f12128c1cb241d64451a3f887a571c69c48ecea9e148db6b0ef7dc50bfbd23"
+stripped_sha256 = "69228e7db322a2b1fcb8fe245c359df77b74fe16a7532e6d1bba5a4dc5181345"
+compact_statements = true
+
+[[files.annotations]]
+id = "list_init-1"
+offset = 160
+text = """
+    _ghost_stmt(unfold (IntrusiveListContext.init_pre (reveal $(ctx)) $(head)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_init"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_init",
+    "(",
+    "struct",
+    "list_node",
+    "*",
+    "head",
+    ")",
+    "{",
+]
+after = [
+    "head",
+    "->",
+    "next",
+    "=",
+    "head",
+    ";",
+    "head",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_init-2"
+offset = 160
+text = """
+    _ghost_stmt($unfold-uninit(struct list_node) $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_init"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_init",
+    "(",
+    "struct",
+    "list_node",
+    "*",
+    "head",
+    ")",
+    "{",
+]
+after = [
+    "head",
+    "->",
+    "next",
+    "=",
+    "head",
+    ";",
+    "head",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_init-3"
+offset = 206
+text = """
+    _ghost_stmt(IntrusiveListIndexed.ring_intro_empty (reveal $(ctx)).IntrusiveListContext.resource $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_init"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ";",
+    "head",
+    "->",
+    "prev",
+    "=",
+    "head",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_init-4"
+offset = 206
+text = """
+    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix (reveal $(ctx)).IntrusiveListContext.resource
+        $(head) 1.0R []) as (IntrusiveListIndexed.is_list_ring_ix (reveal $(ctx)).IntrusiveListContext.resource
+        $(head) 1.0R (reveal $(ctx)).IntrusiveListContext.entries));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_init"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ";",
+    "head",
+    "->",
+    "prev",
+    "=",
+    "head",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_init-5"
+offset = 206
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_ring (reveal $(ctx)) $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_init"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ";",
+    "head",
+    "->",
+    "prev",
+    "=",
+    "head",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_empty-6"
+offset = 257
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_ring (reveal $(ctx)) $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_empty"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "(",
+    "const",
+    "struct",
+    "list_node",
+    "*",
+    "head",
+    ")",
+    "{",
+]
+after = [
+    "return",
+    "head",
+    "->",
+    "next",
+    "==",
+    "head",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_empty-7"
+offset = 257
+text = """
+    _ghost_stmt(IntrusiveListIndexed.ring_open (reveal $(ctx)).IntrusiveListContext.resource $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_empty"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "(",
+    "const",
+    "struct",
+    "list_node",
+    "*",
+    "head",
+    ")",
+    "{",
+]
+after = [
+    "return",
+    "head",
+    "->",
+    "next",
+    "==",
+    "head",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_empty-8"
+offset = 288
+text = """
+    _ghost_stmt(IntrusiveListIndexed.ring_close (reveal $(ctx)).IntrusiveListContext.resource $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_empty"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "{",
+    "return",
+    "head",
+    "->",
+    "next",
+    "==",
+    "head",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_empty-9"
+offset = 288
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_ring (reveal $(ctx)) $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_empty"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "{",
+    "return",
+    "head",
+    "->",
+    "next",
+    "==",
+    "head",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_empty-10"
+offset = 288
+text = """
+    _ghost_stmt(fold (IntrusiveListContext.empty_post (reveal $(ctx)) $(head) $(return)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_empty"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "{",
+    "return",
+    "head",
+    "->",
+    "next",
+    "==",
+    "head",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_validate-11"
+offset = 358
+text = """
+    _ghost_stmt(unfold (IntrusiveListContext.validation_pre (reveal $(ctx)) $(node)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_validate"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "node",
+    ")",
+    "{",
+    "(",
+    "void",
+    ")",
+    "node",
+    ";",
+]
+after = [
+    "assert",
+    "(",
+    "node",
+    "->",
+    "next",
+    "->",
+    "prev",
+    "==",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_validate-12"
+offset = 358
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_ring ((reveal $(ctx)).IntrusiveListContext.model) ((reveal $(ctx)).IntrusiveListContext.head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_validate"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "node",
+    ")",
+    "{",
+    "(",
+    "void",
+    ")",
+    "node",
+    ";",
+]
+after = [
+    "assert",
+    "(",
+    "node",
+    "->",
+    "next",
+    "->",
+    "prev",
+    "==",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_validate-13"
+offset = 358
+text = """
+    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) 1.0R (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries))
+        as (IntrusiveListIndexed.is_list_ring_ix (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) 1.0R (FStar.List.Tot.append (((reveal $(ctx)).IntrusiveListContext.front)) (((reveal $(ctx)).IntrusiveListContext.back)))));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_validate"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "node",
+    ")",
+    "{",
+    "(",
+    "void",
+    ")",
+    "node",
+    ";",
+]
+after = [
+    "assert",
+    "(",
+    "node",
+    "->",
+    "next",
+    "->",
+    "prev",
+    "==",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_validate-14"
+offset = 358
+text = """
+    _ghost_stmt(IntrusiveListValidate.ring_view (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(node) ((reveal $(ctx)).IntrusiveListContext.front) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_validate"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "node",
+    ")",
+    "{",
+    "(",
+    "void",
+    ")",
+    "node",
+    ";",
+]
+after = [
+    "assert",
+    "(",
+    "node",
+    "->",
+    "next",
+    "->",
+    "prev",
+    "==",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_validate-15"
+offset = 358
+text = """
+    _ghost_stmt(IntrusiveListValidate.view_open_all $(node));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_validate"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "node",
+    ")",
+    "{",
+    "(",
+    "void",
+    ")",
+    "node",
+    ";",
+]
+after = [
+    "assert",
+    "(",
+    "node",
+    "->",
+    "next",
+    "->",
+    "prev",
+    "==",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_validate-16"
+offset = 434
+text = """
+    _ghost_stmt(IntrusiveListValidate.view_close_all $(node));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_validate"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "->",
+    "prev",
+    "->",
+    "next",
+    "==",
+    "node",
+    ")",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_validate-17"
+offset = 434
+text = """
+    _ghost_stmt(IntrusiveListValidate.restore_ring (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(node) (FStar.List.Tot.append (((reveal $(ctx)).IntrusiveListContext.front)) (((reveal $(ctx)).IntrusiveListContext.back))));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_validate"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "->",
+    "prev",
+    "->",
+    "next",
+    "==",
+    "node",
+    ")",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_validate-18"
+offset = 434
+text = """
+    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) 1.0R (FStar.List.Tot.append (((reveal $(ctx)).IntrusiveListContext.front)) (((reveal $(ctx)).IntrusiveListContext.back))))
+        as (IntrusiveListIndexed.is_list_ring_ix (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) 1.0R (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_validate"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "->",
+    "prev",
+    "->",
+    "next",
+    "==",
+    "node",
+    ")",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_validate-19"
+offset = 434
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_ring ((reveal $(ctx)).IntrusiveListContext.model) ((reveal $(ctx)).IntrusiveListContext.head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_validate"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "->",
+    "prev",
+    "->",
+    "next",
+    "==",
+    "node",
+    ")",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_validate-20"
+offset = 434
+text = """
+    _ghost_stmt(fold (IntrusiveListContext.validation_pre (reveal $(ctx)) $(node)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_validate"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "->",
+    "prev",
+    "->",
+    "next",
+    "==",
+    "node",
+    ")",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_insert_after-21"
+offset = 515
+text = """
+    _ghost_stmt(unfold (IntrusiveListContext.insert_after_pre (reveal $(ctx)) $(position) $(entry)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_after"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "position",
+    ",",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "position",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_after-22"
+offset = 515
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_ring ((reveal $(ctx)).IntrusiveListContext.model) ((reveal $(ctx)).IntrusiveListContext.head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_after"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "position",
+    ",",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "position",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_after-23"
+offset = 515
+text = """
+    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) 1.0R (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries))
+        as (IntrusiveListIndexed.is_list_ring_ix (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) 1.0R (FStar.List.Tot.append (((reveal $(ctx)).IntrusiveListContext.front)) (((reveal $(ctx)).IntrusiveListContext.back)))));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_after"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "position",
+    ",",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "position",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_after-24"
+offset = 515
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_validation (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(position) ((reveal $(ctx)).IntrusiveListContext.front) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_after"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "position",
+    ",",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "position",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_after-25"
+offset = 544
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_validation (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(position) ((reveal $(ctx)).IntrusiveListContext.front) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_after"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "entry",
+    ")",
+    "{",
+    "list_validate",
+    "(",
+    "position",
+    ")",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "position",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_after-26"
+offset = 544
+text = """
+    _ghost_stmt(IntrusiveListOps.position_open (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(position) ((reveal $(ctx)).IntrusiveListContext.front) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_after"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "entry",
+    ")",
+    "{",
+    "list_validate",
+    "(",
+    "position",
+    ")",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "position",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_after-27"
+offset = 589
+text = """
+    _ghost_stmt(IntrusiveListOps.position_close (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(position) $(next) ((reveal $(ctx)).IntrusiveListContext.front) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_after"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "position",
+    "->",
+    "next",
+    ";",
+]
+after = [
+    "entry",
+    "->",
+    "prev",
+    "=",
+    "position",
+    ";",
+    "entry",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_after-28"
+offset = 589
+text = """
+    _ghost_stmt($unfold-uninit(struct list_node) $(entry));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_after"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "position",
+    "->",
+    "next",
+    ";",
+]
+after = [
+    "entry",
+    "->",
+    "prev",
+    "=",
+    "position",
+    ";",
+    "entry",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_after-29"
+offset = 641
+text = """
+    _ghost_stmt(IntrusiveListOps.add_expose_next (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(position) $(next) ((reveal $(ctx)).IntrusiveListContext.front) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_after"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "position",
+    ";",
+    "entry",
+    "->",
+    "next",
+    "=",
+    "next",
+    ";",
+]
+after = [
+    "next",
+    "->",
+    "prev",
+    "=",
+    "entry",
+    ";",
+    "position",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_after-30"
+offset = 665
+text = """
+    _ghost_stmt(IntrusiveListOps.add_reseat (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(position) $(next) $(entry)
+        ((reveal $(ctx)).IntrusiveListContext.description) ((reveal $(ctx)).IntrusiveListContext.front) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_after"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "next",
+    ";",
+    "next",
+    "->",
+    "prev",
+    "=",
+    "entry",
+    ";",
+]
+after = [
+    "position",
+    "->",
+    "next",
+    "=",
+    "entry",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_after-31"
+offset = 693
+text = """
+    _ghost_stmt(IntrusiveListOps.add_close (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(position) $(next) $(entry)
+        ((reveal $(ctx)).IntrusiveListContext.description) ((reveal $(ctx)).IntrusiveListContext.front) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_after"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "entry",
+    ";",
+    "position",
+    "->",
+    "next",
+    "=",
+    "entry",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_insert_after-32"
+offset = 693
+text = """
+    _ghost_stmt(fold (IntrusiveListContext.insert_after_post (reveal $(ctx)) $(entry)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_after"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "entry",
+    ";",
+    "position",
+    "->",
+    "next",
+    "=",
+    "entry",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_insert_head-33"
+offset = 769
+text = """
+    _ghost_stmt(unfold (IntrusiveListContext.insert_pre (reveal $(ctx)) $(head) $(entry)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ",",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_insert_after",
+    "(",
+    "head",
+    ",",
+    "entry",
+    ")",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_head-34"
+offset = 769
+text = """
+    _ghost_stmt(fold (IntrusiveListContext.insert_after_pre
+        (    { IntrusiveListContext.model = ((reveal $(ctx)).IntrusiveListContext.model); IntrusiveListContext.head = $(head);       IntrusiveListContext.front = []; IntrusiveListContext.back = (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries);       IntrusiveListContext.description = ((reveal $(ctx)).IntrusiveListContext.description); }) $(head) $(entry)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ",",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_insert_after",
+    "(",
+    "head",
+    ",",
+    "entry",
+    ")",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_head-35"
+offset = 805
+text = """
+    _ghost_stmt(unfold (IntrusiveListContext.insert_after_post
+        (    { IntrusiveListContext.model = ((reveal $(ctx)).IntrusiveListContext.model); IntrusiveListContext.head = $(head);       IntrusiveListContext.front = []; IntrusiveListContext.back = (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries);       IntrusiveListContext.description = ((reveal $(ctx)).IntrusiveListContext.description); }) $(entry)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "{",
+    "list_insert_after",
+    "(",
+    "head",
+    ",",
+    "entry",
+    ")",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_insert_head-36"
+offset = 805
+text = """
+    _ghost_stmt(fold (IntrusiveListContext.insert_head_post (reveal $(ctx)) $(head) $(entry)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "{",
+    "list_insert_after",
+    "(",
+    "head",
+    ",",
+    "entry",
+    ")",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_insert_tail-37"
+offset = 881
+text = """
+    _ghost_stmt(unfold (IntrusiveListContext.insert_pre (reveal $(ctx)) $(head) $(entry)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_tail"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ",",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "head",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_tail-38"
+offset = 881
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_ring ((reveal $(ctx)).IntrusiveListContext.model) $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_tail"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ",",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "head",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_tail-39"
+offset = 881
+text = """
+    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) $(head) 1.0R (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries))
+        as (IntrusiveListIndexed.is_list_ring_ix (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) $(head) 1.0R (FStar.List.Tot.append ([]) ((((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries)))));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_tail"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ",",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "head",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_tail-40"
+offset = 881
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_validation (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) $(head) $(head) [] (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_tail"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ",",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "head",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_tail-41"
+offset = 906
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_validation (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) $(head) $(head) [] (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_tail"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "entry",
+    ")",
+    "{",
+    "list_validate",
+    "(",
+    "head",
+    ")",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "tail",
+    "=",
+    "head",
+    "->",
+    "prev",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_tail-42"
+offset = 906
+text = """
+    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) $(head) 1.0R (FStar.List.Tot.append ([]) ((((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries))))
+        as (IntrusiveListIndexed.is_list_ring_ix (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) $(head) 1.0R (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_tail"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "entry",
+    ")",
+    "{",
+    "list_validate",
+    "(",
+    "head",
+    ")",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "tail",
+    "=",
+    "head",
+    "->",
+    "prev",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_tail-43"
+offset = 906
+text = """
+    _ghost_stmt(IntrusiveListIndexed.ring_open (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_tail"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "entry",
+    ")",
+    "{",
+    "list_validate",
+    "(",
+    "head",
+    ")",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "tail",
+    "=",
+    "head",
+    "->",
+    "prev",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_tail-44"
+offset = 947
+text = """
+    _ghost_stmt(IntrusiveListIndexed.ring_close (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_tail"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "tail",
+    "=",
+    "head",
+    "->",
+    "prev",
+    ";",
+]
+after = [
+    "list_insert_after",
+    "(",
+    "tail",
+    ",",
+    "entry",
+    ")",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_tail-45"
+offset = 947
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_ring ((reveal $(ctx)).IntrusiveListContext.model) $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_tail"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "tail",
+    "=",
+    "head",
+    "->",
+    "prev",
+    ";",
+]
+after = [
+    "list_insert_after",
+    "(",
+    "tail",
+    ",",
+    "entry",
+    ")",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_tail-46"
+offset = 947
+text = """
+    _ghost_stmt(FStar.List.Tot.Properties.append_l_nil (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_tail"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "tail",
+    "=",
+    "head",
+    "->",
+    "prev",
+    ";",
+]
+after = [
+    "list_insert_after",
+    "(",
+    "tail",
+    ",",
+    "entry",
+    ")",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_tail-47"
+offset = 947
+text = """
+    _ghost_stmt(fold (IntrusiveListContext.insert_after_pre
+        (    { IntrusiveListContext.model = ((reveal $(ctx)).IntrusiveListContext.model); IntrusiveListContext.head = $(head);       IntrusiveListContext.front = (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries); IntrusiveListContext.back = [];       IntrusiveListContext.description = ((reveal $(ctx)).IntrusiveListContext.description); }) $(tail) $(entry)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_tail"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "tail",
+    "=",
+    "head",
+    "->",
+    "prev",
+    ";",
+]
+after = [
+    "list_insert_after",
+    "(",
+    "tail",
+    ",",
+    "entry",
+    ")",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_insert_tail-48"
+offset = 983
+text = """
+    _ghost_stmt(unfold (IntrusiveListContext.insert_after_post
+        (    { IntrusiveListContext.model = ((reveal $(ctx)).IntrusiveListContext.model); IntrusiveListContext.head = $(head);       IntrusiveListContext.front = (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries); IntrusiveListContext.back = [];       IntrusiveListContext.description = ((reveal $(ctx)).IntrusiveListContext.description); }) $(entry)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_tail"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "list_insert_after",
+    "(",
+    "tail",
+    ",",
+    "entry",
+    ")",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_insert_tail-49"
+offset = 983
+text = """
+    _ghost_stmt(fold (IntrusiveListContext.insert_tail_post (reveal $(ctx)) $(head) $(entry)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_insert_tail"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ";",
+    "list_insert_after",
+    "(",
+    "tail",
+    ",",
+    "entry",
+    ")",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_remove-50"
+offset = 1030
+text = """
+    _ghost_stmt(unfold (IntrusiveListContext.remove_pre (reveal $(ctx)) $(entry)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_remove",
+    "(",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "entry",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove-51"
+offset = 1030
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_ring ((reveal $(ctx)).IntrusiveListContext.model) ((reveal $(ctx)).IntrusiveListContext.head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_remove",
+    "(",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "entry",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove-52"
+offset = 1030
+text = """
+    _ghost_stmt(FStar.List.Tot.Properties.append_assoc ((reveal $(ctx)).IntrusiveListContext.front) [($(entry),((reveal $(ctx)).IntrusiveListContext.description))] ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_remove",
+    "(",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "entry",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove-53"
+offset = 1030
+text = """
+    _ghost_stmt(IntrusiveListIndexed.last_or_snoc ((reveal $(ctx)).IntrusiveListContext.head) ((reveal $(ctx)).IntrusiveListContext.front) ($(entry),((reveal $(ctx)).IntrusiveListContext.description)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_remove",
+    "(",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "entry",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove-54"
+offset = 1030
+text = """
+    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) 1.0R (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.entries))
+        as (IntrusiveListIndexed.is_list_ring_ix (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) 1.0R
+            (FStar.List.Tot.append ((FStar.List.Tot.append (((reveal $(ctx)).IntrusiveListContext.front)) ([($(entry), ((reveal $(ctx)).IntrusiveListContext.description))]))) (((reveal $(ctx)).IntrusiveListContext.back)))));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_remove",
+    "(",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "entry",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove-55"
+offset = 1030
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_validation (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(entry)
+        (FStar.List.Tot.append (((reveal $(ctx)).IntrusiveListContext.front)) ([($(entry), ((reveal $(ctx)).IntrusiveListContext.description))])) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_remove",
+    "(",
+    "struct",
+    "list_node",
+    "*",
+    "entry",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "entry",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove-56"
+offset = 1056
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_validation (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(entry)
+        (FStar.List.Tot.append (((reveal $(ctx)).IntrusiveListContext.front)) ([($(entry), ((reveal $(ctx)).IntrusiveListContext.description))])) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "entry",
+    ")",
+    "{",
+    "list_validate",
+    "(",
+    "entry",
+    ")",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "previous",
+    "=",
+    "entry",
+    "->",
+    "prev",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove-57"
+offset = 1056
+text = """
+    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) 1.0R
+        (FStar.List.Tot.append ((FStar.List.Tot.append (((reveal $(ctx)).IntrusiveListContext.front)) ([($(entry), ((reveal $(ctx)).IntrusiveListContext.description))]))) (((reveal $(ctx)).IntrusiveListContext.back))))
+        as (IntrusiveListIndexed.is_list_ring_ix (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) 1.0R
+            (FStar.List.Tot.append (((reveal $(ctx)).IntrusiveListContext.front)) ((($(entry), ((reveal $(ctx)).IntrusiveListContext.description)) :: ((reveal $(ctx)).IntrusiveListContext.back))))));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "entry",
+    ")",
+    "{",
+    "list_validate",
+    "(",
+    "entry",
+    ")",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "previous",
+    "=",
+    "entry",
+    "->",
+    "prev",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove-58"
+offset = 1056
+text = """
+    _ghost_stmt(IntrusiveListOps.del_open (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(entry)
+        ((reveal $(ctx)).IntrusiveListContext.description) ((reveal $(ctx)).IntrusiveListContext.front) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "entry",
+    ")",
+    "{",
+    "list_validate",
+    "(",
+    "entry",
+    ")",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "previous",
+    "=",
+    "entry",
+    "->",
+    "prev",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove-59"
+offset = 1144
+text = """
+    _ghost_stmt(IntrusiveListOps.del_cut_pin (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(previous) $(next) $(entry)
+        ((reveal $(ctx)).IntrusiveListContext.description) ((reveal $(ctx)).IntrusiveListContext.front) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "entry",
+    "->",
+    "next",
+    ";",
+]
+after = [
+    "previous",
+    "->",
+    "next",
+    "=",
+    "next",
+    ";",
+    "next",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove-60"
+offset = 1144
+text = """
+    _ghost_stmt(IntrusiveListOps.del_expose_prev (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(previous) $(next) $(entry)
+        ((reveal $(ctx)).IntrusiveListContext.description) ((reveal $(ctx)).IntrusiveListContext.front) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "next",
+    "=",
+    "entry",
+    "->",
+    "next",
+    ";",
+]
+after = [
+    "previous",
+    "->",
+    "next",
+    "=",
+    "next",
+    ";",
+    "next",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove-61"
+offset = 1171
+text = """
+    _ghost_stmt(IntrusiveListOps.del_reseat_next (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(previous) $(next) $(entry)
+        ((reveal $(ctx)).IntrusiveListContext.description) ((reveal $(ctx)).IntrusiveListContext.front) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "next",
+    ";",
+    "previous",
+    "->",
+    "next",
+    "=",
+    "next",
+    ";",
+]
+after = [
+    "next",
+    "->",
+    "prev",
+    "=",
+    "previous",
+    ";",
+    "return",
+    "previous",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove-62"
+offset = 1198
+text = """
+    _ghost_stmt(IntrusiveListOps.del_close_next (((reveal $(ctx)).IntrusiveListContext.model).IntrusiveListContext.resource) ((reveal $(ctx)).IntrusiveListContext.head) $(previous) $(next) $(entry)
+        ((reveal $(ctx)).IntrusiveListContext.description) ((reveal $(ctx)).IntrusiveListContext.front) ((reveal $(ctx)).IntrusiveListContext.back));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "next",
+    ";",
+    "next",
+    "->",
+    "prev",
+    "=",
+    "previous",
+    ";",
+]
+after = [
+    "return",
+    "previous",
+    "==",
+    "next",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove-63"
+offset = 1227
+text = """
+    _ghost_stmt(fold (IntrusiveListContext.remove_post (reveal $(ctx)) $(entry) $(return)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "=",
+    "previous",
+    ";",
+    "return",
+    "previous",
+    "==",
+    "next",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_remove_head-64"
+offset = 1291
+text = """
+    _ghost_stmt(unfold (IntrusiveListContext.remove_head_pre (reveal $(ctx)) $(head)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_remove_head",
+    "(",
+    "struct",
+    "list_node",
+    "*",
+    "head",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "head",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove_head-65"
+offset = 1291
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_ring (reveal $(ctx)) $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_remove_head",
+    "(",
+    "struct",
+    "list_node",
+    "*",
+    "head",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "head",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove_head-66"
+offset = 1291
+text = """
+    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix ((reveal $(ctx)).IntrusiveListContext.resource) $(head) 1.0R ((reveal $(ctx)).IntrusiveListContext.entries))
+        as (IntrusiveListIndexed.is_list_ring_ix ((reveal $(ctx)).IntrusiveListContext.resource) $(head) 1.0R (FStar.List.Tot.append ([]) (((reveal $(ctx)).IntrusiveListContext.entries)))));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_remove_head",
+    "(",
+    "struct",
+    "list_node",
+    "*",
+    "head",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "head",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove_head-67"
+offset = 1291
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_validation ((reveal $(ctx)).IntrusiveListContext.resource) $(head) $(head) [] ((reveal $(ctx)).IntrusiveListContext.entries));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_remove_head",
+    "(",
+    "struct",
+    "list_node",
+    "*",
+    "head",
+    ")",
+    "{",
+]
+after = [
+    "list_validate",
+    "(",
+    "head",
+    ")",
+    ";",
+    "struct",
+    "list_node",
+    "*",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove_head-68"
+offset = 1316
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_validation ((reveal $(ctx)).IntrusiveListContext.resource) $(head) $(head) [] ((reveal $(ctx)).IntrusiveListContext.entries));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ")",
+    "{",
+    "list_validate",
+    "(",
+    "head",
+    ")",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "first",
+    "=",
+    "head",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove_head-69"
+offset = 1316
+text = """
+    _ghost_stmt(rewrite (IntrusiveListIndexed.is_list_ring_ix ((reveal $(ctx)).IntrusiveListContext.resource) $(head) 1.0R (FStar.List.Tot.append ([]) (((reveal $(ctx)).IntrusiveListContext.entries))))
+        as (IntrusiveListIndexed.is_list_ring_ix ((reveal $(ctx)).IntrusiveListContext.resource) $(head) 1.0R ((reveal $(ctx)).IntrusiveListContext.entries)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ")",
+    "{",
+    "list_validate",
+    "(",
+    "head",
+    ")",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "first",
+    "=",
+    "head",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove_head-70"
+offset = 1316
+text = """
+    _ghost_stmt(IntrusiveListIndexed.ring_open ((reveal $(ctx)).IntrusiveListContext.resource) $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "head",
+    ")",
+    "{",
+    "list_validate",
+    "(",
+    "head",
+    ")",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "first",
+    "=",
+    "head",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove_head-71"
+offset = 1358
+text = """
+    _ghost_stmt(IntrusiveListIndexed.ring_close ((reveal $(ctx)).IntrusiveListContext.resource) $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "first",
+    "=",
+    "head",
+    "->",
+    "next",
+    ";",
+]
+after = [
+    "list_remove",
+    "(",
+    "first",
+    ")",
+    ";",
+    "return",
+    "first",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove_head-72"
+offset = 1358
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_ring (reveal $(ctx)) $(head));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "first",
+    "=",
+    "head",
+    "->",
+    "next",
+    ";",
+]
+after = [
+    "list_remove",
+    "(",
+    "first",
+    ")",
+    ";",
+    "return",
+    "first",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove_head-73"
+offset = 1358
+text = """
+    _ghost_stmt(fold (IntrusiveListContext.remove_pre
+        (    { IntrusiveListContext.model = (reveal $(ctx)); IntrusiveListContext.head = $(head);       IntrusiveListContext.front = []; IntrusiveListContext.back = (FStar.List.Tot.tl ((reveal $(ctx)).IntrusiveListContext.entries));       IntrusiveListContext.description = (snd (FStar.List.Tot.hd ((reveal $(ctx)).IntrusiveListContext.entries))); }) $(first)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "first",
+    "=",
+    "head",
+    "->",
+    "next",
+    ";",
+]
+after = [
+    "list_remove",
+    "(",
+    "first",
+    ")",
+    ";",
+    "return",
+    "first",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove_head-74"
+offset = 1382
+text = """
+    _ghost_stmt(unfold (IntrusiveListContext.remove_post
+        (    { IntrusiveListContext.model = (reveal $(ctx)); IntrusiveListContext.head = $(head);       IntrusiveListContext.front = []; IntrusiveListContext.back = (FStar.List.Tot.tl ((reveal $(ctx)).IntrusiveListContext.entries));       IntrusiveListContext.description = (snd (FStar.List.Tot.hd ((reveal $(ctx)).IntrusiveListContext.entries))); }) $(first) _));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "->",
+    "next",
+    ";",
+    "list_remove",
+    "(",
+    "first",
+    ")",
+    ";",
+]
+after = [
+    "return",
+    "first",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove_head-75"
+offset = 1382
+text = """
+    _ghost_stmt(rewrite
+        (IntrusiveListIndexed.is_list_ring_ix ((reveal $(ctx)).IntrusiveListContext.resource) $(head) 1.0R
+            (FStar.List.Tot.append ([]) (FStar.List.Tot.tl ((reveal $(ctx)).IntrusiveListContext.entries))))
+        as (IntrusiveListIndexed.is_list_ring_ix ((reveal $(ctx)).IntrusiveListContext.resource) $(head) 1.0R
+            (FStar.List.Tot.tl ((reveal $(ctx)).IntrusiveListContext.entries))));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "->",
+    "next",
+    ";",
+    "list_remove",
+    "(",
+    "first",
+    ")",
+    ";",
+]
+after = [
+    "return",
+    "first",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove_head-76"
+offset = 1382
+text = """
+    _ghost_stmt(assert exists* (next: IntrusiveListIndexed.lref).
+        IntrusiveListIndexed.lpts_to $(first) (IntrusiveListIndexed.mklink next $(head)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "->",
+    "next",
+    ";",
+    "list_remove",
+    "(",
+    "first",
+    ")",
+    ";",
+]
+after = [
+    "return",
+    "first",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_remove_head-77"
+offset = 1382
+text = """
+    _ghost_stmt(rewrite
+        (IntrusiveListIndexed.is_list_ring_ix ((reveal $(ctx)).IntrusiveListContext.resource) $(head) 1.0R
+            (FStar.List.Tot.tl ((reveal $(ctx)).IntrusiveListContext.entries)) **
+        (exists* (next: IntrusiveListIndexed.lref).
+            IntrusiveListIndexed.lpts_to $(first) (IntrusiveListIndexed.mklink next $(head))) **
+        ((reveal $(ctx)).IntrusiveListContext.resource) $(first) (snd (FStar.List.Tot.hd ((reveal $(ctx)).IntrusiveListContext.entries))) **
+        pure ($(first) == fst (FStar.List.Tot.hd ((reveal $(ctx)).IntrusiveListContext.entries))))
+        as (IntrusiveListContext.remove_head_post (reveal $(ctx)) $(head) $(first)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_remove_head"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "->",
+    "next",
+    ";",
+    "list_remove",
+    "(",
+    "first",
+    ")",
+    ";",
+]
+after = [
+    "return",
+    "first",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-78"
+offset = 1477
+text = """
+    _ghost_stmt(unfold (IntrusiveListContext.move_pre (reveal $(ctx)) $(source) $(destination)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "source",
+    ",",
+    "struct",
+    "list_node",
+    "*",
+    "destination",
+    ")",
+    "{",
+]
+after = [
+    "bool",
+    "empty",
+    "=",
+    "list_empty",
+    "(",
+    "source",
+    ")",
+    ";",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-79"
+offset = 1514
+text = """
+    _ghost_stmt(unfold (IntrusiveListContext.empty_post ((reveal $(ctx)).IntrusiveListContext.source) $(source) $(empty)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "bool",
+    "empty",
+    "=",
+    "list_empty",
+    "(",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "empty",
+    ")",
+    "{",
+    "return",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-80"
+offset = 1514
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_ring ((reveal $(ctx)).IntrusiveListContext.source) $(source));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "bool",
+    "empty",
+    "=",
+    "list_empty",
+    "(",
+    "source",
+    ")",
+    ";",
+]
+after = [
+    "if",
+    "(",
+    "empty",
+    ")",
+    "{",
+    "return",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-81"
+offset = 1531
+text = """
+        _ghost_stmt(IntrusiveListOps.move_empty (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.resource) $(source) $(destination)
+            (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.entries) ((reveal $(ctx)).IntrusiveListContext.destination_entries));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "source",
+    ")",
+    ";",
+    "if",
+    "(",
+    "empty",
+    ")",
+    "{",
+]
+after = [
+    "return",
+    ";",
+    "}",
+    "else",
+    "{",
+    "}",
+    "struct",
+    "list_node",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "list_move-82"
+offset = 1531
+text = """
+        _ghost_stmt(fold (IntrusiveListContext.move_post (reveal $(ctx)) $(source) $(destination)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "source",
+    ")",
+    ";",
+    "if",
+    "(",
+    "empty",
+    ")",
+    "{",
+]
+after = [
+    "return",
+    ";",
+    "}",
+    "else",
+    "{",
+    "}",
+    "struct",
+    "list_node",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "        "
+
+[[files.annotations]]
+id = "list_move-83"
+offset = 1560
+text = """
+        _ghost_stmt(IntrusiveListOps.nonempty_intro (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.resource) $(source) (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.entries));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "empty",
+    ")",
+    "{",
+    "return",
+    ";",
+    "}",
+    "else",
+    "{",
+]
+after = [
+    "}",
+    "struct",
+    "list_node",
+    "*",
+    "first",
+    "=",
+    "source",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-84"
+offset = 1567
+text = """
+    _ghost_stmt(IntrusiveListOps.nonempty_elim (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.resource) $(source) (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.entries));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ")",
+    "{",
+    "return",
+    ";",
+    "}",
+    "else",
+    "{",
+    "}",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "first",
+    "=",
+    "source",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-85"
+offset = 1567
+text = """
+    _ghost_stmt(IntrusiveListIndexed.ring_open (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.resource) $(source));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    ")",
+    "{",
+    "return",
+    ";",
+    "}",
+    "else",
+    "{",
+    "}",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "first",
+    "=",
+    "source",
+    "->",
+    "next",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-86"
+offset = 1654
+text = """
+    _ghost_stmt(IntrusiveListIndexed.ring_close (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.resource) $(source));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "last",
+    "=",
+    "source",
+    "->",
+    "prev",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "tail",
+    "=",
+    "destination",
+    "->",
+    "prev",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-87"
+offset = 1654
+text = """
+    _ghost_stmt(IntrusiveListIndexed.ring_open (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.resource) $(destination));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "last",
+    "=",
+    "source",
+    "->",
+    "prev",
+    ";",
+]
+after = [
+    "struct",
+    "list_node",
+    "*",
+    "tail",
+    "=",
+    "destination",
+    "->",
+    "prev",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-88"
+offset = 1702
+text = """
+    _ghost_stmt(IntrusiveListIndexed.ring_close (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.resource) $(destination));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "tail",
+    "=",
+    "destination",
+    "->",
+    "prev",
+    ";",
+]
+after = [
+    "tail",
+    "->",
+    "next",
+    "=",
+    "first",
+    ";",
+    "first",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-89"
+offset = 1702
+text = """
+    _ghost_stmt(IntrusiveListOps.move_open (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.resource) $(source) $(destination) $(first) $(last) $(tail)
+        (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.entries) ((reveal $(ctx)).IntrusiveListContext.destination_entries));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "list_node",
+    "*",
+    "tail",
+    "=",
+    "destination",
+    "->",
+    "prev",
+    ";",
+]
+after = [
+    "tail",
+    "->",
+    "next",
+    "=",
+    "first",
+    ";",
+    "first",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-90"
+offset = 1726
+text = """
+    _ghost_stmt(IntrusiveListOps.move_first (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.resource) $(source) $(destination) $(first) $(last) $(tail)
+        (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.entries) ((reveal $(ctx)).IntrusiveListContext.destination_entries));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "prev",
+    ";",
+    "tail",
+    "->",
+    "next",
+    "=",
+    "first",
+    ";",
+]
+after = [
+    "first",
+    "->",
+    "prev",
+    "=",
+    "tail",
+    ";",
+    "last",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-91"
+offset = 1750
+text = """
+    _ghost_stmt(IntrusiveListOps.move_last (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.resource) $(source) $(destination) $(first) $(last) $(tail)
+        (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.entries) ((reveal $(ctx)).IntrusiveListContext.destination_entries));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "first",
+    ";",
+    "first",
+    "->",
+    "prev",
+    "=",
+    "tail",
+    ";",
+]
+after = [
+    "last",
+    "->",
+    "next",
+    "=",
+    "destination",
+    ";",
+    "destination",
+    "->",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-92"
+offset = 1780
+text = """
+    _ghost_stmt(IntrusiveListOps.move_destination (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.resource) $(source) $(destination) $(first) $(last) $(tail)
+        (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.entries) ((reveal $(ctx)).IntrusiveListContext.destination_entries));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "tail",
+    ";",
+    "last",
+    "->",
+    "next",
+    "=",
+    "destination",
+    ";",
+]
+after = [
+    "destination",
+    "->",
+    "prev",
+    "=",
+    "last",
+    ";",
+    "list_init",
+    "(",
+]
+replacement_tokens = []
+at_start = false
+at_end = false
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-93"
+offset = 1810
+text = """
+    _ghost_stmt(IntrusiveListOps.move_close (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.resource) $(source) $(destination) $(first) $(last) $(tail)
+        (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.entries) ((reveal $(ctx)).IntrusiveListContext.destination_entries));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "destination",
+    ";",
+    "destination",
+    "->",
+    "prev",
+    "=",
+    "last",
+    ";",
+]
+after = [
+    "list_init",
+    "(",
+    "source",
+    ")",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-94"
+offset = 1810
+text = """
+    _ghost_stmt(IntrusiveListContext.prepare_init (IntrusiveListContext.make (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.resource) []) $(source));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "destination",
+    ";",
+    "destination",
+    "->",
+    "prev",
+    "=",
+    "last",
+    ";",
+]
+after = [
+    "list_init",
+    "(",
+    "source",
+    ")",
+    ";",
+    "}",
+]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = "    "
+
+[[files.annotations]]
+id = "list_move-95"
+offset = 1833
+text = """
+    _ghost_stmt(IntrusiveListContext.finish_ring (IntrusiveListContext.make (((reveal $(ctx)).IntrusiveListContext.source).IntrusiveListContext.resource) []) $(source));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "=",
+    "last",
+    ";",
+    "list_init",
+    "(",
+    "source",
+    ")",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
+
+[[files.annotations]]
+id = "list_move-96"
+offset = 1833
+text = """
+    _ghost_stmt(fold (IntrusiveListContext.move_post (reveal $(ctx)) $(source) $(destination)));
+"""
+replacement = ""
+
+[files.annotations.owner]
+kind = "function_definition"
+name = "list_move"
+
+[files.annotations.site]
+kind = "statement"
+before = [
+    "=",
+    "last",
+    ";",
+    "list_init",
+    "(",
+    "source",
+    ")",
+    ";",
+]
+after = ["}"]
+replacement_tokens = []
+at_start = false
+at_end = true
+gap_before = """
+
+"""
+gap_after = ""
