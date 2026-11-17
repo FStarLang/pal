@@ -173,7 +173,8 @@ usable with the exact F\* that checked it (see `BUILDINFO`); otherwise
 re-check it with `rm -rf pulse/_cache && make -C pulse FSTAR_EXE=fstar.exe`.
 [`.github/workflows/package.yml`](.github/workflows/package.yml) builds the
 packages on Ubuntu 22.04, macOS 15 (arm64 and x86\_64) and Windows, tests
-them on clean machines, and attaches them to the release of a `v*` tag.
+them on clean machines, and uploads them as workflow artifacts (run it
+manually from the Actions tab).
 
 ### Translate a file
 
