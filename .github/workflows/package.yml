@@ -1,0 +1,231 @@
+name: Package
+
+# Builds the relocatable binary packages (opt/package.sh) for Linux, macOS and
+# Windows, with F* and z3 bundled, and tests them (opt/package-test.sh:
+# translate and verify) on fresh machines without LLVM or F*. The packages are
+# available as workflow artifacts.
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    # The package runs on glibc >= the build host's: build on the oldest
+    # supported Ubuntu.
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install clang
+      run: |
+        wget https://apt.llvm.org/llvm.sh
+        chmod +x llvm.sh
+        sudo ./llvm.sh 20
+        sudo apt update
+        sudo apt install -y clang-20 libclang-cpp20-dev g++ clang-tools-20 libclang-20-dev patchelf
+
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+
+    - name: Install F*
+      run: ./opt/install-fstar.sh --dest "$RUNNER_TEMP/fstar" --no-link
+
+    - name: Build package
+      run: make package PACKAGE_OPTS="--fstar $RUNNER_TEMP/fstar"
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: pal-linux-x86_64
+        path: dist/pal-*.tar.gz*
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:22.04', 'ubuntu:24.04', 'debian:12']
+    container: ${{ matrix.image }}
+    steps:
+    - name: Install test prerequisites (no LLVM, no F*)
+      run: apt-get update && apt-get install -y make libc6-dev
+
+    - uses: actions/checkout@v4
+
+    - uses: actions/download-artifact@v4
+      with:
+        name: pal-linux-x86_64
+        path: dist
+
+    - name: Test package (translate and verify)
+      run: VERIFY=1 make package-test
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - { runner: macos-15, arch: arm64 }
+        - { runner: macos-15-intel, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install LLVM 20
+      run: |
+        brew install llvm@20
+        echo "LLVM_CONFIG=$(brew --prefix llvm@20)/bin/llvm-config" >> "$GITHUB_ENV"
+
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+
+    # The F* build for this architecture, and the Homebrew libraries that its
+    # fstar.exe links (bundled next to it by package.sh).
+    - name: Install F*
+      run: |
+        ./opt/install-fstar.sh --dest "$RUNNER_TEMP/fstar" --no-link
+        brew install gmp zstd
+
+    - name: Build package
+      run: make package PACKAGE_OPTS="--fstar $RUNNER_TEMP/fstar"
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: pal-macos-${{ matrix.arch }}
+        path: dist/pal-*.tar.gz*
+
+  macos-test:
+    # Fresh runners, without Homebrew's llvm@20 or F*.
+    needs: macos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - { runner: macos-26, arch: arm64 }
+        - { runner: macos-26-intel, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/download-artifact@v4
+      with:
+        name: pal-macos-${{ matrix.arch }}
+        path: dist
+
+    - name: Test package (translate and verify)
+      run: VERIFY=1 make package-test
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+    - name: Check out with symlinks and LF line endings
+      shell: pwsh
+      run: |
+        git config --global core.symlinks true
+        git config --global core.autocrlf false
+
+    - uses: actions/checkout@v4
+
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: UCRT64
+        update: true
+        install: >-
+          make git python zip unzip
+          mingw-w64-ucrt-x86_64-rust
+          mingw-w64-ucrt-x86_64-clang
+          mingw-w64-ucrt-x86_64-llvm
+          mingw-w64-ucrt-x86_64-clang-tools-extra
+
+    - name: Configure MSYS2 git like the checkout
+      run: |
+        git config --global --add safe.directory "$PWD"
+        git config --global core.symlinks true
+        git config --global core.autocrlf false
+        git status --short
+
+    - name: Install F*
+      run: ./opt/install-fstar.sh --dest "$(cygpath -u "$RUNNER_TEMP")/fstar" --no-link
+
+    - name: Build package
+      run: make package PACKAGE_OPTS="--fstar $(cygpath -u "$RUNNER_TEMP")/fstar"
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: pal-windows-x86_64
+        path: dist/pal-*.zip*
+
+  windows-test:
+    # A clean environment: MSYS2 tools (make, unzip) and the MinGW-w64 C
+    # library headers, but no clang, LLVM, gcc or F*.
+    needs: windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+    - name: Check out with symlinks and LF line endings
+      shell: pwsh
+      run: |
+        git config --global core.symlinks true
+        git config --global core.autocrlf false
+
+    - uses: actions/checkout@v4
+
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: UCRT64
+        install: make unzip mingw-w64-ucrt-x86_64-headers
+
+    # Without a MinGW gcc on PATH, pal.exe's clang finds no C library headers
+    # (stdlib.h, ...) unless told where they are.
+    - name: Point pal.exe to the MinGW-w64 headers
+      run: echo "PAL_SYSROOT=$(cygpath -m "$MINGW_PREFIX")" >> "$GITHUB_ENV"
+
+    - uses: actions/download-artifact@v4
+      with:
+        name: pal-windows-x86_64
+        path: dist
+
+    - name: Test package (translate and verify)
+      run: VERIFY=1 make package-test
+
+  windows-msvc-test:
+    # Windows without MSYS2: the C library headers of MSVC and the Windows SDK
+    # (clang target x86_64-pc-windows-msvc, set by a compile_flags.txt next to
+    # each test), and a PowerShell test driver instead of bash and make.
+    needs: windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+    - uses: actions/checkout@v4
+
+    # INCLUDE: the MSVC and Windows SDK header directories, as set by
+    # vcvars64.bat of the Visual Studio installation that vswhere finds.
+    - name: Set INCLUDE to the MSVC and Windows SDK headers
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vs = & $vswhere -latest -products * `
+          -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if (-not $vs) { throw 'no Visual Studio with the MSVC x64 tools' }
+        $include = cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" |
+          Select-String '^INCLUDE=' | Select-Object -First 1
+        if (-not $include) { throw 'vcvars64.bat did not set INCLUDE' }
+        Write-Host $include.Line
+        $include.Line >> $env:GITHUB_ENV
+
+    - uses: actions/download-artifact@v4
+      with:
+        name: pal-windows-x86_64
+        path: dist
+
+    - name: Test package (translate and verify)
+      run: ./opt/package-test.ps1 (Get-Item dist/pal-*.zip).FullName -Target x86_64-pc-windows-msvc
