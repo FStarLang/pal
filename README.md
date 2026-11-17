@@ -187,14 +187,15 @@ else the bundled `fstar/bin/fstar.exe`, else `fstar.exe` on `PATH`. With
 that F\* binary distribution (`fstar.exe`, its checked standard and Pulse
 libraries, and F\*'s default z3; `--fstar-z3 VER,...|all` for others), and
 ships `pulse/_cache` checked by it. On macOS, the dylibs that `fstar.exe`
-links (Homebrew's gmp and zstd) are copied next to it. The F\* nightlies are
-only built for x86\_64 macOS, so arm64 packages bundle that build, which
-runs under Rosetta 2 (`FSTAR_LIB_PATH` tells `package.sh` where to find
-x86\_64 dylibs; see the workflow). A shipped `pulse/_cache` is only usable
+links (Homebrew's gmp and zstd) are copied next to it. The pinned F\*
+nightly is only built for x86\_64 macOS; an arm64 package could bundle that
+build to run under Rosetta 2 (`FSTAR_LIB_PATH` tells `package.sh` where to
+find x86\_64 dylibs), but the workflow does not build arm64 packages, since
+Homebrew no longer ships x86\_64 bottles of gmp. A shipped `pulse/_cache` is only usable
 with the exact F\* that checked it (see `BUILDINFO`); otherwise re-check it
 with `rm -rf pulse/_cache && make -C pulse FSTAR_EXE=fstar.exe`.
 [`.github/workflows/package.yml`](.github/workflows/package.yml) builds the
-packages, with F\* and z3, on Ubuntu 22.04, macOS 15 (arm64 and x86\_64) and
+packages, with F\* and z3, on Ubuntu 22.04, macOS 15 (x86\_64) and
 Windows, then translates and verifies tests with them on clean machines
 without LLVM or F\* (on Windows, both with MSYS2's MinGW headers and with
 MSVC's), and uploads them as workflow artifacts (run it manually

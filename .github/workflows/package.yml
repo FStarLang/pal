@@ -68,7 +68,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - { runner: macos-15, arch: arm64 }
+        # Disabled: the pinned F* nightly has no arm64 macOS build, and
+        # Homebrew no longer ships the x86_64 bottles (gmp) that bundling it
+        # for Rosetta 2 needs.
+        # - { runner: macos-15, arch: arm64 }
         - { runner: macos-15-intel, arch: x86_64 }
     runs-on: ${{ matrix.runner }}
     steps:
@@ -82,8 +85,8 @@ jobs:
     - name: Install Rust
       run: rustup update stable && rustup default stable
 
-    # The pinned F* nightly is only built for x86_64 macOS: arm64 packages
-    # bundle it too, and it runs under Rosetta 2.
+    # The pinned F* nightly is only built for x86_64 macOS (arm64 packages
+    # would bundle it too, to run under Rosetta 2).
     - name: Install F* (x86_64)
       run: arch -x86_64 /bin/bash ./opt/install-fstar.sh --dest "$RUNNER_TEMP/fstar" --no-link
 
@@ -119,7 +122,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - { runner: macos-26, arch: arm64 }
+        # - { runner: macos-26, arch: arm64 }  # disabled, see the macos job
         - { runner: macos-26-intel, arch: x86_64 }
     runs-on: ${{ matrix.runner }}
     steps:
