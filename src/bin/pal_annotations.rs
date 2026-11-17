@@ -16,6 +16,20 @@ struct Cli {
     )]
     extract: bool,
 
+    #[arg(
+        long,
+        requires = "extract",
+        help = "Keep declaration specifications inline"
+    )]
+    proofs_only: bool,
+
+    #[arg(
+        short = 'I',
+        requires = "extract",
+        help = "Root-relative include directory for supplied headers"
+    )]
+    include_dirs: Vec<PathBuf>,
+
     #[arg(long, value_name = "ANNOTATIONS", help = "Apply an annotation overlay")]
     apply: Option<PathBuf>,
 
@@ -57,6 +71,8 @@ fn main() {
             &cli.root,
             &cli.files,
             &cli.output.unwrap_or_else(|| "out.annotations".into()),
+            cli.proofs_only,
+            &cli.include_dirs,
         )
     } else {
         annotations::apply_files(&cli.root, &cli.apply.unwrap(), cli.check)

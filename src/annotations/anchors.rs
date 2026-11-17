@@ -109,16 +109,70 @@ pub fn standalone_statements(source: &str) -> Result<std::collections::BTreeMap<
     Ok(statements)
 }
 
+pub fn function_bodies(source: &str) -> Result<Vec<std::ops::Range<usize>>> {
+    fn visit(node: Node<'_>, bodies: &mut Vec<std::ops::Range<usize>>) {
+        if node.kind() == "function_definition"
+            && let Some(body) = node.child_by_field_name("body")
+        {
+            bodies.push(body.byte_range());
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            visit(child, bodies);
+        }
+    }
+    let tree = parse(source)?;
+    let mut bodies = Vec::new();
+    visit(tree.root_node(), &mut bodies);
+    // Opaque declaration/handler macros can make tree-sitter recover before
+    // the end of a function. Also recognize balanced file-scope function
+    // bodies, excluding records, directives and global initializers.
+    let tokens = lex(source)?.tokens;
+    let mut braces = Vec::new();
+    let mut parens = 0usize;
+    let mut initializer = false;
+    let mut previous = "";
+    for token in tokens.iter().filter(|token| token.directive.is_none()) {
+        match token.text.as_str() {
+            "(" => parens += 1,
+            ")" => parens = parens.saturating_sub(1),
+            "=" if braces.is_empty() && parens == 0 => initializer = true,
+            ";" if braces.is_empty() && parens == 0 => initializer = false,
+            "{" => braces.push((
+                token.start,
+                braces.is_empty() && parens == 0 && previous == ")" && !initializer,
+            )),
+            "}" => {
+                if let Some((start, function)) = braces.pop()
+                    && function
+                {
+                    bodies.push(start..token.end);
+                }
+                if braces.is_empty() {
+                    initializer = false;
+                }
+            }
+            _ => {}
+        }
+        previous = &token.text;
+    }
+    Ok(bodies)
+}
+
 pub fn declared_names(source: &str) -> Result<Vec<String>> {
     fn visit(node: Node<'_>, source: &str, names: &mut Vec<String>) {
-        if matches!(
-            node.kind(),
-            "function_definition"
-                | "declaration"
-                | "type_definition"
-                | "parameter_declaration"
-                | "field_declaration"
-        ) {
+        // Recovery can misread postfix annotation macros as C bindings.
+        if !node.has_error()
+            && matches!(
+                node.kind(),
+                "function_definition"
+                    | "declaration"
+                    | "type_definition"
+                    | "parameter_declaration"
+                    | "field_declaration"
+            )
+        {
             let mut cursor = node.walk();
             for declarator in node.children_by_field_name("declarator", &mut cursor) {
                 if let Some(name) = name(declarator, source) {

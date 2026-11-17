@@ -317,6 +317,7 @@ _ghost_stmt(
     let (file, stripped, macros) = extract(source);
     let overlay = Overlay {
         format_version: 1,
+        include_dirs: Vec::new(),
         files: vec![file],
     };
     let serialized = toml::to_string_pretty(&overlay).unwrap();

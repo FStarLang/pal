@@ -18,6 +18,17 @@ The overlay argument and `-o` remain relative to the current directory.
 Sources must resolve to regular files inside the root. Sources and paths must
 be UTF-8.
 
+Use `--extract --proofs-only` to retain declaration contracts, parameter and
+type specifications, and body-less `_include_pulse(Module)` references inline.
+This extracts ghost statements, assertions, loop annotations, attributes within
+function bodies (including label joins), and standalone helper definitions.
+Application remembers this selection and preserves the retained specifications.
+Wrappers with runtime variants still retain those runtime uses.
+
+`-I DIR` adds a root-relative search directory for quoted and angle includes
+between explicitly supplied files. The directories are recorded in the overlay
+and reused at application; unlisted headers never supply annotation aliases.
+
 ## Guarantees
 
 - Extract/apply with no intervening edits restores the original source bytes,
@@ -101,13 +112,18 @@ PAL's own macro definitions remain infrastructure, including their
 invocations are extracted without deleting runtime C. Annotation-only wrapper
 macros defined consistently in a source's include context are also recognized
 at their use sites. Include all relevant headers in the extraction batch;
-wrapper discovery follows quoted relative includes between supplied files,
-including cycles, without importing aliases from unrelated translation units.
-It does not search compiler include paths, read unlisted headers, or perform
+wrapper discovery follows quoted relative includes and the explicitly supplied
+`-I` directories for quoted/angle includes, including cycles, without importing
+aliases from unrelated translation units. It does not search implicit compiler
+include paths, read unlisted headers, or perform
 macro expansion. A wrapper with a runtime definition in another branch
 remains a runtime macro. Annotation-only wrapper names must not also name C
 declarations or be undefined in their include context; such cases are rejected
 before writing rather than guessing which uses are annotations.
+In proof-only mode, redefined (`#undef`) wrappers are conservatively retained,
+including their aliases, rather than assuming their external definitions are
+proof-only. Reusable `_inline_pulse` fragments in macro definitions remain
+specification infrastructure.
 
 Standalone proof statements inside a parsed compound statement are removed, together
 with their semicolons and (when they occupy a whole line) indentation and line

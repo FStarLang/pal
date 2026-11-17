@@ -1,6 +1,6 @@
 use super::{
-    Annotation, Edit, FileOverlay, Macro, Result, anchors, definition, edit_source,
-    extract_source_mode, lex, removals,
+    Annotation, Edit, FileOverlay, Macro, Result, anchors, compact_statements, definition,
+    edit_source, extract_source_selected, lex, removals, selected_removals,
 };
 
 pub(super) fn validate_replacement(annotation: &Annotation) -> Result<()> {
@@ -70,7 +70,21 @@ struct RuntimeSource {
     definitions: Vec<(String, bool)>,
 }
 
-fn runtime_source(source: &str, macros: &[Macro]) -> Result<RuntimeSource> {
+fn runtime_source(source: &str, macros: &[Macro], proofs_only: bool) -> Result<RuntimeSource> {
+    let selected;
+    let source = if proofs_only {
+        // Retained specification syntax can affect parser recovery. Erase
+        // implementation annotations in that same syntax before erasing specs.
+        let mut removals = selected_removals(source, macros, true)?;
+        compact_statements(source, &mut removals)?;
+        selected = edit_source(
+            source,
+            &removals.into_iter().map(|r| r.edit).collect::<Vec<_>>(),
+        )?;
+        &selected
+    } else {
+        source
+    };
     // Use a fixed erasure policy, independent of the sidecar's compact mode.
     let edits: Vec<_> = removals(source, macros)?
         .into_iter()
@@ -132,8 +146,13 @@ pub(super) fn validate_application(
     }
     // A payload must also be recognized in situ, not swallowed by an existing
     // comment/string or joined to surrounding source tokens.
-    let (observed, _) =
-        extract_source_mode(file.path.clone(), updated, macros, file.compact_statements)?;
+    let (observed, _) = extract_source_selected(
+        file.path.clone(),
+        updated,
+        macros,
+        file.compact_statements,
+        file.proofs_only,
+    )?;
     let mut expected: Vec<_> = file.annotations.iter().map(|a| a.text.trim()).collect();
     let mut actual: Vec<_> = observed.annotations.iter().map(|a| a.text.trim()).collect();
     expected.sort();
@@ -141,8 +160,8 @@ pub(super) fn validate_application(
     if expected != actual {
         return Err("source preservation: applied annotations do not match the payloads in their source context".into());
     }
-    let before = runtime_source(original, macros)?;
-    let after = runtime_source(updated, macros)?;
+    let before = runtime_source(original, macros, file.proofs_only)?;
+    let after = runtime_source(updated, macros, file.proofs_only)?;
     if before.definitions != after.definitions {
         return Err("source preservation: application changes a preprocessor macro's name or function-like form".into());
     }

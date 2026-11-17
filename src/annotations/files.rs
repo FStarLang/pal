@@ -1,6 +1,6 @@
 use super::{
-    Overlay, Result, discover_macros, extract_source, preservation::validate_application,
-    render_source,
+    Overlay, Result, discover_macros_mode, extract_source_selected,
+    preservation::validate_application, render_source,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -115,7 +115,10 @@ fn commit(changes: &[Change]) -> Result<()> {
     Ok(())
 }
 
-fn include_graph(sources: &BTreeMap<PathBuf, &str>) -> Result<BTreeMap<PathBuf, Vec<PathBuf>>> {
+fn include_graph(
+    sources: &BTreeMap<PathBuf, &str>,
+    include_dirs: &[PathBuf],
+) -> Result<BTreeMap<PathBuf, Vec<PathBuf>>> {
     let mut graph = BTreeMap::new();
     for (path, source) in sources {
         let lexed = super::lex::lex(source)?;
@@ -125,18 +128,41 @@ fn include_graph(sources: &BTreeMap<PathBuf, &str>) -> Result<BTreeMap<PathBuf, 
             if tokens.get(1).map(|token| token.text.as_str()) != Some("include") {
                 continue;
             }
-            if let Some(header) = tokens.get(2).and_then(|token| {
+            let quoted = tokens.get(2).and_then(|token| {
                 token
                     .text
                     .strip_prefix('"')
                     .and_then(|text| text.strip_suffix('"'))
-            }) {
-                let candidate = path.parent().ok_or("source has no parent")?.join(header);
-                // Only explicitly supplied headers participate in discovery.
-                if let Ok(resolved) = fs::canonicalize(candidate)
-                    && sources.contains_key(&resolved)
-                {
-                    includes.push(resolved);
+            });
+            let angled = if tokens.get(2).is_some_and(|token| token.text == "<") {
+                tokens
+                    .iter()
+                    .skip(3)
+                    .position(|token| token.text == ">")
+                    .map(|end| {
+                        tokens[3..3 + end]
+                            .iter()
+                            .map(|token| token.text.as_str())
+                            .collect::<String>()
+                    })
+            } else {
+                None
+            };
+            if let Some(header) = quoted.or(angled.as_deref()) {
+                let mut directories = Vec::new();
+                if quoted.is_some() {
+                    directories.push(path.parent().ok_or("source has no parent")?.to_owned());
+                }
+                directories.extend_from_slice(include_dirs);
+                for directory in directories {
+                    if let Ok(resolved) = fs::canonicalize(directory.join(header)) {
+                        // A shadowing but unlisted header must not import
+                        // aliases from a later search directory.
+                        if sources.contains_key(&resolved) {
+                            includes.push(resolved);
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -162,7 +188,36 @@ fn context<'a>(
     context
 }
 
-pub fn extract_files(root: &Path, inputs: &[PathBuf], output: &Path) -> Result<String> {
+fn include_directories(root: &Path, inputs: &[String]) -> Result<Vec<PathBuf>> {
+    inputs
+        .iter()
+        .map(|input| {
+            let path = Path::new(input);
+            if path.is_absolute()
+                || path
+                    .components()
+                    .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
+            {
+                return Err(format!("invalid include directory: {input}"));
+            }
+            let directory = fs::canonicalize(root.join(path)).map_err(|error| error.to_string())?;
+            if !directory.starts_with(root) || !directory.is_dir() {
+                return Err(format!(
+                    "include directory outside root or not a directory: {input}"
+                ));
+            }
+            Ok(directory)
+        })
+        .collect()
+}
+
+pub fn extract_files(
+    root: &Path,
+    inputs: &[PathBuf],
+    output: &Path,
+    proofs_only: bool,
+    include_dirs: &[PathBuf],
+) -> Result<String> {
     let root = fs::canonicalize(root).map_err(|error| error.to_string())?;
     let mut sources = BTreeMap::new();
     if output.symlink_metadata().is_ok() {
@@ -188,16 +243,28 @@ pub fn extract_files(root: &Path, inputs: &[PathBuf], output: &Path) -> Result<S
         .values()
         .map(|(path, source)| (path.clone(), source.as_str()))
         .collect();
-    let graph = include_graph(&source_index)?;
+    let include_dirs = include_dirs
+        .iter()
+        .map(|path| {
+            path.to_str()
+                .map(str::to_owned)
+                .ok_or("include directory is not UTF-8".to_owned())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let directories = include_directories(&root, &include_dirs)?;
+    let graph = include_graph(&source_index, &directories)?;
     let mut overlay = Overlay {
         format_version: 1,
+        include_dirs,
         files: Vec::new(),
     };
     let mut changes = Vec::new();
     for (relative, (path, original)) in &sources {
-        let macros = discover_macros(&context(path, &source_index, &graph))?;
-        let (file, updated) = extract_source(relative.clone(), original, &macros)
+        let macros = discover_macros_mode(&context(path, &source_index, &graph), proofs_only)
             .map_err(|error| format!("{relative}: {error}"))?;
+        let (file, updated) =
+            extract_source_selected(relative.clone(), original, &macros, true, proofs_only)
+                .map_err(|error| format!("{relative}: {error}"))?;
         overlay.files.push(file);
         if original != &updated {
             changes.push(Change {
@@ -266,10 +333,14 @@ pub fn apply_files(root: &Path, input: &Path, check: bool) -> Result<String> {
         .iter()
         .map(|change| (change.path.clone(), change.updated.as_str()))
         .collect();
-    let graph = include_graph(&source_index)?;
+    let directories = include_directories(&root, &overlay.include_dirs)?;
+    let graph = include_graph(&source_index, &directories)?;
     for (file, change) in overlay.files.iter().zip(&candidates) {
-        let macros = discover_macros(&context(&change.path, &source_index, &graph))
-            .map_err(|error| format!("{}: {error}", file.path))?;
+        let macros = discover_macros_mode(
+            &context(&change.path, &source_index, &graph),
+            file.proofs_only,
+        )
+        .map_err(|error| format!("{}: {error}", file.path))?;
         validate_application(file, &change.original, &change.updated, &macros)
             .map_err(|error| format!("{}: {error}", file.path))?;
     }

@@ -18,6 +18,8 @@ type Result<T> = std::result::Result<T, String>;
 #[serde(deny_unknown_fields)]
 struct Overlay {
     format_version: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    include_dirs: Vec<String>,
     files: Vec<FileOverlay>,
 }
 
@@ -29,6 +31,8 @@ struct FileOverlay {
     stripped_sha256: String,
     #[serde(default)]
     compact_statements: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    proofs_only: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     macros: Vec<Macro>,
     annotations: Vec<Annotation>,
@@ -112,13 +116,17 @@ fn builtins() -> BTreeMap<String, Macro> {
         ),
         (
             "_plain _core_ref _nullable _mutable _consumes _out _array _arrayptr \
-             _cursor _pure _total _pal_ignore _pal_admit _pal_overread \
+             _cursor _pure _total _pal_ignore _pal_admit _pal_overread _unowned \
              _pulse_opaque_to_smt _rec _pulse_eager_unfold_predicate _pointer_view \
              _overlay _owning _memset_zero _allocated",
             false,
             MacroKind::Attribute,
         ),
-        ("_assert _ghost_stmt", true, MacroKind::Expression),
+        (
+            "_assert _ghost_stmt _ternary_requires _ternary_ensures",
+            true,
+            MacroKind::Expression,
+        ),
         (
             "_include_pulse _let _let_rec _letimpure _type",
             true,
@@ -207,7 +215,12 @@ fn invocation_end(tokens: &[Token], i: usize, annotation: &Macro) -> Result<Opti
     Ok(Some(close + 1))
 }
 
+#[cfg(test)]
 fn discover_macros(sources: &[&str]) -> Result<Vec<Macro>> {
+    discover_macros_mode(sources, false)
+}
+
+fn discover_macros_mode(sources: &[&str], proofs_only: bool) -> Result<Vec<Macro>> {
     let base = builtins();
     let mut macros = base.clone();
     let mut undefined = std::collections::BTreeSet::new();
@@ -266,7 +279,7 @@ fn discover_macros(sources: &[&str]) -> Result<Vec<Macro>> {
             // A wrapper with a runtime definition in any branch must remain a
             // runtime macro. Its individual annotation invocations are still
             // extracted from the replacement body.
-            if pure && found {
+            if pure && found && !(proofs_only && undefined.contains(&name)) {
                 macros.insert(
                     name.clone(),
                     Macro {
@@ -320,6 +333,7 @@ struct Edit {
 struct Removal {
     edit: Edit,
     kind: &'static str,
+    annotation_kind: MacroKind,
 }
 
 fn removals(source: &str, macros: &[Macro]) -> Result<Vec<Removal>> {
@@ -357,6 +371,12 @@ fn removals(source: &str, macros: &[Macro]) -> Result<Vec<Removal>> {
         }
         let Some(annotation) = known.get(&token.text) else {
             if token.text == "_inline_pulse" {
+                if in_macro && tokens.get(i + 1).is_some_and(|token| token.text == "(") {
+                    // A reusable specification fragment is not a standalone
+                    // annotation. Retain its macro definition and its uses.
+                    i = close_paren(&tokens, i + 1)? + 1;
+                    continue;
+                }
                 return Err(format!(
                     "_inline_pulse outside a removable annotation at byte {}",
                     token.start
@@ -386,6 +406,7 @@ fn removals(source: &str, macros: &[Macro]) -> Result<Vec<Removal>> {
             } else {
                 annotation.kind.site()
             },
+            annotation_kind: annotation.kind,
         });
         i = end;
     }
@@ -411,6 +432,7 @@ fn edit_source(source: &str, edits: &[Edit]) -> Result<String> {
     Ok(result)
 }
 
+#[cfg(test)]
 fn extract_source(path: String, source: &str, macros: &[Macro]) -> Result<(FileOverlay, String)> {
     extract_source_mode(path, source, macros, true)
 }
@@ -459,13 +481,55 @@ fn compact_statements(source: &str, removals: &mut [Removal]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn extract_source_mode(
     path: String,
     source: &str,
     macros: &[Macro],
     compact: bool,
 ) -> Result<(FileOverlay, String)> {
+    extract_source_selected(path, source, macros, compact, false)
+}
+
+fn selected_removals(source: &str, macros: &[Macro], proofs_only: bool) -> Result<Vec<Removal>> {
     let mut removals = removals(source, macros)?;
+    if proofs_only {
+        // Mask every annotation without moving byte offsets before asking the
+        // C parser which attributes belong to implementation bodies.
+        let mut skeleton = source.as_bytes().to_vec();
+        for removal in &removals {
+            for byte in &mut skeleton[removal.edit.start..removal.edit.end] {
+                if *byte != b'\n' && *byte != b'\r' {
+                    *byte = b' ';
+                }
+            }
+            if removal.annotation_kind == MacroKind::Expression {
+                skeleton[removal.edit.start] = b'0';
+            }
+        }
+        let skeleton = String::from_utf8(skeleton).map_err(|error| error.to_string())?;
+        let bodies = anchors::function_bodies(&skeleton)?;
+        removals.retain(|removal| {
+            let text = &source[removal.edit.start..removal.edit.end];
+            let name = text.split('(').next().unwrap_or(text).trim();
+            removal.annotation_kind == MacroKind::Expression
+                || matches!(name, "_invariant" | "_do_while_first" | "_do_while_cond")
+                || bodies.iter().any(|body| body.contains(&removal.edit.start))
+                || (removal.annotation_kind == MacroKind::TopLevel
+                    && (name != "_include_pulse" || text.contains(',')))
+        });
+    }
+    Ok(removals)
+}
+
+fn extract_source_selected(
+    path: String,
+    source: &str,
+    macros: &[Macro],
+    compact: bool,
+    proofs_only: bool,
+) -> Result<(FileOverlay, String)> {
+    let mut removals = selected_removals(source, macros, proofs_only)?;
     if compact {
         compact_statements(source, &mut removals)?;
     }
@@ -508,6 +572,7 @@ fn extract_source_mode(
             original_sha256: hash(source),
             stripped_sha256: hash(&stripped),
             compact_statements: compact,
+            proofs_only,
             macros: macros.to_vec(),
             annotations,
         },
@@ -594,10 +659,15 @@ fn render_source(file: &FileOverlay, source: &str, macros: &[Macro]) -> Result<S
     if file.annotations.is_empty() {
         return Ok(source.into());
     }
-    let existing = removals(source, macros)?;
+    let existing = selected_removals(source, macros, file.proofs_only)?;
     if !existing.is_empty() {
-        let (current, clean) =
-            extract_source_mode(file.path.clone(), source, macros, file.compact_statements)?;
+        let (current, clean) = extract_source_selected(
+            file.path.clone(),
+            source,
+            macros,
+            file.compact_statements,
+            file.proofs_only,
+        )?;
         let restored = restore_clean(file, &clean)?;
         let mut expected_payloads: Vec<_> =
             file.annotations.iter().map(|a| a.text.trim()).collect();

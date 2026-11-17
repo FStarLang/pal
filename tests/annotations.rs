@@ -25,6 +25,100 @@ fn success(output: Output) -> String {
 }
 
 #[test]
+fn proofs_only_keeps_specs_and_roundtrips_implementation_annotations() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let source = "\
+_include_pulse(Vocabulary)\n\
+_include_pulse(Helpers, let proof () : Lemma True = ())\n\
+int f(_plain int *p) _requires(*p >= 0) _ensures(return >= 0) {\n\
+    _ghost_stmt(start ());\n\
+    while (*p > 0) _invariant(*p >= 0) { (*p)--; }\n\
+    end: _ensures(_live(p))\n\
+    return *p;\n\
+}\n";
+    fs::write(root.join("a.c"), source).unwrap();
+    success(run(root, &["--extract", "--proofs-only", "a.c"]));
+    let stripped = fs::read_to_string(root.join("a.c")).unwrap();
+    assert!(stripped.contains("_include_pulse(Vocabulary)"));
+    assert!(stripped.contains("f(_plain int *p) _requires(*p >= 0) _ensures(return >= 0)"));
+    for proof in ["_ghost_stmt", "_invariant", "_ensures(_live", "Helpers"] {
+        assert!(!stripped.contains(proof), "{stripped}");
+    }
+    success(run(root, &["--apply", "out.annotations", "--check"]));
+    assert_eq!(fs::read_to_string(root.join("a.c")).unwrap(), stripped);
+    success(run(root, &["--apply", "out.annotations"]));
+    assert_eq!(fs::read_to_string(root.join("a.c")).unwrap(), source);
+    success(run(root, &["--apply", "out.annotations"]));
+    assert_eq!(fs::read_to_string(root.join("a.c")).unwrap(), source);
+}
+
+#[test]
+fn proofs_only_resolves_supplied_angle_headers_without_erasing_sal() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    fs::create_dir(root.join("include")).unwrap();
+    let header = "\
+#define STEP(x) _ghost_stmt(proof $(x))\n\
+#define SPEC(x) _inline_pulse(owned $(x))\n\
+#define JOIN(x) _ensures(_live(x))\n\
+#define BRANCH _ghost_stmt(branch ())\n\
+#define G _ghost_stmt(short ())\n\
+#undef _Out_\n\
+#define _Out_ _out\n";
+    let source = "#include <proof.h>\nvoid f(_Out_ int *p) _requires(SPEC(p)) { STEP(p); end: JOIN(p) if (p) { BRANCH; } *p = 1; G; }\n";
+    fs::write(root.join("include/proof.h"), header).unwrap();
+    fs::write(root.join("a.c"), source).unwrap();
+    success(run(
+        root,
+        &[
+            "--extract",
+            "--proofs-only",
+            "-I",
+            "include",
+            "a.c",
+            "include/proof.h",
+        ],
+    ));
+    let stripped = fs::read_to_string(root.join("a.c")).unwrap();
+    assert!(stripped.contains("_Out_ int *p"));
+    assert!(stripped.contains("_requires(SPEC(p))"));
+    assert!(!stripped.contains("STEP(p)"));
+    assert!(!stripped.contains("JOIN(p)"));
+    assert!(!stripped.contains("BRANCH;"));
+    assert!(!stripped.contains("G;"));
+    assert!(
+        fs::read_to_string(root.join("include/proof.h"))
+            .unwrap()
+            .contains("#define _Out_ _out")
+    );
+    success(run(root, &["--apply", "out.annotations", "--check"]));
+    success(run(root, &["--apply", "out.annotations"]));
+    assert_eq!(fs::read_to_string(root.join("a.c")).unwrap(), source);
+    assert_eq!(
+        fs::read_to_string(root.join("include/proof.h")).unwrap(),
+        header
+    );
+}
+
+#[test]
+fn proofs_only_retains_redefined_wrappers_and_their_aliases() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    let source = "\
+#undef RUNTIME_ASSERT\n\
+#define RUNTIME_ASSERT(x) _assert(x)\n\
+#define OTHER_ASSERT(x) RUNTIME_ASSERT(x)\n\
+void f(int x) { OTHER_ASSERT(x); RUNTIME_ASSERT(x); _ghost_stmt(proof ()); }\n";
+    fs::write(root.join("a.c"), source).unwrap();
+    success(run(root, &["--extract", "--proofs-only", "a.c"]));
+    let stripped = fs::read_to_string(root.join("a.c")).unwrap();
+    assert!(stripped.contains("OTHER_ASSERT(x); RUNTIME_ASSERT(x);"));
+    success(run(root, &["--apply", "out.annotations"]));
+    assert_eq!(fs::read_to_string(root.join("a.c")).unwrap(), source);
+}
+
+#[test]
 fn cli_preflights_check_is_readonly_and_apply_is_idempotent() {
     let directory = TempDir::new().unwrap();
     let root = directory.path();
