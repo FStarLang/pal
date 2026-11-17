@@ -38,7 +38,8 @@ clean:
 	$(MAKE) -C test clean
 
 # Binary package: dist/pal-<version>-<commit>-linux-<arch>.tar.gz. See
-# opt/package.sh for PACKAGE_OPTS (e.g. --check-pulse, --llvm system).
+# opt/package.sh for PACKAGE_OPTS (e.g. --check-pulse, --llvm system,
+# --fstar DIR, --fstar-ref REF).
 PACKAGE_OPTS ?=
 .PHONY: package
 package:

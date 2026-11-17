@@ -144,6 +144,7 @@ verifies. Create a new one with `./test/new.sh my_test`.
 ```bash
 make package                              # dist/pal-<version>-<commit>-<os>-<arch>.tar.gz (.zip on Windows)
 make package PACKAGE_OPTS="--fstar DIR"   # bundle F* and z3 from DIR (opt/install-fstar.sh --dest DIR)
+make package PACKAGE_OPTS="--fstar-ref REF"  # bundle F* built from source at REF (Linux, macOS)
 make package PACKAGE_OPTS=--check-pulse   # without --fstar: ship pulse/_cache, checked by fstar.exe
 make package-test                         # unpack, translate and verify a few tests with the package
 ```
@@ -192,8 +193,21 @@ ships `pulse/_cache` checked by it. On macOS, the dylibs that `fstar.exe`
 links (Homebrew's gmp and zstd) are copied next to it. The pinned F\*
 nightly is only built for x86\_64 macOS; an arm64 package could bundle that
 build to run under Rosetta 2 (`FSTAR_LIB_PATH` tells `package.sh` where to
-find x86\_64 dylibs), but the workflow does not build arm64 packages, since
-Homebrew no longer ships x86\_64 bottles of gmp. A shipped `pulse/_cache` is only usable
+find x86\_64 dylibs), but the workflow does not build arm64 packages from
+it, since Homebrew no longer ships x86\_64 bottles of gmp.
+
+Instead of an F\* binary distribution, `--fstar-ref REF [--fstar-repo URL]`
+bundles an F\* built from the sources at a branch, tag or full commit SHA
+(default repository: `https://github.com/FStarLang/FStar.git`), on Linux and
+macOS. [`opt/build-fstar.sh`](opt/build-fstar.sh) builds it the way F\*'s
+nightlies are built (`make package ADMIT=1`; GNU make, `gmake` on macOS),
+which needs OCaml (F\* uses 5.3.0) with F\*'s opam dependencies
+(`build-fstar.sh --install-deps` installs them), gmp, and on macOS zstd
+(`brew install opam make gmp zstd pkg-config`); it can also build into a
+directory for `--fstar`:
+`opt/build-fstar.sh --ref REF --dest DIR [--install-deps]`, or from a local
+checkout with `--src DIR`. `BUILDINFO` and `fstar/SOURCE` record the
+repository, ref and commit. A shipped `pulse/_cache` is only usable
 with the exact F\* that checked it (see `BUILDINFO`); otherwise re-check it
 with `rm -rf pulse/_cache && make -C pulse FSTAR_EXE=fstar.exe`.
 [`.github/workflows/package.yml`](.github/workflows/package.yml) builds the
@@ -201,7 +215,10 @@ packages, with F\* and z3, on Ubuntu 22.04, macOS 15 (x86\_64) and
 Windows, then translates and verifies tests with them on clean machines
 without LLVM or F\* (on Windows, both with MSYS2's MinGW headers and with
 MSVC's), and uploads them as workflow artifacts (run it manually
-from the Actions tab).
+from the Actions tab). Its `fstar_ref` input (and `fstar_repo`) builds F\*
+from source at that ref instead of using the pinned nightly (cached per
+commit); then it also builds and tests arm64 macOS packages, and skips
+Windows, where F\* does not build from a git checkout.
 
 ### Translate a file
 

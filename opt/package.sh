@@ -23,9 +23,14 @@
 # host's libclang-cpp<N> installed instead.
 #
 # Usage: opt/package.sh [--out DIR] [--llvm bundled|system] [--check-pulse]
-#                       [--fstar DIR [--fstar-z3 VER,...|all]] [--allow-dirty]
+#                       [--fstar DIR | --fstar-ref REF [--fstar-repo URL]]
+#                       [--fstar-z3 VER,...|all] [--allow-dirty]
 #   --fstar DIR   bundle the F* binary distribution installed in DIR (e.g. by
 #                 opt/install-fstar.sh --dest DIR), and check pulse/ with it
+#   --fstar-ref   instead, build F* from the sources at this branch, tag or
+#                 full commit SHA of --fstar-repo (default: FStarLang/FStar)
+#                 with opt/build-fstar.sh (Linux, macOS; needs OCaml and F*'s
+#                 opam dependencies), and bundle it
 #   --fstar-z3    the z3 versions to bundle (default: F*'s default version)
 # Environment: LLVM_CONFIG, FSTAR_EXE (for --check-pulse without --fstar),
 #   CARGO, FSTAR_LIB_PATH (macOS: directories where to find the dylibs that
@@ -35,13 +40,15 @@
 
 set -euo pipefail
 
-usage() { sed -n '3,35p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 OUT=dist
 LLVM_MODE=bundled
 CHECK_PULSE=0
 ALLOW_DIRTY=0
 FSTAR_DIR=""
+FSTAR_REF=""
+FSTAR_REPO=""
 FSTAR_Z3=default
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -50,6 +57,8 @@ while [[ $# -gt 0 ]]; do
         --check-pulse) CHECK_PULSE=1; shift ;;
         --allow-dirty) ALLOW_DIRTY=1; shift ;;
         --fstar) FSTAR_DIR="$2"; shift 2 ;;
+        --fstar-ref) FSTAR_REF="$2"; shift 2 ;;
+        --fstar-repo) FSTAR_REPO="$2"; shift 2 ;;
         --fstar-z3) FSTAR_Z3="$2"; shift 2 ;;
         -h|--help) usage ;;
         *) echo "unknown option: $1" >&2; usage 2 ;;
@@ -60,6 +69,8 @@ done
 
 die() { echo "package.sh: $*" >&2; exit 1; }
 
+[[ -z "$FSTAR_DIR" || -z "$FSTAR_REF" ]] || die "--fstar and --fstar-ref are exclusive"
+[[ -z "$FSTAR_REPO" || -n "$FSTAR_REF" ]] || die "--fstar-repo needs --fstar-ref"
 if [[ -n "$FSTAR_DIR" ]]; then
     FSTAR_DIR="$(cd "$FSTAR_DIR" && pwd)" || die "no such directory: $FSTAR_DIR"
     [[ -f "$FSTAR_DIR/bin/fstar.exe" ]] || die "$FSTAR_DIR/bin/fstar.exe not found"
@@ -107,6 +118,14 @@ rm -rf "$STAGE" "$STAGE".tar.gz* "$STAGE".zip*
 mkdir -p "$STAGE"/{bin,lib,include,pulse,share/pal}
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+
+if [[ -n "$FSTAR_REF" ]]; then
+    echo "== building F* $FSTAR_REF from sources"
+    FSTAR_DIR="$WORK/fstar"
+    "$ROOT/opt/build-fstar.sh" --ref "$FSTAR_REF" ${FSTAR_REPO:+--repo "$FSTAR_REPO"} \
+        --work "$WORK" --dest "$FSTAR_DIR" --jobs "$NPROC"
+    CHECK_PULSE=1
+fi
 
 echo "== building pal (release)"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
@@ -327,7 +346,7 @@ if [[ -n "$FSTAR_DIR" ]]; then
     for f in fstar.include ulib ulib.checked pulse; do
         cp -R "$FSTAR_DIR/lib/fstar/$f" "$F/lib/fstar/"
     done
-    for f in LICENSE LICENSE-fsharp.txt README.md version.txt; do
+    for f in LICENSE LICENSE-fsharp.txt README.md version.txt SOURCE; do
         if [[ -f "$FSTAR_DIR/$f" ]]; then cp "$FSTAR_DIR/$f" "$F/"; fi
     done
     [[ $OS == macos ]] && macho_bundle_prebuilt "$F/bin/fstar.exe" @executable_path
@@ -348,6 +367,12 @@ if [[ -n "$FSTAR_DIR" ]]; then
     done
     FSTAR_EXE="$F/bin/fstar.exe"
     FSTAR_BUNDLED="bundled, z3 ${FSTAR_Z3//,/ }"
+    fstar_commit="$("$FSTAR_EXE" --version | tr -d '\r' | sed -n 's/^commit=//p')"
+    FSTAR_BUNDLED="$FSTAR_BUNDLED, commit ${fstar_commit:-unknown}"
+    if [[ -f "$FSTAR_DIR/SOURCE" ]]; then
+        FSTAR_BUNDLED="$FSTAR_BUNDLED, built from $(sed -n 's/^repo: //p' "$FSTAR_DIR/SOURCE")"
+        FSTAR_BUNDLED="$FSTAR_BUNDLED $(sed -n 's/^ref: //p' "$FSTAR_DIR/SOURCE")"
+    fi
     if [[ $OS == macos ]]; then
         FSTAR_BUNDLED="$FSTAR_BUNDLED, $(lipo -archs "$FSTAR_EXE")"
         [[ " $(lipo -archs "$FSTAR_EXE") " == *" $ARCH "* ]] ||

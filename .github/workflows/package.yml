@@ -4,9 +4,23 @@ name: Package
 # Windows, with F* and z3 bundled, and tests them (opt/package-test.sh:
 # translate and verify) on fresh machines without LLVM or F*. The packages are
 # available as workflow artifacts.
+#
+# F* is the pinned nightly (opt/install-fstar.sh), unless fstar_ref is given:
+# then F* is built from the sources at that ref (opt/build-fstar.sh, cached per
+# commit) for Linux and macOS, also arm64 macOS, and Windows is skipped (F*
+# does not build from a git checkout on Windows).
 
 on:
   workflow_dispatch:
+    inputs:
+      fstar_ref:
+        description: 'F* branch, tag or full commit SHA to build F* from (empty: the pinned F* nightly; Linux and macOS only)'
+        type: string
+        default: ''
+      fstar_repo:
+        description: 'F* repository to build fstar_ref from'
+        type: string
+        default: 'https://github.com/FStarLang/FStar.git'
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,7 +45,42 @@ jobs:
       run: rustup update stable && rustup default stable
 
     - name: Install F*
+      if: inputs.fstar_ref == ''
       run: ./opt/install-fstar.sh --dest "$RUNNER_TEMP/fstar" --no-link
+
+    - name: Resolve the F* commit
+      id: fstar
+      if: inputs.fstar_ref != ''
+      env:
+        FSTAR_REF: ${{ inputs.fstar_ref }}
+        FSTAR_REPO: ${{ inputs.fstar_repo }}
+      run: echo "commit=$(./opt/build-fstar.sh --print-commit --ref "$FSTAR_REF" --repo "$FSTAR_REPO")" >> "$GITHUB_OUTPUT"
+
+    - name: Cache F* built from source
+      id: fstar-cache
+      if: inputs.fstar_ref != ''
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/fstar
+        key: fstar-${{ runner.os }}-${{ runner.arch }}-ubuntu-22.04-${{ steps.fstar.outputs.commit }}-${{ hashFiles('opt/build-fstar.sh') }}
+
+    - name: Install OCaml
+      if: inputs.fstar_ref != '' && steps.fstar-cache.outputs.cache-hit != 'true'
+      uses: ocaml/setup-ocaml@v3
+      with:
+        ocaml-compiler: 5.3.0
+
+    - name: Build F* from source
+      if: inputs.fstar_ref != '' && steps.fstar-cache.outputs.cache-hit != 'true'
+      env:
+        FSTAR_REPO: ${{ inputs.fstar_repo }}
+        FSTAR_REF: ${{ inputs.fstar_ref }}
+        FSTAR_COMMIT: ${{ steps.fstar.outputs.commit }}
+      run: |
+        sudo apt-get install -y libgmp-dev libzstd-dev pkg-config
+        ./opt/build-fstar.sh --install-deps --repo "$FSTAR_REPO" --ref "$FSTAR_COMMIT" \
+          --dest "$RUNNER_TEMP/fstar"
+        sed -i "s|^ref: .*|ref: $FSTAR_REF|" "$RUNNER_TEMP/fstar/SOURCE"
 
     - name: Build package
       run: make package PACKAGE_OPTS="--fstar $RUNNER_TEMP/fstar"
@@ -67,12 +116,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-        # Disabled: the pinned F* nightly has no arm64 macOS build, and
-        # Homebrew no longer ships the x86_64 bottles (gmp) that bundling it
-        # for Rosetta 2 needs.
-        # - { runner: macos-15, arch: arm64 }
-        - { runner: macos-15-intel, arch: x86_64 }
+        # arm64 only with F* built from source: the pinned F* nightly has no
+        # arm64 macOS build, and Homebrew no longer ships the x86_64 bottles
+        # (gmp) that bundling it for Rosetta 2 needs.
+        include: ${{ fromJSON(inputs.fstar_ref != '' && '[{"runner":"macos-15","arch":"arm64"},{"runner":"macos-15-intel","arch":"x86_64"}]' || '[{"runner":"macos-15-intel","arch":"x86_64"}]') }}
     runs-on: ${{ matrix.runner }}
     steps:
     - uses: actions/checkout@v4
@@ -88,9 +135,11 @@ jobs:
     # The pinned F* nightly is only built for x86_64 macOS (arm64 packages
     # would bundle it too, to run under Rosetta 2).
     - name: Install F* (x86_64)
+      if: inputs.fstar_ref == ''
       run: arch -x86_64 /bin/bash ./opt/install-fstar.sh --dest "$RUNNER_TEMP/fstar" --no-link
 
     - name: Fetch the x86_64 Homebrew libraries that F* links
+      if: inputs.fstar_ref == ''
       run: |
         dir="$RUNNER_TEMP/fstar-libs"
         mkdir -p "$dir"
@@ -107,6 +156,48 @@ jobs:
         libdirs="$(find "$dir" -name '*.dylib' -exec dirname {} \; | sort -u | paste -sd: -)"
         echo "FSTAR_LIB_PATH=$libdirs" >> "$GITHUB_ENV"
 
+    - name: Resolve the F* commit
+      id: fstar
+      if: inputs.fstar_ref != ''
+      env:
+        FSTAR_REF: ${{ inputs.fstar_ref }}
+        FSTAR_REPO: ${{ inputs.fstar_repo }}
+      run: echo "commit=$(./opt/build-fstar.sh --print-commit --ref "$FSTAR_REF" --repo "$FSTAR_REPO")" >> "$GITHUB_OUTPUT"
+
+    # fstar.exe links Homebrew's gmp and zstd, which the package bundles.
+    - name: Install the libraries that F* links
+      if: inputs.fstar_ref != ''
+      run: brew install gmp zstd
+
+    - name: Cache F* built from source
+      id: fstar-cache
+      if: inputs.fstar_ref != ''
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/fstar
+        key: fstar-${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner }}-${{ steps.fstar.outputs.commit }}-${{ hashFiles('opt/build-fstar.sh') }}
+
+    - name: Install F*'s build tools
+      if: inputs.fstar_ref != '' && steps.fstar-cache.outputs.cache-hit != 'true'
+      run: brew install make pkg-config
+
+    - name: Install OCaml
+      if: inputs.fstar_ref != '' && steps.fstar-cache.outputs.cache-hit != 'true'
+      uses: ocaml/setup-ocaml@v3
+      with:
+        ocaml-compiler: 5.3.0
+
+    - name: Build F* from source
+      if: inputs.fstar_ref != '' && steps.fstar-cache.outputs.cache-hit != 'true'
+      env:
+        FSTAR_REPO: ${{ inputs.fstar_repo }}
+        FSTAR_REF: ${{ inputs.fstar_ref }}
+        FSTAR_COMMIT: ${{ steps.fstar.outputs.commit }}
+      run: |
+        ./opt/build-fstar.sh --install-deps --repo "$FSTAR_REPO" --ref "$FSTAR_COMMIT" \
+          --dest "$RUNNER_TEMP/fstar"
+        sed -i '' "s|^ref: .*|ref: $FSTAR_REF|" "$RUNNER_TEMP/fstar/SOURCE"
+
     - name: Build package
       run: make package PACKAGE_OPTS="--fstar $RUNNER_TEMP/fstar"
 
@@ -121,9 +212,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-        # - { runner: macos-26, arch: arm64 }  # disabled, see the macos job
-        - { runner: macos-26-intel, arch: x86_64 }
+        # arm64 only with F* built from source, see the macos job.
+        include: ${{ fromJSON(inputs.fstar_ref != '' && '[{"runner":"macos-26","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]' || '[{"runner":"macos-26-intel","arch":"x86_64"}]') }}
     runs-on: ${{ matrix.runner }}
     steps:
     - uses: actions/checkout@v4
@@ -137,6 +227,8 @@ jobs:
       run: VERIFY=1 make package-test
 
   windows:
+    # F* does not build from a git checkout on Windows: no fstar_ref.
+    if: inputs.fstar_ref == ''
     runs-on: windows-latest
     defaults:
       run:
