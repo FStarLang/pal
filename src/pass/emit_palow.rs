@@ -26165,7 +26165,11 @@ impl<'a> Body<'a> {
         let outer_prescattered = self.prescattered.clone();
         let mark = self.slots.len();
         let r = (|| -> Result<(), String> {
-            let folded = fold_exits(body);
+            let folded = fold_exits(body, &|label| {
+                self.gotos
+                    .iter()
+                    .any(|(n, _, post)| n == label && !post.is_empty())
+            });
             // Where the body ends in an `if` one arm of which leaves, the
             // start of its lines and whether `then` is the arm that falls
             // through to the closing brace.
@@ -28260,7 +28264,11 @@ impl<'a> Body<'a> {
         let facts = std::mem::take(&mut self.arm_facts);
 
         let folded = if self.in_loop {
-            fold_exits(stmts)
+            fold_exits(stmts, &|label| {
+                self.gotos
+                    .iter()
+                    .any(|(n, _, post)| n == label && !post.is_empty())
+            })
         } else {
             stmts.clone()
         };
@@ -32211,8 +32219,28 @@ fn exits(stmts: &Stmts) -> bool {
 /// its condition at the join, and nothing joins here. Not done when the arm
 /// that would take the rest declares a name of its own, which the rest could
 /// then see, when the `if` has an `_ensures` (the author's join), or when
-/// the rest has a label to jump to.
-fn fold_exits(stmts: &[Rc<Stmt>]) -> Stmts {
+/// the rest has a label to jump to. A jump to a label with its own postcondition
+/// already has an explicit join: do not make that cleanup path also establish
+/// a join inferred from the calls in the non-jumping continuation.
+fn fold_exits(stmts: &[Rc<Stmt>], specified_label: &impl Fn(&str) -> bool) -> Stmts {
+    fn foldable_exit(stmts: &Stmts, specified_label: &impl Fn(&str) -> bool) -> bool {
+        for s in stmts {
+            match &s.val {
+                StmtT::Goto(label) => return !specified_label(&label.val),
+                StmtT::Return(_) | StmtT::Break | StmtT::Continue => return true,
+                StmtT::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } if exits(then_branch) && exits(else_branch) => {
+                    return foldable_exit(then_branch, specified_label)
+                        && foldable_exit(else_branch, specified_label);
+                }
+                _ => {}
+            }
+        }
+        false
+    }
     let declares = |b: &Stmts| {
         b.iter().any(|s| {
             matches!(
@@ -32241,11 +32269,15 @@ fn fold_exits(stmts: &[Rc<Stmt>]) -> Stmts {
             continue;
         }
         let (t, e) = (exits(then_branch), exits(else_branch));
-        let (then_branch, else_branch) = if t && !e && !declares(else_branch) {
+        let (then_branch, else_branch) = if t
+            && !e
+            && foldable_exit(then_branch, specified_label)
+            && !declares(else_branch)
+        {
             let mut b = (**else_branch).clone();
             b.extend(rest.iter().cloned());
             (then_branch.clone(), Rc::new(b))
-        } else if e && !t && !declares(then_branch) {
+        } else if e && !t && foldable_exit(else_branch, specified_label) && !declares(then_branch) {
             let mut b = (**then_branch).clone();
             b.extend(rest.iter().cloned());
             (Rc::new(b), else_branch.clone())
@@ -32265,6 +32297,43 @@ fn fold_exits(stmts: &[Rc<Stmt>]) -> Stmts {
         return out;
     }
     stmts.to_vec()
+}
+
+#[cfg(test)]
+mod exit_fold_tests {
+    use super::*;
+
+    #[test]
+    fn specified_cleanup_does_not_inherit_the_continuations_join() {
+        let pos = Position {
+            line: 0,
+            character: 0,
+        };
+        let loc = Rc::new(SourceInfo::Original(Location {
+            file_name: Rc::from("cleanup.c"),
+            range: Range {
+                start: pos,
+                end: pos,
+            },
+        }));
+        let jump =
+            StmtT::Goto(Rc::<str>::from("Finally").with_loc(loc.clone())).with_loc(loc.clone());
+        let guarded = StmtT::If {
+            cond: ExprT::BoolLit(true).with_loc(loc.clone()),
+            then_branch: Rc::new(vec![jump]),
+            else_branch: Rc::new(vec![]),
+            ensures: Rc::new(vec![]),
+        }
+        .with_loc(loc.clone());
+        let body = vec![guarded, StmtT::Continue.with_loc(loc)];
+        assert_eq!(fold_exits(&body, &|label| label == "Finally"), body);
+        let folded = fold_exits(&body, &|_| false);
+        assert_eq!(folded.len(), 1);
+        let StmtT::If { else_branch, .. } = &folded[0].val else {
+            panic!("expected the original guard");
+        };
+        assert_eq!(else_branch.as_ref(), &body[1..]);
+    }
 }
 
 /// Whether a C block always leaves the function. Statements after a `return`
