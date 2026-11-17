@@ -97,6 +97,19 @@ impl PrettyIR for InferError {
                 "cannot index into",
                 RcDoc::line(),
                 ty.to_doc(),
+                if matches!(ty.val, TypeT::Pointer(..)) {
+                    docs![
+                        &RcAllocator,
+                        ",",
+                        RcDoc::line(),
+                        "a pointer not declared to point into an array",
+                        RcDoc::line(),
+                        "(declare the pointer it comes from `_array` or `_arrayptr`)",
+                    ]
+                    .into_doc()
+                } else {
+                    RcDoc::nil()
+                },
             ],
         })
         .group()
@@ -191,6 +204,7 @@ impl Env {
                     is_pure: !let_decl.is_impure,
                     is_rec: let_decl.is_rec,
                     is_total: false,
+                    adopts_signature: false,
                     decreases: None,
                 });
             }
@@ -261,6 +275,11 @@ impl Env {
 
     pub fn lookup_var(&self, ident: &Ident) -> Option<&LocalDecl> {
         self.locals.get(&ident.val)
+    }
+
+    /// A local's declared type, by name.
+    pub fn local_type(&self, name: &str) -> Option<Rc<Type>> {
+        self.locals.get(name).map(|d| d.ty.clone())
     }
 
     pub fn lookup_global_var(&self, ident: &Ident) -> Option<&GlobalVar> {
@@ -501,8 +520,9 @@ impl Env {
             }
             ExprT::BoolLit(_) => Ok(TypeT::Bool.with_loc_core(expr.loc.clone()).into()),
             ExprT::Live(_) => Ok(TypeT::SLProp.with_loc_core(expr.loc.clone()).into()),
+            ExprT::Unchanged(_) => Ok(TypeT::Bool.with_loc_core(expr.loc.clone()).into()),
             ExprT::Old(v) => self.infer_expr(v),
-            ExprT::Forall(var, ty, body) | ExprT::Exists(var, ty, body) => {
+            ExprT::Forall(var, ty, _, body) | ExprT::Exists(var, ty, _, body) => {
                 let mut env = self.clone();
                 env.push_var_decl(var, ty.clone(), LocalDeclKind::RValue);
                 env.infer_expr(body)
@@ -636,6 +656,7 @@ impl Env {
                     | TypeT::RefineValue(..)
                     | TypeT::Plain(..)
                     | TypeT::Nullable(..)
+                    | TypeT::Overread(..)
             ) => None,
         }
     }
@@ -684,7 +705,8 @@ impl Env {
             | TypeT::RefineUninit(ty, _)
             | TypeT::RefineValue(ty, ..)
             | TypeT::Plain(ty)
-            | TypeT::Nullable(ty) => Some(ty.clone().into()),
+            | TypeT::Nullable(ty)
+            | TypeT::Overread(ty) => Some(ty.clone().into()),
         }
     }
 

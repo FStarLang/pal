@@ -122,6 +122,16 @@ ghost fn uint32_t_pts_to_not_null (a: ptr) (#p: perm) (#x: U32.t)
   fold uint32_t_pts_to a p x;
 }
 
+ghost fn uint32_t_pts_to_uninit_not_null (a: ptr)
+  preserves uint32_t_pts_to_uninit a
+  ensures   pure (not (is_null a) /\ Some? (prov_of a))
+{
+  unfold uint32_t_pts_to_uninit a;
+  with b. assert (mem_pts_to a 1.0R b);
+  mem_pts_to_not_null a;
+  fold uint32_t_pts_to_uninit a;
+}
+
 [@@allow_ambiguous]
 ghost fn uint32_t_agree (a: ptr) (#p1 #p2: perm) (#x #y: U32.t)
   preserves uint32_t_pts_to a p1 x
@@ -336,6 +346,16 @@ ghost fn ptr_conceal (dest: ptr) (#p: perm) (#b: bytes) (#a: ptr)
 let ptr_pts_to_uninit ([@@@mkey] dest: ptr) : slprop =
   exists* b. mem_pts_to dest 1.0R b
              ** pure (len b == SZ.v ptr_sizeof /\ aligned dest ptr_alignof)
+
+ghost fn ptr_pts_to_uninit_not_null (dest: ptr)
+  preserves ptr_pts_to_uninit dest
+  ensures   pure (not (is_null dest) /\ Some? (prov_of dest))
+{
+  unfold ptr_pts_to_uninit dest;
+  with b. assert (mem_pts_to dest 1.0R b);
+  mem_pts_to_not_null dest;
+  fold ptr_pts_to_uninit dest;
+}
 
 ghost fn ptr_forget (dest: ptr) (#a: ptr)
   requires ptr_pts_to dest 1.0R a

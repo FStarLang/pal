@@ -1,0 +1,2 @@
+# Expected translation diagnostic substrings
+a dereference of local `p`, whose target the contract does not grant

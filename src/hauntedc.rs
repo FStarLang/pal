@@ -417,6 +417,44 @@ fn mk_binop(binop: BinOp, lhs: Expr, rhs: Expr, loc: Rc<SourceInfo>) -> Expr {
 
 type Extra<'tokens, 'src> = extra::Err<Rich<'tokens, Token<'src>, SimpleSpan>>;
 
+/// The integer type a list of C type specifiers names, whatever their order.
+fn int_specifiers(words: &[&str], tw: &TargetIntWidths) -> Result<TypeT, &'static str> {
+    let count = |w: &str| words.iter().filter(|x| **x == w).count();
+    let (signed, unsigned, short, long, int, char) = (
+        count("signed"),
+        count("unsigned"),
+        count("short"),
+        count("long"),
+        count("int"),
+        count("char"),
+    );
+    if signed + unsigned > 1
+        || short > 1
+        || long > 2
+        || int > 1
+        || char > 1
+        || (short > 0 && long > 0)
+        || (char > 0 && (short + long + int) > 0)
+    {
+        return Err("invalid combination of type specifiers");
+    }
+    let width = if char > 0 {
+        tw.char_width
+    } else if short > 0 {
+        tw.short_width
+    } else if long == 2 {
+        tw.long_long_width
+    } else if long == 1 {
+        tw.long_width
+    } else {
+        tw.int_width
+    };
+    Ok(TypeT::Int {
+        signed: unsigned == 0,
+        width,
+    })
+}
+
 fn type_parser<
     'tokens,
     'src: 'tokens,
@@ -426,58 +464,24 @@ fn type_parser<
     sift: &'src SIFT,
     target_widths: &'src TargetIntWidths,
 ) -> impl Parser<'tokens, I, Rc<crate::ir::Type>, Extra<'tokens, 'src>> + Clone {
-    let signedness = select! {
-        Token::Ident("signed") => true,
-        Token::Ident("unsigned") => false,
-    }
-    .padded_by(ws());
-
-    let size_modifier = select! {
-        Token::Ident("short") => 0u8,
-        Token::Ident("long") => 1u8,
-    }
-    .padded_by(ws())
-    .then(
-        select! { Token::Ident("long") => () }
-            .padded_by(ws())
-            .or_not(),
-    )
-    .map(|(m, extra_long)| match (m, extra_long) {
-        (0, _) => 0u8,
-        (1, None) => 1u8,
-        (1, Some(())) => 2u8,
-        _ => unreachable!(),
-    });
-
-    let int_or_char = select! {
-        Token::Ident("int") => false,
-        Token::Ident("char") => true,
+    // C integer type specifiers, in any order: `long unsigned int` and
+    // `char unsigned` are as good as `unsigned long` and `unsigned char`.
+    let int_word = select! {
+        Token::Ident("signed") => "signed",
+        Token::Ident("unsigned") => "unsigned",
+        Token::Ident("short") => "short",
+        Token::Ident("long") => "long",
+        Token::Ident("int") => "int",
+        Token::Ident("char") => "char",
     }
     .padded_by(ws());
 
     let tw = *target_widths;
-    let integer_type = signedness
-        .or_not()
-        .then(size_modifier.or_not())
-        .then(int_or_char.or_not())
-        .try_map(move |((sign_opt, size_opt), base_opt), span| {
-            if sign_opt.is_none() && size_opt.is_none() && base_opt.is_none() {
-                return Err(Rich::custom(span, "expected type specifier"));
-            }
-            let signed = sign_opt.unwrap_or(true);
-            let is_char = base_opt == Some(true);
-            let width = if is_char {
-                tw.char_width
-            } else {
-                match size_opt {
-                    Some(0) => tw.short_width,
-                    Some(1) => tw.long_width,
-                    Some(2) => tw.long_long_width,
-                    None | Some(_) => tw.int_width,
-                }
-            };
-            Ok(TypeT::Int { signed, width })
-        });
+    let integer_type = int_word
+        .repeated()
+        .at_least(1)
+        .collect::<Vec<&str>>()
+        .try_map(move |words, span| int_specifiers(&words, &tw).map_err(|m| Rich::custom(span, m)));
 
     let ident = select! { Token::Ident(ident) => ident }
         .map_with(|ident, e| Rc::<str>::from(ident).with_loc(sift.resolve_source_info(&e.span())))
@@ -517,9 +521,26 @@ fn type_parser<
             .map(|name| TypeT::TypeRef(TypeRefKind::Typedef(name))),
     ));
 
-    base_type
+    // A qualifier says nothing about a value, which is all a specification
+    // has: `(const unsigned char *)w` is the same cast without it.
+    let qualifier = select! {
+        Token::Ident("const") => (),
+        Token::Ident("volatile") => (),
+    }
+    .padded_by(ws());
+
+    qualifier
+        .clone()
+        .repeated()
+        .ignore_then(base_type)
+        .then_ignore(qualifier.clone().repeated())
         .map_with(|ty, e| ty.with_loc(sift.resolve_source_info(&e.span())))
-        .then(punct(Punct::Star).repeated().collect::<Vec<_>>())
+        .then(
+            punct(Punct::Star)
+                .then_ignore(qualifier.repeated())
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
         .map_with(|(base_ty, stars), e| {
             let loc = sift.resolve_source_info(&e.span());
             stars.into_iter().fold(base_ty, |inner, _| {
@@ -544,58 +565,25 @@ fn expr_parser<
 
         // let expression = assignment_expression;
 
-        // Parse C integer type specifiers: [signed|unsigned] [short|long|long long] [int|char]
-        let signedness = select! {
-            Token::Ident("signed") => true,
-            Token::Ident("unsigned") => false,
-        }
-        .padded_by(ws());
-
-        let size_modifier = select! {
-            Token::Ident("short") => 0u8,
-            Token::Ident("long") => 1u8,
-        }
-        .padded_by(ws())
-        .then(
-            select! { Token::Ident("long") => () }
-                .padded_by(ws())
-                .or_not(),
-        )
-        .map(|(m, extra_long)| match (m, extra_long) {
-            (0, _) => 0u8,        // short
-            (1, None) => 1u8,     // long
-            (1, Some(())) => 2u8, // long long
-            _ => unreachable!(),
-        });
-
-        let int_or_char = select! {
-            Token::Ident("int") => false,
-            Token::Ident("char") => true,
+        // C integer type specifiers, in any order: `long unsigned int` and
+        // `char unsigned` are as good as `unsigned long` and `unsigned char`.
+        let int_word = select! {
+            Token::Ident("signed") => "signed",
+            Token::Ident("unsigned") => "unsigned",
+            Token::Ident("short") => "short",
+            Token::Ident("long") => "long",
+            Token::Ident("int") => "int",
+            Token::Ident("char") => "char",
         }
         .padded_by(ws());
 
         let tw = *target_widths;
-        let integer_type = signedness
-            .or_not()
-            .then(size_modifier.or_not())
-            .then(int_or_char.or_not())
-            .try_map(move |((sign_opt, size_opt), base_opt), span| {
-                if sign_opt.is_none() && size_opt.is_none() && base_opt.is_none() {
-                    return Err(Rich::custom(span, "expected type specifier"));
-                }
-                let signed = sign_opt.unwrap_or(true);
-                let is_char = base_opt == Some(true);
-                let width = if is_char {
-                    tw.char_width
-                } else {
-                    match size_opt {
-                        Some(0) => tw.short_width,
-                        Some(1) => tw.long_width,
-                        Some(2) => tw.long_long_width,
-                        None | Some(_) => tw.int_width,
-                    }
-                };
-                Ok(TypeT::Int { signed, width })
+        let integer_type = int_word
+            .repeated()
+            .at_least(1)
+            .collect::<Vec<&str>>()
+            .try_map(move |words, span| {
+                int_specifiers(&words, &tw).map_err(|m| Rich::custom(span, m))
             });
 
         let ident = select! { Token::Ident(ident) => ident }
@@ -638,9 +626,25 @@ fn expr_parser<
                 .map(|name| TypeT::TypeRef(TypeRefKind::Typedef(name))),
         ));
 
-        let type_name = base_type
+        // As in `type_parser`: qualifiers are dropped.
+        let qualifier = select! {
+            Token::Ident("const") => (),
+            Token::Ident("volatile") => (),
+        }
+        .padded_by(ws());
+
+        let type_name = qualifier
+            .clone()
+            .repeated()
+            .ignore_then(base_type)
+            .then_ignore(qualifier.clone().repeated())
             .map_with(|ty, e| ty.with_loc(sift.resolve_source_info(&e.span())))
-            .then(punct(Punct::Star).repeated().collect::<Vec<_>>())
+            .then(
+                punct(Punct::Star)
+                    .then_ignore(qualifier.repeated())
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
             .map_with(|(base_ty, stars), e| {
                 let loc = sift.resolve_source_info(&e.span());
                 stars.into_iter().fold(base_ty, |inner, _| {
@@ -744,20 +748,68 @@ fn expr_parser<
             type_name
                 .clone()
                 .then(ident.clone())
+                .then(
+                    punct(Punct::Eq)
+                        .ignore_then(assignment_expression.clone())
+                        .or_not(),
+                )
                 .then_ignore(punct(Punct::Comma))
+                // `_trigger(e1, ..., en),` groups before the body: each one is
+                // a multi-pattern, several are alternatives.
+                .then(
+                    select! { Token::Ident("_trigger") => () }
+                        .padded_by(ws())
+                        .ignore_then(
+                            assignment_expression
+                                .clone()
+                                .separated_by(punct(Punct::Comma))
+                                .at_least(1)
+                                .collect::<Vec<Expr>>()
+                                .delimited_by(punct(Punct::LParen), punct(Punct::RParen)),
+                        )
+                        .then_ignore(punct(Punct::Comma))
+                        .repeated()
+                        .collect::<Vec<_>>(),
+                )
                 .then(assignment_expression.clone())
                 .delimited_by(punct(Punct::LParen), punct(Punct::RParen)),
         )
-        .map_with(|(is_forall, ((ty, var), body)): (bool, _), extra| -> Expr {
-            let loc = sift.resolve_source_info(&extra.span());
-            let body: Expr = body;
-            let body_rv = body.to_rvalue();
-            if is_forall {
-                ExprT::Forall(var, ty, body_rv).with_loc(loc).into()
-            } else {
-                ExprT::Exists(var, ty, body_rv).with_loc(loc).into()
-            }
-        })
+        .try_map(
+            |(is_forall, ((((ty, var), witness), triggers), body)): (bool, _), span| {
+                let loc = sift.resolve_source_info(&span);
+                let body: Expr = body;
+                let triggers: Triggers = triggers
+                    .into_iter()
+                    .map(|g: Vec<Expr>| g.into_iter().map(|t| t.to_rvalue()).collect())
+                    .collect();
+                // `_exists(T i = w, p)` names its witness: it is
+                // `_exists(T i, i == w && p)`, a form the emitter proves by
+                // instantiating `i` with `w` instead of leaving the search to
+                // the solver.
+                let body = match witness {
+                    Some(_) if is_forall => {
+                        return Err(Rich::custom(span, "a witness on a `_forall`"));
+                    }
+                    Some(w) => {
+                        let w: Expr = w;
+                        let bound: Expr = ExprT::Var(var.clone()).with_loc(var.loc.clone()).into();
+                        let eq = mk_binop(BinOp::Eq, bound, w, loc.clone());
+                        mk_binop(BinOp::LogAnd, eq, body, loc.clone())
+                    }
+                    None => body,
+                };
+                let body_rv = body.to_rvalue();
+                Ok(if is_forall {
+                    ExprT::Forall(var, ty, triggers, body_rv)
+                        .with_loc(loc)
+                        .into()
+                } else {
+                    ExprT::Exists(var, ty, triggers, body_rv)
+                        .with_loc(loc)
+                        .into()
+                })
+            },
+        )
         .boxed();
 
         let postfix_expression_nonrec = choice((
@@ -827,6 +879,14 @@ fn expr_parser<
                             .with_loc(sift.resolve_source_info(&s))
                             .into())
                     }
+                    "_unchanged" => {
+                        let &[arg] = &args.as_slice() else {
+                            return Err(Rich::custom(s, "_unchanged takes exactly one argument"));
+                        };
+                        Ok(ExprT::Unchanged(arg.clone().to_rvalue())
+                            .with_loc(sift.resolve_source_info(&s))
+                            .into())
+                    }
                     "_live" => {
                         let &[arg] = &args.as_slice() else {
                             return Err(Rich::custom(s, "_live takes exactly one argument"));
@@ -850,8 +910,25 @@ fn expr_parser<
         ))
         .boxed();
         let postfix_expression = left_recursion!(postfix_expression_nonrec, {
-            Index(lhs, idx: Expr: assignment_expression.clone().delimited_by(punct(Punct::LBracket), punct(Punct::RBracket))) = e =>
-                Ok(ExprT::Index(lhs.to_rvalue(), idx.to_rvalue()).with_loc(sift.resolve_source_info(&e.span())).into()),
+            Index(lhs, idx: Expr: assignment_expression.clone().delimited_by(punct(Punct::LBracket), punct(Punct::RBracket))) = e => {
+                let loc = sift.resolve_source_info(&e.span());
+                let lhs = lhs.to_rvalue();
+                // `_base(d)[k]`: the current element `k` of the array a walked
+                // `d` started at, `d[(_specint) k - (d - _old(d))]`.
+                if let ExprT::FnCall(f, args) = &lhs.val
+                    && &*f.val == "_base"
+                {
+                    let [d] = args.as_slice() else {
+                        return Err(Rich::custom(e.span(), "_base takes exactly one argument"));
+                    };
+                    let k = ExprT::Cast(idx.to_rvalue(), TypeT::SpecInt.with_loc(loc.clone())).with_loc(loc.clone());
+                    let old = ExprT::Old(d.clone()).with_loc(loc.clone());
+                    let pos = ExprT::BinOp(BinOp::Sub, d.clone(), old).with_loc(loc.clone());
+                    let i = ExprT::BinOp(BinOp::Sub, k, pos).with_loc(loc.clone());
+                    return Ok(ExprT::Index(d.clone(), i).with_loc(loc).into());
+                }
+                Ok(ExprT::Index(lhs, idx.to_rvalue()).with_loc(loc).into())
+            },
             Dot(lhs, id: Rc<Ident>: punct(Punct::Dot).ignore_then(ident.clone())) = e =>
                 Ok(ExprT::Member(lhs.to_rvalue(), id).with_loc(sift.resolve_source_info(&e.span())).into()),
             Arrow(lhs, id: Rc<Ident>: punct(Punct::DashGt).ignore_then(ident.clone())) = e => {
@@ -1552,7 +1629,11 @@ fn let_signature_parser<
                 let ty = if let Some(ptr_kind) = ptr_kind_opt {
                     match &ty.val {
                         TypeT::Pointer(inner, _) => {
-                            TypeT::Pointer(inner.clone(), ptr_kind).with_loc(ty.loc.clone())
+                            let inner = match ptr_kind {
+                                PointerKind::Array | PointerKind::ArrayPtr => array_elem(inner),
+                                _ => inner.clone(),
+                            };
+                            TypeT::Pointer(inner, ptr_kind).with_loc(ty.loc.clone())
                         }
                         _ => ty,
                     }
@@ -1569,6 +1650,7 @@ fn let_signature_parser<
                     name: name_opt,
                     ty,
                     mode,
+                    cursor_from: None,
                 }
             },
         );

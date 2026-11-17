@@ -1,0 +1,4 @@
+Func_inc_bad
+Func_is_zero_bad
+Func_peek_bad
+Func_bump_bad

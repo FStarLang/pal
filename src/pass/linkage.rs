@@ -23,6 +23,10 @@ pub struct CSymbol {
     pub internal: bool,
     pub definition: bool,
     pub inline: bool,
+    /// `_pal_ignore` omits the entity from this translation unit.
+    pub ignored: bool,
+    /// `_pal_admit` trusts the function's contract in this translation unit.
+    pub admitted: bool,
     pub loc: Rc<SourceInfo>,
 }
 
@@ -42,6 +46,7 @@ pub fn header_statics(units: &[(TranslationUnit, UnitSymbols)]) -> Vec<HeaderSta
         .flat_map(|(tu, symbols)| {
             symbols.symbols.iter().filter_map(|symbol| {
                 (symbol.kind == 0
+                    && !symbol.ignored
                     && symbol.internal
                     && symbol.definition
                     && !tu
@@ -236,6 +241,7 @@ fn normalize_type(
         | TypeT::FlexArray(t)
         | TypeT::Plain(t)
         | TypeT::Nullable(t)
+        | TypeT::Overread(t)
         | TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _) => {
@@ -287,6 +293,29 @@ pub fn prepare(units: &mut [(TranslationUnit, UnitSymbols)], diags: &mut Diagnos
             let previous_symbols = entities.entry(key).or_default();
             for (previous_unit, previous, context) in previous_symbols.iter() {
                 if *previous_unit != index {
+                    // Like a contract, these markers belong to the entity, so
+                    // every translation unit must agree on them: put them in
+                    // a shared header.
+                    if previous.ignored != symbol.ignored {
+                        error(
+                            diags,
+                            &symbol.loc,
+                            format!(
+                                "inconsistent _pal_ignore on {} across translation units",
+                                symbol.name
+                            ),
+                        );
+                    }
+                    if previous.admitted != symbol.admitted {
+                        error(
+                            diags,
+                            &symbol.loc,
+                            format!(
+                                "inconsistent _pal_admit on {} across translation units",
+                                symbol.name
+                            ),
+                        );
+                    }
                     if !compatible_signature(previous, symbol) {
                         error(
                             diags,
@@ -320,9 +349,9 @@ pub fn prepare(units: &mut [(TranslationUnit, UnitSymbols)], diags: &mut Diagnos
         }
     }
     for (tu, symbols) in units.iter_mut() {
-        if multiple {
-            let prefix = &symbols.identity.prefix;
-            let names: HashMap<_, _> = symbols
+        let prefix = &symbols.identity.prefix;
+        let names: HashMap<_, _> = if multiple {
+            symbols
                 .symbols
                 .iter()
                 .filter(|s| s.internal)
@@ -332,18 +361,33 @@ pub fn prepare(units: &mut [(TranslationUnit, UnitSymbols)], diags: &mut Diagnos
                         Rc::<str>::from(format!("{prefix}{}", s.name)),
                     )
                 })
-                .collect();
-            let mut renamer = Renamer {
-                names: &names,
-                diags,
-                raw_reference: false,
-                shadowed: Bound::new(),
-                shadow_reference: false,
-                in_pulse: false,
-            };
-            for decl in &mut tu.decls {
-                renamer.decl(decl);
-            }
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        // An antiquotation `$(f)` parses as a variable; C resolves a function
+        // name to the function, so the annotation does too.
+        let functions: HashSet<Rc<str>> = tu
+            .decls
+            .iter()
+            .filter_map(|d| match &d.val {
+                DeclT::FnDefn(d) => Some(d.decl.name.val.clone()),
+                DeclT::FnDecl(d) => Some(d.name.val.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut renamer = Renamer {
+            names: &names,
+            functions: &functions,
+            reserve: multiple,
+            diags,
+            raw_reference: false,
+            shadowed: Bound::new(),
+            shadow_reference: false,
+            in_pulse: false,
+        };
+        for decl in &mut tu.decls {
+            renamer.decl(decl);
         }
     }
     // Named type/Pulse definitions cannot safely be chosen by input order.
@@ -405,8 +449,21 @@ pub fn prepare(units: &mut [(TranslationUnit, UnitSymbols)], diags: &mut Diagnos
                 _ => None,
             };
             if let Some(key) = key {
-                if let Some((previous_unit, previous)) = definitions.get(&key) {
-                    if (*previous_unit != index || key.0 <= 2) && *previous != &decl.val {
+                // A typedef is compared by the type it denotes: glibc's
+                // <stdio.h> declares `va_list` as `__gnuc_va_list` while
+                // clang's <stdarg.h> uses `__builtin_va_list`, the same type.
+                let alias = match &decl.val {
+                    DeclT::Typedef(d) => Some((
+                        d.is_pointer_view,
+                        normalize_type(&d.body, &aliases, &mut Bound::new()),
+                    )),
+                    _ => None,
+                };
+                if let Some((previous_unit, previous, previous_alias)) = definitions.get(&key) {
+                    if (*previous_unit != index || key.0 <= 2)
+                        && *previous != &decl.val
+                        && (alias.is_none() || *previous_alias != alias)
+                    {
                         error(
                             diags,
                             &decl.loc,
@@ -414,7 +471,7 @@ pub fn prepare(units: &mut [(TranslationUnit, UnitSymbols)], diags: &mut Diagnos
                         );
                     }
                 } else {
-                    definitions.insert(key, (index, &decl.val));
+                    definitions.insert(key, (index, &decl.val, alias));
                 }
             }
         }
@@ -460,6 +517,8 @@ type Bound = HashSet<Rc<str>>;
 
 struct Renamer<'a> {
     names: &'a HashMap<Rc<str>, Rc<str>>,
+    functions: &'a HashSet<Rc<str>>,
+    reserve: bool,
     diags: &'a mut Diagnostics,
     raw_reference: bool,
     shadowed: Bound,
@@ -469,7 +528,7 @@ struct Renamer<'a> {
 
 impl Renamer<'_> {
     fn bind(&mut self, scope: &mut Bound, name: &Ident) {
-        if name.val.starts_with("__pal_tu_") {
+        if self.reserve && name.val.starts_with("__pal_tu_") {
             error(
                 self.diags,
                 &name.loc,
@@ -496,7 +555,8 @@ impl Renamer<'_> {
             | TypeT::FixedArray(t, _)
             | TypeT::FlexArray(t)
             | TypeT::Plain(t)
-            | TypeT::Nullable(t) => self.ty(t, bound),
+            | TypeT::Nullable(t)
+            | TypeT::Overread(t) => self.ty(t, bound),
             TypeT::FnPtr { args, ret } => {
                 for a in args {
                     self.ty(a, bound);
@@ -548,15 +608,14 @@ impl Renamer<'_> {
                 InlinePulseToken::Verbatim(text) => {
                     // Raw F* module names are not C references. Do not silently
                     // bind an old unqualified module to another TU's entity.
-                    for name in self.names.keys() {
-                        if text.text.val.as_ref() == format!("Func_{name}")
-                            || text.text.val.as_ref() == format!("Global_{name}")
-                            || text.text.val.as_ref() == format!("Funcptr_{name}")
-                        {
-                            // Verbatim fragments do not carry a C source range;
-                            // the containing declaration is diagnosed below.
-                            self.raw_reference = true;
-                        }
+                    let text: &str = &text.text.val;
+                    if ["Func_", "Global_", "Funcptr_"].iter().any(|p| {
+                        text.strip_prefix(p)
+                            .is_some_and(|name| self.names.contains_key(name))
+                    }) {
+                        // Verbatim fragments do not carry a C source range;
+                        // the containing declaration is diagnosed below.
+                        self.raw_reference = true;
                     }
                 }
             }
@@ -572,7 +631,14 @@ impl Renamer<'_> {
     }
 
     fn expr(&mut self, expr: &mut Rc<Expr>, bound: &Bound) {
-        match &mut Rc::make_mut(expr).val {
+        let e = Rc::make_mut(expr);
+        if let ExprT::Var(n) = &e.val {
+            let target = self.names.get(&n.val).unwrap_or(&n.val);
+            if !bound.contains(&n.val) && self.functions.contains(target) {
+                e.val = ExprT::FnRef(n.clone());
+            }
+        }
+        match &mut e.val {
             ExprT::Var(n) | ExprT::FnRef(n) => self.name(n, bound),
             ExprT::FnCall(n, args) => {
                 self.name(n, bound);
@@ -603,10 +669,13 @@ impl Renamer<'_> {
                 self.expr(e, bound);
                 self.ty(t, bound);
             }
-            ExprT::Forall(n, t, e) | ExprT::Exists(n, t, e) => {
+            ExprT::Forall(n, t, trigs, e) | ExprT::Exists(n, t, trigs, e) => {
                 self.ty(t, bound);
                 let mut nested = bound.clone();
                 self.bind(&mut nested, n);
+                for tr in trigs.iter_mut().flatten() {
+                    self.expr(tr, &nested);
+                }
                 self.expr(e, &nested);
             }
             ExprT::ArrayInit { elem_ty, elems, .. } => {
@@ -625,6 +694,7 @@ impl Renamer<'_> {
             | ExprT::Ref(e)
             | ExprT::UnOp(_, e)
             | ExprT::Live(e)
+            | ExprT::Unchanged(e)
             | ExprT::Old(e)
             | ExprT::Free(e)
             | ExprT::PreIncr(e)

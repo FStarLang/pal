@@ -41,6 +41,9 @@ ghost fn intro_unless_null (a: ptr) (p: slprop)
   }
 }
 
+(* Ambiguity is harmless here: every guard on a null pointer is `emp`, so a
+   call that declines several optional outputs can discard them in any order. *)
+[@@allow_ambiguous]
 ghost fn elim_unless_null_null (a: ptr) (p: slprop)
   requires unless_null a p
   requires pure (is_null a)
@@ -54,4 +57,26 @@ ghost fn elim_unless_null (a: ptr) (p: slprop)
   ensures  p
 {
   rewrite (unless_null a p) as p;
+}
+
+(* `null_or a p q` is `p` if `a` is null and `q` otherwise. A `_cursor_from(s)`
+   parameter's slot is one: when the seed `s` is null the slot holds the
+   cursor, and when it is not, the slot is only storage. *)
+let null_or (a: ptr) (p q: slprop) : slprop =
+  if is_null a then p else q
+
+ghost fn elim_null_or_null (a: ptr) (p q: slprop)
+  requires null_or a p q
+  requires pure (is_null a)
+  ensures  p
+{
+  rewrite (null_or a p q) as p;
+}
+
+ghost fn elim_null_or (a: ptr) (p q: slprop)
+  requires null_or a p q
+  requires pure (not (is_null a))
+  ensures  q
+{
+  rewrite (null_or a p q) as q;
 }

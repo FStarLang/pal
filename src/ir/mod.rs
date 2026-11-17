@@ -211,9 +211,29 @@ pub enum TypeT {
     /// `unless_null this (…)` so the resource is `emp` when the pointer is null.
     Nullable(Rc<Type>),
 
+    /// `_pal_overread` on a pointer: a word read through it, or through a
+    /// pointer stepped from it, may reach past the end of the byte array it
+    /// walks, on the trusted assumption in `Pulse.Lib.C.Palow.Overread`.
+    /// Transparent everywhere else.
+    Overread(Rc<Type>),
+
     /// Placeholder for type inference (resolved during elaboration).
     Unknown,
     Error,
+}
+
+/// The element type of an `_array`/`_arrayptr` pointer to `elem`. A `void *`
+/// array (`memset`'s `dest`) is an array of bytes, `unsigned char` being the
+/// type C lets any object's representation be read and written at.
+pub fn array_elem(elem: &Rc<Type>) -> Rc<Type> {
+    match elem.val {
+        TypeT::Void => TypeT::Int {
+            signed: false,
+            width: 8,
+        }
+        .with_loc(elem.loc.clone()),
+        _ => elem.clone(),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -320,6 +340,10 @@ pub enum VAttr {
 
 pub type Expr = Ast<ExprT>;
 pub type Exprs = Vec<Rc<Expr>>;
+/// The SMT patterns of a quantifier: each `_trigger(e1, ..., en)` is one
+/// multi-pattern, and several of them are alternatives. Empty when the source
+/// gives none and the solver is left to choose.
+pub type Triggers = Vec<Exprs>;
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum ExprT {
     // LValue variants
@@ -357,9 +381,15 @@ pub enum ExprT {
     ContainerOf(Rc<Expr>, Rc<Type>, Rc<Ident>),
     InlinePulse(Rc<InlinePulseCode>, Rc<Type>),
     Live(Rc<Expr>),
+    /// `_unchanged(lv)`, in a postcondition: the bytes of the object `lv`
+    /// names are the ones it had on entry, provenance and all. A bytewise
+    /// frame, for storage a function does not interpret.
+    Unchanged(Rc<Expr>),
     Old(Rc<Expr>),
-    Forall(Rc<Ident>, Rc<Type>, Rc<Expr>),
-    Exists(Rc<Ident>, Rc<Type>, Rc<Expr>),
+    /// `_forall(T x, _trigger(..).., body)`: the bound variable, its type,
+    /// the SMT patterns (see `Triggers`) and the body.
+    Forall(Rc<Ident>, Rc<Type>, Triggers, Rc<Expr>),
+    Exists(Rc<Ident>, Rc<Type>, Triggers, Rc<Expr>),
     StructInit(Rc<Ident>, Vec<(Rc<Ident>, Rc<Expr>)>),
     UnionInit(Rc<Ident>, Rc<Ident>, Rc<Expr>),
     /// Array initializer: element type + list of element values.
@@ -505,6 +535,12 @@ impl StructDefn {
 pub struct UnionDefn {
     pub name: Rc<Ident>,
     pub fields: Vec<Field>,
+    /// `_overlay`: the members are views of one object rather than
+    /// alternatives, and the value is the object's bytes. See palow.md.
+    pub overlay: bool,
+    /// The `_owning` members of an `_overlay` union: the views whose pointer
+    /// fields own what they point at. See palow.md.
+    pub owning: Vec<Rc<Ident>>,
 }
 
 impl UnionDefn {
@@ -544,7 +580,8 @@ pub fn peel_type(ty: &Rc<Type>) -> &Rc<Type> {
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, ..)
         | TypeT::Plain(inner)
-        | TypeT::Nullable(inner) => peel_type(inner),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => peel_type(inner),
         _ => ty,
     }
 }
@@ -605,6 +642,10 @@ pub struct FnArg {
     pub name: Option<Rc<Ident>>,
     pub ty: Rc<Type>,
     pub mode: ParamMode,
+    /// `_cursor_from(s)` on a `_cursor` parameter: the parameter `s` that,
+    /// when not null, is where the cursor starts instead of the incoming
+    /// `*p`.
+    pub cursor_from: Option<Rc<Ident>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -624,6 +665,11 @@ pub struct FnDecl {
     pub is_pure: bool,
     pub is_rec: bool,
     pub is_total: bool,
+    /// Declared for a function that a linker alias (`weak_alias(old, new)`)
+    /// gave the alias's contract. The definition adopts this declaration's
+    /// parameter types, whose array annotations the contract relies on, as it
+    /// would by inheriting them from an earlier prototype.
+    pub adopts_signature: bool,
     pub decreases: Option<Rc<Expr>>,
 }
 

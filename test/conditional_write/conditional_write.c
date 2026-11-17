@@ -59,6 +59,13 @@ void native_scalar(_plain uint32_t *p, uint32_t value)
     *p = value;
 }
 
+void native_array_alias(_array uint32_t *array, _plain uint32_t **alias)
+  _requires(_inline_pulse(Pulse.Lib.C.Palow.Scalar.ptr_pts_to_uninit $(alias)))
+  _ensures(_inline_pulse(Pulse.Lib.C.Palow.Scalar.ptr_pts_to $(alias) 1.0R $(array)))
+{
+    *alias = array;
+}
+
 struct native_pair {
     uint32_t first;
     uint32_t second;

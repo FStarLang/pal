@@ -10,7 +10,7 @@ let same_type (#t: Type) (declaration implementation: t) : unit = ()
 fn total_implementation (n: U32.t)
   requires emp
   returns result: U32.t
-  ensures pure (U32.v result == U32.v n)
+  ensures rewrites_to result n
 {
   n
 }
@@ -18,7 +18,7 @@ fn total_implementation (n: U32.t)
 divergent fn implementation (n: U32.t)
   requires emp
   returns result: U32.t
-  ensures pure (U32.v result == U32.v n)
+  ensures rewrites_to result n
 {
   n
 }

@@ -56,3 +56,32 @@ void alloc_wide(void)
     free(p);
   }
 }
+
+/* A `_Bool` converts to the target's pointer-width integers. The difference
+ * of two pointers is `ptrdiff_t` itself, so `flag` is converted to it. */
+ptrdiff_t bool_to_ptrdiff(_array uint32_t *a, _Bool flag)
+  _requires(a._length == 10)
+  _ensures(return == (_old(flag) ? 6 : 5))
+{
+  _arrayptr uint32_t *p = a + 7;
+  _arrayptr uint32_t *q = a + 2;
+  ptrdiff_t d = (p - q) + flag;
+  return d;
+}
+
+size_t bool_to_size(_Bool flag)
+  _ensures(return == (_old(flag) ? 1 : 0))
+{
+  size_t n = flag;
+  return n;
+}
+
+/* A `_Bool` promoted through `uint8_t` and then truth-tested. */
+uint32_t bool_via_byte(_Bool flag)
+  _ensures(return == (_old(flag) ? 7 : 3))
+{
+  uint8_t b = flag;
+  if (b)
+    return 7;
+  return 3;
+}

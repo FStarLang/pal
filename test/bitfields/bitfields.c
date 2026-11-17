@@ -104,3 +104,23 @@ void write_tdef(struct tdef *s, uint16_t v)
 {
     s->a = v;
 }
+
+// Keep a Boolean-to-integer store across a later short-circuit join.
+struct table_header {
+    uint32_t length;
+    uint8_t encoding;
+};
+
+_Bool write_bool_before_join(struct bits *s, struct table_header *header)
+  _ensures(s->nibble == (header->length > 0 ? 1 : 0))
+{
+    s->nibble = (header->length > 0);
+    return header->encoding != 0 && header->encoding != 2;
+}
+
+_Bool convert_bool_before_join(int64_t *value, _Bool flag, struct table_header *header)
+  _ensures(*value == (flag ? 1L : 0L))
+{
+    *value = flag;
+    return header->encoding != 0 && header->encoding != 2;
+}

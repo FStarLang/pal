@@ -42,12 +42,29 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _out __attribute__((annotate("pal-out")))
 #define _array __attribute((annotate("pal-array")))
 #define _arrayptr __attribute((annotate("pal-arrayptr")))
+#define _cursor __attribute((annotate("pal-cursor")))
+/* A `_cursor` that starts from the parameter `s` instead of the incoming
+   `*p` when `s` is not null (`strtok_r(s, sep, p)`). */
+#define _cursor_from(s) __attribute((annotate("pal-cursor", #s)))
 #define _pure __attribute((annotate("pal-pure")))
 #define _total __attribute((annotate("pal-total")))
+#define _pal_ignore __attribute__((annotate("pal-ignore")))
+#define _pal_admit __attribute__((annotate("pal-admit")))
+#define _pal_overread __attribute__((annotate("pal-overread")))
 #define _pulse_opaque_to_smt __attribute((annotate("pal-opaque-to-smt")))
 #define _rec __attribute((annotate("pal-rec")))
 #define _pulse_eager_unfold_predicate __attribute__((annotate("pal-eager-unfold-predicate")))
 #define _pointer_view __attribute__((annotate("pal-pointer-view")))
+/* Marks a union whose members are views of one object rather than
+   alternatives, such as a request several layers each own fields of. Its
+   value is its bytes, and a store through one member changes only the bytes
+   of the field it writes. See palow.md, "Overlay unions". */
+#define _overlay __attribute__((annotate("pal-overlay")))
+/* Marks the member of an `_overlay` union whose pointer fields own what they
+   point at. The union's ownership is that member's, read from the union's
+   bytes, so it survives a store through any member that leaves the bytes of
+   those pointers alone. See palow.md, "Ownership through an overlay". */
+#define _owning __attribute__((annotate("pal-owning")))
 /* Marks a platform wrapper around `memset(p, 0, n)` -- zero_memory,
    RtlZeroMemory, bzero -- so that calls of the form `f(ptr, sizeof(*ptr))`
    translate to the same whole-object zeroing that a direct memset does. An
@@ -101,12 +118,19 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _out
 #define _array
 #define _arrayptr
+#define _cursor
+#define _cursor_from(s)
 #define _pure
 #define _total
+#define _pal_ignore
+#define _pal_admit
+#define _pal_overread
 #define _pulse_opaque_to_smt
 #define _rec
 #define _pulse_eager_unfold_predicate
 #define _pointer_view
+#define _overlay
+#define _owning
 #define _memset_zero
 #define _decreases(p)
 

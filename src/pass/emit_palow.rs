@@ -86,6 +86,7 @@ fn readable_field(tds: &Typedefs, ty: &Type) -> bool {
         TypeT::TypeRef(TypeRefKind::Union(n)) => tds
             .unions
             .get(&*n.val)
+            .filter(|ui| !ui.overlay)
             .and_then(|ui| ui.members.first())
             .is_some_and(|m| {
                 matches!(m.shape, FieldShape::One { .. }) && readable_field(tds, &m.ty)
@@ -110,19 +111,231 @@ fn value_reader(tds: &Typedefs, ty: &Type) -> Option<String> {
     }
 }
 
+/// How a struct's `_refine` ties the live member of one of its union fields
+/// to the value of a sibling tag field: `this.T != K || this.m._active` says
+/// that tag `K` means member `m`, and `this.T == K || this.m._active` that
+/// every tag but `K` does.
+#[derive(Clone)]
+struct TagArms {
+    tag: String,
+    tag_ty: Rc<Type>,
+    cases: Vec<(BigInt, String)>,
+    default: String,
+}
+
+/// The union fields of struct `sname` whose live member its `_refine` ties
+/// to a tag field laid out before them, so that a whole-value read can read
+/// the tag first and pick the member by it.
+///
+/// Nothing here has to be right for the read to be sound: the reader's guard
+/// is the choice it makes, stated as a fact the caller has to prove. What the
+/// `_refine` decides is only which choice is likely to be provable.
+fn tag_arms(tds: &Typedefs, sname: &str) -> HashMap<String, TagArms> {
+    tds.structs
+        .get(sname)
+        .map(|si| si.tag_arms.clone())
+        .unwrap_or_default()
+}
+
+/// Computes `tag_arms` from the struct's `_refine`, once its own `StructInfo`
+/// is in place. An enumerator is looked up for its value.
+fn struct_tag_arms(tds: &Typedefs, env: &Env, sname: &str) -> HashMap<String, TagArms> {
+    fn nocast(e: &Expr) -> &Expr {
+        match &e.val {
+            ExprT::Cast(inner, _) => nocast(inner),
+            _ => e,
+        }
+    }
+    fn this_field(e: &Expr) -> Option<String> {
+        match &nocast(e).val {
+            ExprT::Member(b, f) if matches!(&nocast(b).val, ExprT::Var(v) if &*v.val == "this") => {
+                Some(f.val.to_string())
+            }
+            _ => None,
+        }
+    }
+    fn active(e: &Expr) -> Option<(String, String)> {
+        match &nocast(e).val {
+            ExprT::VAttr(VAttr::Active(m), u) => Some((this_field(u)?, m.val.to_string())),
+            ExprT::BinOp(BinOp::Eq, l, r) if matches!(nocast(r).val, ExprT::BoolLit(true)) => {
+                active(l)
+            }
+            _ => None,
+        }
+    }
+    // `this.T == K` as `(T, K, true)`, `this.T != K` as `(T, K, false)`.
+    fn tag_cmp(env: &Env, e: &Expr) -> Option<(String, BigInt, bool)> {
+        if let ExprT::UnOp(UnOp::Not, inner) = &nocast(e).val {
+            let (t, k, eq) = tag_cmp(env, inner)?;
+            return Some((t, k, !eq));
+        }
+        let ExprT::BinOp(BinOp::Eq, l, r) = &nocast(e).val else {
+            return None;
+        };
+        fn lit(env: &Env, e: &Expr) -> Option<BigInt> {
+            match &nocast(e).val {
+                ExprT::IntLit(k, _) => Some((**k).clone()),
+                ExprT::Var(v) => {
+                    let gv = env.lookup_global_var(v)?;
+                    if !gv.is_enum_constant {
+                        return None;
+                    }
+                    lit(env, gv.init.as_ref()?)
+                }
+                _ => None,
+            }
+        }
+        let lit = |e: &Expr| lit(env, e);
+        let (t, k) = match (this_field(l), lit(r)) {
+            (Some(t), Some(k)) => (t, k),
+            _ => (this_field(r)?, lit(l)?),
+        };
+        Some((t, k, true))
+    }
+    let mut out: HashMap<String, TagArms> = HashMap::new();
+    let Some(si) = tds.structs.get(sname) else {
+        return out;
+    };
+    let Some(r) = tds.refined_structs.get(sname) else {
+        return out;
+    };
+    let Ok((ps, _, _)) = refinements(tds, r) else {
+        return out;
+    };
+    let mut clauses = Vec::new();
+    for p in &ps {
+        let (mut own, mut props) = (Vec::new(), Vec::new());
+        split_refine(tds, p, &mut own, &mut props);
+        clauses.extend(props);
+    }
+    let pos = |n: &str| si.fields.iter().position(|f| f.name == n);
+    for c in clauses {
+        // Whether the clause says tag `K` means `m` (`ne`), or that every
+        // other tag does.
+        let found = match &nocast(c).val {
+            ExprT::BinOp(BinOp::LogOr, a, b) => tag_cmp(env, a)
+                .zip(active(b))
+                .or_else(|| tag_cmp(env, b).zip(active(a)))
+                .map(|((t, k, eq), um)| ((t, k, !eq), um)),
+            ExprT::BinOp(BinOp::Implies, a, b) => tag_cmp(env, a).zip(active(b)),
+            _ => None,
+        };
+        let Some(((t, k, ne), (u, m))) = found else {
+            continue;
+        };
+        let (Some(ti), Some(ui)) = (pos(&t), pos(&u)) else {
+            continue;
+        };
+        let tf = &si.fields[ti];
+        if ti >= ui
+            || !matches!(tf.shape, FieldShape::One { .. })
+            || !matches!(peel(tds, &tf.ty).val, TypeT::Int { .. })
+        {
+            continue;
+        }
+        let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(tds, &si.fields[ui].ty).val else {
+            continue;
+        };
+        let Some(uinfo) = tds.unions.get(&*un.val).filter(|x| !x.overlay) else {
+            continue;
+        };
+        if !uinfo.members.iter().any(|x| x.name == m) {
+            continue;
+        }
+        let first = uinfo
+            .members
+            .first()
+            .map(|x| x.name.clone())
+            .unwrap_or_default();
+        let e = out.entry(u).or_insert_with(|| TagArms {
+            tag: t.clone(),
+            tag_ty: tf.ty.clone(),
+            cases: Vec::new(),
+            default: first,
+        });
+        if e.tag != t {
+            continue;
+        }
+        if ne {
+            if !e.cases.iter().any(|(x, _)| *x == k) {
+                e.cases.push((k, m));
+            }
+        } else {
+            e.default = m;
+        }
+    }
+    // Every member chosen has to be readable on its own, with no choice of
+    // its own to make: a member that holds a union is left to the plain read.
+    out.retain(|u, ta| {
+        let Some(f) = si.fields.iter().find(|f| f.name == *u) else {
+            return false;
+        };
+        let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(tds, &f.ty).val else {
+            return false;
+        };
+        let ui = &tds.unions[&*un.val];
+        !ta.cases.is_empty()
+            && ta
+                .cases
+                .iter()
+                .map(|(_, m)| m)
+                .chain(std::iter::once(&ta.default))
+                .all(|m| {
+                    ui.members.iter().any(|x| {
+                        x.name == *m
+                            && matches!(x.shape, FieldShape::One { .. })
+                            && readable_field(tds, &x.ty)
+                            && value_read_guard(tds, &x.ty, "_").is_none()
+                    })
+                })
+    });
+    out
+}
+
+/// What reading union field `u` of a struct value `x` by its tag asks of the
+/// value: the member the tag picks is the live one.
+fn tag_read_guard(tds: &Typedefs, un: &str, ta: &TagArms, x: &str, u: &str) -> Option<String> {
+    let tag = format!("({}).fld_{}", x, ta.tag);
+    let v = |k: &BigInt| -> Option<String> {
+        Some(format!("{}", int_literal(tds, k, &ta.tag_ty).ok()?))
+    };
+    let ctor = |m: &str| format!("Union_{}.Union_{}_{}? ({}).fld_{}", un, un, m, x, u);
+    let mut gs = Vec::new();
+    let mut others = Vec::new();
+    for (k, m) in &ta.cases {
+        let kv = v(k)?;
+        gs.push(format!("({} == {} ==> {})", tag, kv, ctor(m)));
+        others.push(format!("{} <> {}", tag, kv));
+    }
+    gs.push(format!(
+        "(({}) ==> {})",
+        others.join(" /\\ "),
+        ctor(&ta.default)
+    ));
+    Some(format!("({})", gs.join(" /\\ ")))
+}
+
 /// The reader never branches on an erased tag. It reads a fixed member at
 /// each union, and the caller must establish that entire choice of arms.
 fn value_read_guard(tds: &Typedefs, ty: &Type, x: &str) -> Option<String> {
     fn guard(tds: &Typedefs, ty: &Type, x: &str, depth: usize) -> Option<String> {
         match &peel(tds, ty).val {
             TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+                let tagged = tag_arms(tds, &n.val);
                 let guards: Vec<_> = tds
                     .structs
                     .get(&*n.val)?
                     .fields
                     .iter()
-                    .filter_map(|f| {
-                        guard(tds, &f.ty, &format!("({}).fld_{}", x, f.name), depth + 1)
+                    .filter_map(|f| match tagged.get(&f.name) {
+                        Some(ta) => {
+                            let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(tds, &f.ty).val
+                            else {
+                                return None;
+                            };
+                            tag_read_guard(tds, &un.val, ta, x, &f.name)
+                        }
+                        None => guard(tds, &f.ty, &format!("({}).fld_{}", x, f.name), depth + 1),
                     })
                     .collect();
                 (!guards.is_empty()).then(|| format!("({})", guards.join(" /\\ ")))
@@ -1127,6 +1340,144 @@ fn bitfield_at<'a>(tds: &'a Typedefs, ty: &Type, f: &str) -> Option<&'a BitField
         .map(|(_, b)| b)
 }
 
+/// Whether the union named `u` is `_overlay`.
+fn is_overlay(tds: &Typedefs, u: &str) -> bool {
+    tds.unions.get(u).is_some_and(|x| x.overlay)
+}
+
+/// Where a place lies in the `_overlay` unions on its path, as found by
+/// walking up from the place to its base.
+struct OverlayPath {
+    /// The outermost overlay union reached by struct fields, overlay members
+    /// and constant subscripts only: the union expression, its C name, and the
+    /// place's byte offset in it.
+    root: Option<(Expr, String, u64)>,
+    /// No root was found, but the place is inside an overlay union further up:
+    /// the steps between them (a bit-field, a variable subscript) do not fix
+    /// its offset.
+    opaque: bool,
+}
+
+/// The byte offset of a place in the outermost overlay union on its path; see
+/// `OverlayPath`. Shared by the body, which reads and writes a leaf at that
+/// offset, and the specification, which states `_unchanged` of that range, so
+/// that both agree on where the place is. A constant subscript is scaled by
+/// the size of the indexed array's direct element type -- the outer index of
+/// `a[i][j]` steps over whole rows -- and has to be in bounds.
+fn overlay_path(
+    tds: &Typedefs,
+    ty_of: &dyn Fn(&Expr) -> Option<Rc<Type>>,
+    e: &Expr,
+) -> Result<OverlayPath, String> {
+    let mut off: u64 = 0;
+    let mut root: Option<(Expr, String, u64)> = None;
+    let mut cur = e.clone();
+    let mut stopped = false;
+    loop {
+        match &strip_vattr(&cur).val.clone() {
+            ExprT::Member(b, f) => {
+                let Some(bty) = ty_of(b) else { break };
+                match &peel(tds, &bty).val {
+                    TypeT::TypeRef(TypeRefKind::Struct(sn)) => {
+                        if bitfield_at(tds, &bty, &f.val).is_some() {
+                            stopped = true;
+                            break;
+                        }
+                        let Some(fld) = tds
+                            .structs
+                            .get(&*sn.val)
+                            .and_then(|si| si.fields.iter().find(|x| *x.name == *f.val))
+                        else {
+                            stopped = true;
+                            break;
+                        };
+                        off += fld.offset;
+                    }
+                    TypeT::TypeRef(TypeRefKind::Union(un)) if is_overlay(tds, &un.val) => {
+                        root = Some(((**b).clone(), un.val.to_string(), off));
+                    }
+                    _ => {
+                        stopped = true;
+                        break;
+                    }
+                }
+                cur = (**b).clone();
+            }
+            ExprT::Index(b, i) => {
+                let Some(bty) = ty_of(b) else { break };
+                let TypeT::FixedArray(et, len) = &peel(tds, &bty).val else {
+                    stopped = true;
+                    break;
+                };
+                let Some(k) = const_index(&i.val) else {
+                    stopped = true;
+                    break;
+                };
+                if k >= *len {
+                    return Err(format!(
+                        "subscript {} is out of bounds of an array of {} elements",
+                        k, len
+                    ));
+                }
+                let Some(es) = palow_sizeof(tds, et) else {
+                    stopped = true;
+                    break;
+                };
+                off += k * es;
+                cur = (**b).clone();
+            }
+            // `(&x)->f`, as a store through a pointer to a member reads once
+            // its alias is substituted, is the place `x.f`.
+            ExprT::Deref(a) if matches!(strip_vattr(a).val, ExprT::Ref(_)) => {
+                let ExprT::Ref(x) = &strip_vattr(a).val else {
+                    unreachable!()
+                };
+                cur = (**x).clone();
+            }
+            _ => break,
+        }
+    }
+    // Where the walk stopped short, is there an overlay union further up?
+    let mut opaque = false;
+    if stopped && root.is_none() {
+        let mut up = cur;
+        loop {
+            let b = match &strip_vattr(&up).val {
+                ExprT::Member(b, _) | ExprT::Index(b, _) => (**b).clone(),
+                _ => break,
+            };
+            if let Some(bty) = ty_of(&b)
+                && let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(tds, &bty).val
+                && is_overlay(tds, &un.val)
+            {
+                opaque = true;
+                break;
+            }
+            up = b;
+        }
+    }
+    Ok(OverlayPath { root, opaque })
+}
+
+/// Whether a value of `ty` has part of an overlay union in it. Such a value
+/// is bytes, pointer provenance and all, so it is not something a program can
+/// hold, and there is no whole-value reader or writer for it: the fields are
+/// read and written one at a time.
+fn holds_overlay(tds: &Typedefs, ty: &Type) -> bool {
+    match &peel(tds, ty).val {
+        TypeT::TypeRef(TypeRefKind::Union(n)) => tds
+            .unions
+            .get(&*n.val)
+            .is_some_and(|ui| ui.overlay || ui.members.iter().any(|m| holds_overlay(tds, &m.ty))),
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => tds
+            .structs
+            .get(&*n.val)
+            .is_some_and(|si| si.fields.iter().any(|f| holds_overlay(tds, &f.ty))),
+        TypeT::FixedArray(..) => flat_array(tds, ty).is_some_and(|(t, _)| holds_overlay(tds, t)),
+        _ => false,
+    }
+}
+
 /// The value of field `f` of the struct value `x`, where `bty` is the
 /// struct's type. An ordinary field is a projection; a bit-field is the bits
 /// it occupies of the unit's value.
@@ -1135,6 +1486,11 @@ fn field_value(tds: &Typedefs, bty: &Type, x: &str, f: &str) -> String {
     // that member's constructor -- which only exists when it is the live one,
     // and a contract that names it has to have said so first.
     if let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(tds, bty).val {
+        // An overlay union's member is what its bytes read as, whichever
+        // member wrote them: total, so there is no tag to have tested.
+        if is_overlay(tds, &u.val) {
+            return format!("(union_{}_get_{} ({}))", u.val, f, x);
+        }
         return format!("(Union_{}_{}?.v ({}))", u.val, f, x);
     }
     match bitfield_at(tds, bty, f) {
@@ -1166,6 +1522,11 @@ struct StructInfo {
     /// byte offset, which is what lets the proof carve the object into its
     /// fields and the padding between them and put it back together.
     has_bytes: bool,
+    /// Whether the module also has the overlay view (`_view_ok`, `_view` and
+    /// the two lemmas relating them to `_repr`): what a run of bytes of an
+    /// `_overlay` union reads as through this struct. Generated only for
+    /// structs an overlay union reaches.
+    view: bool,
     /// A `_refine` on a field that names a *sibling*, rendered as a
     /// proposition about a binder `x` of the struct's own type.
     ///
@@ -1174,6 +1535,18 @@ struct StructInfo {
     /// object, and the object is what `_pts_to` is about. So it goes there,
     /// and every operation that produces a `_pts_to` has to say it holds.
     inv: Option<String>,
+    /// The `_refine` written on the struct declaration, as a proposition about
+    /// a binder `x` of the struct's type, when every clause of it is a
+    /// proposition about the value. Emitted as `struct_X__refine`, it is what
+    /// an `_array` of the struct says of each of its elements.
+    elem_refine: Option<String>,
+    /// Whether `struct_X__deep_refine` exists: the declaration's `_refine`
+    /// together with those of the structs embedded in it, at any depth. It is
+    /// what an owned pointer to the struct says of the object it reaches.
+    deep_refine: bool,
+    /// The union fields whose live member the `_refine` ties to a tag field;
+    /// see `struct_tag_arms`.
+    tag_arms: HashMap<String, TagArms>,
 }
 
 /// One member of a union the emitter generated a Palow type for.
@@ -1200,6 +1573,40 @@ struct UnionInfo {
     members: Vec<UnionMember>,
     size: u64,
     align: u64,
+    /// `_overlay`: the value is the union's bytes rather than a tagged sum,
+    /// and the members are views of them. See `emit_overlay_union`.
+    overlay: bool,
+    /// For an overlay union, the integer types that have a byte-level read
+    /// and write at a constant offset (`union_X_<int>_read`/`_write`).
+    ints: Vec<String>,
+    /// For an overlay union, the islands among its leaves that are loaded and
+    /// stored whole (`union_X_union_I_read`/`_write`), by their C names.
+    islands: Vec<String>,
+    /// For an overlay union with an `_owning` member, the deep ownership that
+    /// member's pointers carry. See `UnionOwn`.
+    own: Option<UnionOwn>,
+}
+
+/// The deep ownership of an overlay union, held through its one `_owning`
+/// member: the `_own` of that member's struct, at the member's view of the
+/// union's bytes. It is keyed on the bytes the owned pointers live in and on
+/// nothing else, so a write through any member that leaves those bytes alone
+/// leaves it in place.
+struct UnionOwn {
+    /// The member's name.
+    arm: String,
+    /// The member's struct, by C name.
+    sn: String,
+    /// The byte ranges of the member's fields that its struct's ownership
+    /// reads, as `(start, end)` in the union: what a write must not touch for
+    /// the ownership to follow it.
+    reads: Vec<(u64, u64)>,
+    /// The owned pointers themselves, by their offset in the union and the
+    /// term the member's ownership has each at, over a binder `x` of the
+    /// member's struct. Their bytes have to read as a pointer for the body to
+    /// load one, and a load has to come back as that term for the ownership
+    /// to be found by it.
+    ptrs: Vec<(u64, String)>,
 }
 
 struct Typedefs<'a> {
@@ -1391,7 +1798,8 @@ fn peel<'b>(tds: &'b Typedefs, ty: &'b Type) -> &'b Type {
             | TypeT::RefineUninit(t, _)
             | TypeT::RefineValue(t, ..)
             | TypeT::Plain(t)
-            | TypeT::Nullable(t) => tds.resolve(t),
+            | TypeT::Nullable(t)
+            | TypeT::Overread(t) => tds.resolve(t),
             _ => return ty,
         };
     }
@@ -1414,7 +1822,8 @@ fn describe(ty: &Type) -> String {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => describe(t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => describe(t),
         TypeT::Float { width } => format!("a {}-bit float", width),
         TypeT::SizeT => "size_t".to_string(),
         TypeT::PtrdiffT => "ptrdiff_t".to_string(),
@@ -1463,7 +1872,7 @@ pub struct PalowModule {
 /// contract is assumed` is a declaration with no body in the first place, and
 /// `is not an F* definition` is a `_let` the model passes through; neither
 /// weakens anything.
-pub fn weakenings(module: &PalowModule) -> Vec<String> {
+pub fn weakenings(module: &PalowModule) -> Vec<(String, Option<Location>)> {
     let mut out = Vec::new();
     for line in module.code.lines() {
         let t = line.trim_start();
@@ -1485,14 +1894,85 @@ pub fn weakenings(module: &PalowModule) -> Vec<String> {
         } else {
             continue;
         };
-        out.push(
-            said.trim_end()
-                .trim_end_matches("*)")
-                .trim_end()
-                .to_string(),
-        );
+        let said = said.trim_end().trim_end_matches("*)").trim_end();
+        out.push(split_loc_tag(said));
     }
     out
+}
+
+/// The marker a contract error carries to say where in the source the
+/// offending clause is: the diagnostic for a dropped contract is otherwise
+/// reported at the function, which may be far from the prototype that holds
+/// the contract.
+const LOC_TAG: &str = " @at ";
+
+fn loc_tag(e: &Expr) -> String {
+    let l = e.loc.location();
+    format!(
+        "{}{}:{}:{}:{}:{}",
+        LOC_TAG,
+        l.range.start.line,
+        l.range.start.character,
+        l.range.end.line,
+        l.range.end.character,
+        l.file_name
+    )
+}
+
+/// `why`, tagged with where `e` is unless something inside already tagged it.
+fn with_loc_tag(why: String, e: &Expr) -> String {
+    if why.contains(LOC_TAG) {
+        why
+    } else {
+        format!("{}{}", why, loc_tag(e))
+    }
+}
+
+/// The offending expression as the source has it, after an error message
+/// that would otherwise only say what kind of expression it is.
+fn shown_at(e: &Expr) -> String {
+    // The reason ends up in an F* comment, which `(*` would reopen and `*)`
+    // would close.
+    let text = e
+        .val
+        .to_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("(*", "( *")
+        .replace("*)", "* )");
+    format!(": `{}`{}", text, loc_tag(e))
+}
+
+fn split_loc_tag(said: &str) -> (String, Option<Location>) {
+    let Some((msg, tag)) = said.rsplit_once(LOC_TAG) else {
+        return (said.to_string(), None);
+    };
+    let mut parts = tag.splitn(5, ':');
+    let mut num = || parts.next().and_then(|n| n.parse::<u32>().ok());
+    let (Some(sl), Some(sc), Some(el), Some(ec)) = (num(), num(), num(), num()) else {
+        return (said.to_string(), None);
+    };
+    let Some(file) = parts.next() else {
+        return (said.to_string(), None);
+    };
+    let range = Range {
+        start: Position {
+            line: sl,
+            character: sc,
+        },
+        end: Position {
+            line: el,
+            character: ec,
+        },
+    };
+    (
+        msg.to_string(),
+        Some(Location {
+            file_name: file.into(),
+            range,
+        }),
+    )
 }
 
 /// The C declaration a generated module stands for.
@@ -1551,7 +2031,8 @@ fn strip_annotations(ty: &Type) -> &Type {
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
-        | TypeT::Nullable(t) => strip_annotations(t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => strip_annotations(t),
         _ => ty,
     }
 }
@@ -1564,7 +2045,8 @@ fn is_plain_chain(ty: &Type) -> bool {
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
-        | TypeT::Nullable(t) => is_plain_chain(t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => is_plain_chain(t),
         _ => false,
     }
 }
@@ -1601,7 +2083,8 @@ fn palow_name(tds: &Typedefs, ty: &Type) -> Option<String> {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => palow_name(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => palow_name(tds, t),
         _ => None,
     }
 }
@@ -1641,7 +2124,8 @@ fn fstar_type(tds: &Typedefs, ty: &Type) -> Option<String> {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => fstar_type(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => fstar_type(tds, t),
         _ => None,
     }
 }
@@ -1700,7 +2184,8 @@ fn is_arrayptr(tds: &Typedefs, ty: &Type) -> bool {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => is_arrayptr(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => is_arrayptr(tds, t),
         _ => false,
     }
 }
@@ -1714,7 +2199,8 @@ fn extent(tds: &Typedefs, ty: &Type) -> Option<Extent> {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => extent(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => extent(tds, t),
         _ => None,
     }
 }
@@ -1750,7 +2236,8 @@ fn palow_sizeof(tds: &Typedefs, ty: &Type) -> Option<u64> {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => palow_sizeof(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => palow_sizeof(tds, t),
         _ => None,
     }
 }
@@ -1828,7 +2315,8 @@ fn uninit_below_pointer(tds: &Typedefs, ty: &Type) -> bool {
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, _, _, _)
         | TypeT::Plain(t)
-        | TypeT::Nullable(t) => uninit_below_pointer(tds, t),
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t) => uninit_below_pointer(tds, t),
         _ => false,
     }
 }
@@ -1847,42 +2335,53 @@ fn always_refines(tds: &Typedefs, ty: &Type) -> Vec<Rc<Expr>> {
         | TypeT::RefineValue(t, _, _, _)
         | TypeT::Plain(t)
         | TypeT::Nullable(t)
+        | TypeT::Overread(t)
         | TypeT::Pointer(t, _) => always_refines(tds, t),
         _ => Vec::new(),
     }
 }
 
 fn refinements(tds: &Typedefs, ty: &Type) -> Result<Refinements, String> {
-    refinements_through(tds, ty, true)
+    collect_refinements(tds, ty, false, true)
 }
 
-/// The refinements of a struct *field*'s value. A field of pointer type holds
-/// an address, so what the pointee's type says -- a `_refine` on the struct a
-/// `T *` field points at, say -- is the pointee's invariant, stated wherever
-/// that object is owned, and not a property of the field.
+/// The refinements of a struct *field*'s value. A field marked `_plain`
+/// delegates its inherited ownership and refinements to the enclosing
+/// protocol; clauses written above `_plain` still apply. A field of pointer
+/// type holds an address, so what the pointee's type says -- a `_refine` on
+/// the struct a `T *` field points at, say -- is the pointee's invariant,
+/// stated wherever that object is owned, and not a property of the field.
 fn field_refinements(tds: &Typedefs, ty: &Type) -> Result<Refinements, String> {
-    refinements_through(tds, ty, false)
+    collect_refinements(tds, ty, true, false)
 }
 
-fn refinements_through(tds: &Typedefs, ty: &Type, ptr: bool) -> Result<Refinements, String> {
+fn collect_refinements(
+    tds: &Typedefs,
+    ty: &Type,
+    stop_at_plain: bool,
+    ptr: bool,
+) -> Result<Refinements, String> {
     match &tds.resolve(ty).val {
+        TypeT::Plain(_) if stop_at_plain => Ok((Vec::new(), Vec::new(), Vec::new())),
         TypeT::Refine(t, p) | TypeT::RefineAlways(t, p) => {
-            let (mut v, u, b) = refinements_through(tds, t, ptr)?;
+            let (mut v, u, b) = collect_refinements(tds, t, stop_at_plain, ptr)?;
             v.push(p.clone());
             Ok((v, u, b))
         }
         TypeT::RefineUninit(t, p) => {
-            let (v, mut u, b) = refinements_through(tds, t, ptr)?;
+            let (v, mut u, b) = collect_refinements(tds, t, stop_at_plain, ptr)?;
             u.push(p.clone());
             Ok((v, u, b))
         }
         TypeT::RefineValue(t, n, vty, p) => {
-            let (v, u, mut b) = refinements_through(tds, t, ptr)?;
+            let (v, u, mut b) = collect_refinements(tds, t, stop_at_plain, ptr)?;
             b.push((n.clone(), vty.clone(), p.clone()));
             Ok((v, u, b))
         }
-        TypeT::Plain(t) | TypeT::Nullable(t) => refinements_through(tds, t, ptr),
-        TypeT::Pointer(t, _) if ptr => refinements_through(tds, t, ptr),
+        TypeT::Plain(t) | TypeT::Nullable(t) | TypeT::Overread(t) => {
+            collect_refinements(tds, t, stop_at_plain, ptr)
+        }
+        TypeT::Pointer(t, _) if ptr => collect_refinements(tds, t, stop_at_plain, ptr),
         _ => Ok((Vec::new(), Vec::new(), Vec::new())),
     }
 }
@@ -1909,7 +2408,7 @@ fn refinements_above_plain(tds: &Typedefs, ty: &Type) -> Result<Refinements, Str
             b.push((n.clone(), vty.clone(), p.clone()));
             Ok((v, u, b))
         }
-        TypeT::Nullable(t) => refinements_above_plain(tds, t),
+        TypeT::Nullable(t) | TypeT::Overread(t) => refinements_above_plain(tds, t),
         _ => Ok((Vec::new(), Vec::new(), Vec::new())),
     }
 }
@@ -1995,7 +2494,9 @@ fn split_refine<'e>(
     own: &mut Vec<&'e Expr>,
     props: &mut Vec<&'e Expr>,
 ) {
-    let inner = strip_vattr(p);
+    // Not `strip_vattr`: a whole clause `u.m._active` is the attribute, and
+    // peeling it would leave just the union.
+    let inner = p;
     match &inner.val {
         ExprT::Cast(x, to) if matches!(tds.resolve(to).val, TypeT::SLProp) => {
             split_refine(tds, x, own, props)
@@ -2133,6 +2634,8 @@ struct RetBlock {
     /// pointer left as `PTR_HOLE`. The caller names it to get past its own
     /// nullness test; a non-nullable return has nothing to get past.
     guarded: Option<String>,
+    /// Whether the block is an array (`_allocated _nullable _array T *`).
+    array: bool,
 }
 
 /// The Palow type name of what an `_allocated` return type points at, when the
@@ -2156,9 +2659,11 @@ fn allocated_return(tds: &Typedefs, ty: &Type) -> Option<String> {
 fn refined(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Refine(..) | TypeT::RefineAlways(..) | TypeT::RefineUninit(..) => true,
-        TypeT::RefineValue(t, ..) | TypeT::Plain(t) | TypeT::Nullable(t) | TypeT::Pointer(t, _) => {
-            refined(tds, t)
-        }
+        TypeT::RefineValue(t, ..)
+        | TypeT::Plain(t)
+        | TypeT::Nullable(t)
+        | TypeT::Overread(t)
+        | TypeT::Pointer(t, _) => refined(tds, t),
         _ => false,
     }
 }
@@ -2199,12 +2704,76 @@ fn is_void_ptr(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Pointer(to, _) => matches!(tds.resolve(to).val, TypeT::Void),
         TypeT::Nullable(t)
+        | TypeT::Overread(t)
         | TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..) => is_void_ptr(tds, t),
         _ => false,
     }
+}
+
+/// The array pointer a `_cursor` parameter points at: `T **p` whose `*p` is
+/// a `_nullable _array T *`. The contract owns that array for the call
+/// under a name of its own, `p__arr`, whose base is the incoming `*p`.
+/// The `_cursor_from(s)` seeds of a function: each seed parameter's name,
+/// with the name of the cursor it seeds. A seed is a `_nullable` pointer to
+/// the cursor's element type, and is nothing else: not itself a cursor and
+/// not the seed of two.
+fn cursor_seeds(tds: &Typedefs, decl: &FnDecl) -> Result<HashMap<String, String>, String> {
+    let mut out = HashMap::new();
+    for a in &decl.args {
+        let (Some(n), Some(seed)) = (&a.name, &a.cursor_from) else {
+            continue;
+        };
+        let Some(pt) = cursor_pointee(tds, &a.ty) else {
+            return Err(format!(
+                "`_cursor_from({})` on var_{}, which is not a `_cursor`",
+                seed.val, n.val
+            ));
+        };
+        let Some(s) = decl
+            .args
+            .iter()
+            .find(|b| b.name.as_ref().is_some_and(|m| m.val == seed.val))
+        else {
+            return Err(format!(
+                "`_cursor_from({})` on var_{} names no parameter",
+                seed.val, n.val
+            ));
+        };
+        let same = match (pointee(tds, peel(tds, pt)), pointee(tds, peel(tds, &s.ty))) {
+            (Some(x), Some(y)) => {
+                palow_name(tds, x).is_some() && palow_name(tds, x) == palow_name(tds, y)
+            }
+            _ => false,
+        };
+        if !same
+            || !is_nullable(tds, &s.ty)
+            || extent(tds, &s.ty) != Some(Extent::Array)
+            || is_arrayptr(tds, &s.ty)
+            || s.mode != ParamMode::Regular
+            || cursor_pointee(tds, &s.ty).is_some()
+            || out.contains_key(&*seed.val)
+        {
+            return Err(format!(
+                "`_cursor_from({})` on var_{}: the seed must be a `_nullable _array` \
+                 parameter of the cursor's element type, seeding one cursor",
+                seed.val, n.val
+            ));
+        }
+        out.insert(seed.val.to_string(), n.val.to_string());
+    }
+    Ok(out)
+}
+
+fn cursor_pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
+    if extent(tds, ty) != Some(Extent::One) {
+        return None;
+    }
+    let pt = pointee(tds, ty)?;
+    (is_nullable(tds, pt) && extent(tds, pt) == Some(Extent::Array) && !is_arrayptr(tds, pt))
+        .then_some(pt)
 }
 
 fn pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
@@ -2227,6 +2796,7 @@ fn pointee<'a>(tds: &'a Typedefs, ty: &'a Type) -> Option<&'a Rc<Type>> {
         TypeT::Pointer(_, PointerKind::Core) => None,
         TypeT::Pointer(to, _) => Some(to),
         TypeT::Nullable(t)
+        | TypeT::Overread(t)
         | TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
@@ -2257,10 +2827,192 @@ fn only_loads(lines: &[String]) -> bool {
     })
 }
 
+/// The lemma that derives a pointer's non-nullness from the points-to of an
+/// object of this type, initialized or (`uninit`) not, where one is emitted.
+///
+/// The type is peeled first: a refined, `_plain` or `_nullable` struct is the
+/// same struct, and the lemma is the struct's or nothing.
+fn not_null_lemma(tds: &Typedefs, pt: &Type, uninit: bool) -> Option<String> {
+    let pn = palow_name(tds, pt)?;
+    let suffix = if uninit {
+        "pts_to_uninit_not_null"
+    } else {
+        "pts_to_not_null"
+    };
+    match &peel(tds, pt).val {
+        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+            (!uninit && is_overlay(tds, &n.val)).then(|| format!("{}_{}", pn, suffix))
+        }
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+            let si = tds.structs.get(&*n.val)?;
+            let flex = matches!(
+                si.fields.last().map(|f| &f.shape),
+                Some(FieldShape::Flex { .. })
+            );
+            field_not_null(tds, si, uninit)?;
+            (!(flex && uninit)).then(|| format!("{}_{}", pn, suffix))
+        }
+        _ => Some(format!("{}_{}", pn, suffix)),
+    }
+}
+
+/// A pointer to a struct and a pointer to any of its fields share a
+/// provenance, and null has none, so the struct's non-nullness lemma is a
+/// field's, reached through the struct. The field's lemma and name, for the
+/// first field that is a single object with one: a scalar, or a struct with a
+/// field that does. The field at offset zero is tried first, since nothing
+/// more is needed to carry its fact to the struct.
+fn field_not_null<'s>(
+    tds: &Typedefs,
+    si: &'s StructInfo,
+    uninit: bool,
+) -> Option<(String, &'s str)> {
+    let lemma_of = |f: &'s StructField| -> Option<(String, &'s str)> {
+        let FieldShape::One { pn } = &f.shape else {
+            return None;
+        };
+        let lemma = match &peel(tds, &f.ty).val {
+            TypeT::TypeRef(TypeRefKind::Struct(_)) => not_null_lemma(tds, &f.ty, uninit)?,
+            TypeT::TypeRef(..) | TypeT::FixedArray(..) => return None,
+            _ if uninit => format!("{}_pts_to_uninit_not_null", pn),
+            _ => format!("{}_pts_to_not_null", pn),
+        };
+        Some((lemma, &f.name))
+    };
+    si.fields
+        .iter()
+        .filter(|f| f.offset == 0)
+        .chain(si.fields.iter().filter(|f| f.offset != 0))
+        .find_map(lemma_of)
+}
+
+/// The guarded resource of an optional input parameter, stated at a null
+/// pointer with full permission and the pointee type's zero.
+///
+/// The callee names the pointee value -- and for a const parameter the
+/// permission -- as implicits of its signature, which a call site passing a
+/// null has nothing to solve against. Under a null pointer the guard is `emp`,
+/// so any resource may be introduced there; one with no metavariables left in
+/// it pins both implicits by structural match and asserts nothing about
+/// memory. Only pointees that state no more than a `pts_to` qualify: a
+/// refinement, or the `_own` of an owned pointer field, would be a second
+/// guarded conjunct to introduce.
+fn null_input(tds: &Typedefs, ty: &Type) -> Option<String> {
+    fn bare(tds: &Typedefs, ty: &Type) -> bool {
+        match &tds.resolve(ty).val {
+            TypeT::Int { .. } | TypeT::SizeT | TypeT::Bool => true,
+            TypeT::TypeRef(TypeRefKind::Struct(n)) => tds.structs.get(&*n.val).is_some_and(|si| {
+                si.fields
+                    .iter()
+                    .all(|f| matches!(f.shape, FieldShape::One { .. }) && bare(tds, &f.ty))
+            }),
+            _ => false,
+        }
+    }
+    if refined(tds, ty) || refined_pointee(tds, ty) || extent(tds, ty) != Some(Extent::One) {
+        return None;
+    }
+    let TypeT::Pointer(pt, _) = &peel(tds, ty).val else {
+        return None;
+    };
+    if !bare(tds, pt) {
+        return None;
+    }
+    let pn = palow_name(tds, pt)?;
+    let zero = zero_value(tds, pt).ok()?;
+    Some(format!("{}_pts_to null 1.0R ({})", pn, zero))
+}
+
+/// Whether a pointer's pointee is, or holds, a struct with a `_refine` --
+/// written on the struct or on one of its fields. The callee states that
+/// refinement as a conjunct of its own beside the pointee's `_pts_to`, so an
+/// optional parameter's guard is two guards, and a call site that introduces
+/// or eliminates only the `_pts_to` one would leave the other unmatched (or
+/// matched against the wrong value). Asked of the same walk `emit_fn_sig`
+/// states the contract from, so the two agree on which pointees those are.
+fn refined_pointee(tds: &Typedefs, ty: &Type) -> bool {
+    match &peel(tds, ty).val {
+        TypeT::Pointer(pt, _) => {
+            !struct_refines(tds, pt).is_empty() || !field_refines(tds, pt).is_empty()
+        }
+        _ => false,
+    }
+}
+
+/// The clauses of the `_refine` on a struct declaration, for a value of
+/// that type (empty for any other type).
+fn struct_refines(tds: &Typedefs, ty: &Type) -> Vec<Rc<Expr>> {
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
+        return Vec::new();
+    };
+    tds.refined_structs
+        .get(&*n.val.to_string())
+        .and_then(|r| refinements(tds, r).ok())
+        .map(|(ps, _, _)| ps)
+        .unwrap_or_default()
+}
+
+// A `_refine` written on one *field* of a struct is an invariant of the
+// struct type just as a struct-level one is, and it means the same thing
+// wherever a value of that type is: `this` is the field. The generated
+// ownership cannot carry it -- it is built from representations and has no
+// hook for a clause -- so it is stated in the contract of every function
+// that holds such a struct, at whichever ends the struct itself is stated.
+fn field_refines(tds: &Typedefs, ty: &Type) -> Vec<FieldRefinement> {
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
+        return Vec::new();
+    };
+    let sname = n.val.to_string();
+    let Some(si) = tds.structs.get(&sname) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for f in &si.fields {
+        let Ok((mut ps, _, _)) = field_refinements(tds, &f.ty) else {
+            continue;
+        };
+        // An embedded struct carries its declaration's invariant just
+        // as a parameter of that type does. Do not follow pointers:
+        // storing an address is not ownership of the pointed-to object.
+        let nested = !is_plain(tds, &f.ty)
+            && !is_plain_chain(&f.ty)
+            && matches!(peel(tds, &f.ty).val, TypeT::TypeRef(TypeRefKind::Struct(_)));
+        if nested {
+            if let TypeT::TypeRef(TypeRefKind::Struct(child)) = &peel(tds, &f.ty).val
+                && let Some(r) = tds.refined_structs.get(&*child.val)
+                && let Ok((clauses, _, _)) = refinements(tds, r)
+            {
+                for cl in clauses {
+                    if !ps.iter().any(|p| Rc::ptr_eq(p, &cl)) {
+                        ps.push(cl);
+                    }
+                }
+            }
+        }
+        for cl in ps {
+            out.push(FieldRefinement {
+                parents: Vec::new(),
+                container: sname.clone(),
+                field: f.name.clone(),
+                ty: f.ty.clone(),
+                clause: cl,
+            });
+        }
+        if nested {
+            for mut child in field_refines(tds, &f.ty) {
+                child.parents.insert(0, f.name.clone());
+                out.push(child);
+            }
+        }
+    }
+    out
+}
+
 fn is_nullable(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Nullable(_) => true,
-        TypeT::Refine(t, _)
+        TypeT::Overread(t)
+        | TypeT::Refine(t, _)
         | TypeT::RefineAlways(t, _)
         | TypeT::RefineUninit(t, _)
         | TypeT::RefineValue(t, ..) => is_nullable(tds, t),
@@ -2328,6 +3080,19 @@ struct FnSurface {
     /// the source says, and in particular cannot discharge an overflow
     /// obligation -- see `Body::signed_ok`.
     contract: bool,
+    /// Whether the emitted postcondition determines the result with a
+    /// `rewrites_to`, which is what lets Pulse read a call to this function
+    /// in a specification as a term.
+    determined: bool,
+    /// Whether that `rewrites_to` names one of the postcondition's own
+    /// witnesses, so that a call's result *is* a term over values the caller
+    /// only knows existentially. See `Body::store`.
+    determined_by_witness: bool,
+    /// Whether the emitted precondition is trivial: no `preserves`, every
+    /// `requires` is `emp`, and no implicit binders. Pulse reads a call in a
+    /// specification without checking the callee's precondition, so only a
+    /// callee with nothing to check may be read that way.
+    trivial_pre: bool,
     /// The `__fp` wrapper, when this function can be decayed to a code
     /// pointer: the flat, explicitly-quantified form `of_fn_div` needs.
     fp: Option<String>,
@@ -2407,6 +3172,26 @@ struct OwnedParam {
     /// name is the signature's own ghost binder, which is in scope throughout
     /// the body.
     entry: String,
+    /// For an `_array` of a struct whose declaration carries a `_refine`, the
+    /// struct's named element predicate. A loop invariant that rebinds the
+    /// array's sequence states it again, or the refinement would be lost on
+    /// the first iteration.
+    elem_refine: Option<String>,
+    /// A `const` pointee, which nothing in the body can change.
+    fixed: bool,
+    /// The deep half of the ownership, for a pointee with owned pointer
+    /// fields: the struct's predicate prefix, the record's type, the
+    /// permission, and the record on entry. A loop invariant that rebinds
+    /// the value has to rebind this with it, since `_own` is about the value.
+    own: Option<OwnInfo>,
+}
+
+#[derive(Clone)]
+struct OwnInfo {
+    sn: String,
+    osty: String,
+    perm: String,
+    entry: String,
 }
 
 /// Which values a specification expression refers to: the ones on entry, the
@@ -2416,6 +3201,31 @@ enum When {
     Pre,
     Post,
     Old,
+}
+
+/// Marks a guard that a contract proposition already implies: the guards of
+/// the right operand of `&&`, `||` or `==>`, conjoined in front of it, again
+/// under the left operand. Only a `forall` keeps it, as its premise; a
+/// conjunction, an `exists` or a whole clause leaves it out, since repeating
+/// the left operand there grows the clause quadratically along a chain of
+/// `&&` for nothing.
+const IMPLIED_GUARD: &str = "\u{1}";
+
+/// The guards a proposition needs conjoined in front of it.
+fn needed_guards(gs: &[String]) -> String {
+    gs.iter()
+        .filter(|g| !g.starts_with(IMPLIED_GUARD))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(r" /\ ")
+}
+
+/// Every guard, implied or not, as a `forall`'s premise.
+fn all_guards(gs: &[String]) -> String {
+    gs.iter()
+        .map(|g| g.strip_prefix(IMPLIED_GUARD).unwrap_or(g))
+        .collect::<Vec<_>>()
+        .join(r" /\ ")
 }
 
 /// Enough of the function's signature to translate its contract: what each
@@ -2492,6 +3302,11 @@ struct Spec<'a> {
     /// Arrays whose value here is a sequence of `option`s: an `_out` array
     /// in a loop invariant, while it is still being filled.
     maybes: HashSet<String>,
+    /// Pointers a loop walks through an array parameter, as
+    /// (the array parameter, its element size as a `nat` term, its base).
+    /// Only a loop invariant has any: anywhere else a pointer parameter is
+    /// the base of its own array.
+    walks: HashMap<String, (String, String, String)>,
     /// What the comparison being translated needs to be defined: that each
     /// cell of a `maybes` array it reads holds a value. Unlike `guards`, this
     /// is part of the claim, at the comparison itself -- reading a cell is a
@@ -2535,10 +3350,18 @@ impl<'a> Spec<'a> {
     }
 
     fn ty_of(&self, e: &Expr) -> Result<Rc<Type>, String> {
-        self.env
+        let t = self
+            .env
             .infer_expr(e)
             .map(|t| t.to_rc())
-            .map_err(|_| "a subexpression whose type could not be inferred".to_string())
+            .map_err(|_| "a subexpression whose type could not be inferred".to_string())?;
+        if let ExprT::Member(b, f) = &e.val
+            && let Ok(bt) = self.ty_of(b)
+            && let Some(it) = island_field(self.tds, &bt, &f.val)
+        {
+            return Ok(it);
+        }
+        Ok(t)
     }
 
     /// The name whose storage a `_live` clause is talking about: `_live(s.x)`
@@ -2587,15 +3410,20 @@ impl<'a> Spec<'a> {
         Ok(parts.join(" ** "))
     }
 
+    /// Make the guards pushed since `mark` needed again: the proposition
+    /// they were implied by is negated, or is a premise or an alternative.
+    fn unmark_guards_since(&self, mark: usize) {
+        for g in self.guards.borrow_mut()[mark..].iter_mut() {
+            if let Some(r) = g.strip_prefix(IMPLIED_GUARD) {
+                *g = r.to_string();
+            }
+        }
+    }
+
     /// Scope new definedness obligations to the branch that evaluates them.
     /// Return the conjunction too, so a proposition can type its guarded terms.
     fn guard_since(&self, mark: usize, condition: &str) -> Option<String> {
-        let guards = self
-            .guards
-            .borrow_mut()
-            .drain(mark..)
-            .collect::<Vec<_>>()
-            .join(r" /\ ");
+        let guards = all_guards(&self.guards.borrow_mut().drain(mark..).collect::<Vec<_>>());
         if guards.is_empty() {
             None
         } else {
@@ -2606,6 +3434,67 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// The outermost `_overlay` union a place lies in, and the place's byte
+    /// offset in it, when every step from there to the place is a struct
+    /// field, an overlay member or a constant array index. `None` when the
+    /// place is not inside an overlay; an error when it is but the path
+    /// leaves the bytes the overlay's layout fixes (a bit-field, a variable
+    /// index), or a constant subscript is out of bounds.
+    fn overlay_root(&self, lv: &Expr) -> Result<Option<(Expr, u64)>, String> {
+        let ty = self.ty_of(lv)?;
+        let path = overlay_path(self.tds, &|x| self.ty_of(x).ok(), lv)?;
+        if let Some((r, _, o)) = path.root {
+            return Ok(Some((r, o)));
+        }
+        if path.opaque {
+            return Err(
+                "a place inside an overlay union at an offset that is not constant (a \
+                 bit-field or a variable subscript is on the path)"
+                    .to_string(),
+            );
+        }
+        // The whole of an overlay union is its bytes, so it is its own root.
+        if let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(self.tds, &ty).val
+            && is_overlay(self.tds, &un.val)
+        {
+            return Ok(Some((lv.clone(), 0)));
+        }
+        Ok(None)
+    }
+
+    /// `_unchanged(lv)`: the object `lv` names has the bytes it had on
+    /// entry. Inside an `_overlay` union that is a statement about a byte
+    /// range of the outermost overlay union on the path -- the object's
+    /// offset and size in it -- so it holds of storage whose bytes are not
+    /// readable as any member, such as an opaque `char` array another layer
+    /// has stored pointers over. Anywhere else it is equality of values.
+    fn unchanged(&self, lv: &Expr, w: When) -> Result<String, String> {
+        if !matches!(w, When::Post) {
+            return Err("`_unchanged` outside a postcondition".to_string());
+        }
+        let ty = self.ty_of(lv)?;
+        let root = self.overlay_root(lv)?;
+        match root {
+            Some((r, o)) => {
+                let n = palow_sizeof(self.tds, &ty).ok_or_else(|| {
+                    format!("`_unchanged` of {}", describe(self.tds.resolve(&ty)))
+                })?;
+                Ok(format!(
+                    "(Pulse.Lib.C.Palow.Overlay.range_unchanged {} {} {} {})",
+                    self.value(&r, w)?,
+                    self.value(&r, When::Old)?,
+                    o,
+                    o + n
+                ))
+            }
+            None => Ok(format!(
+                "({} == {})",
+                self.value(lv, w)?,
+                self.value(lv, When::Old)?
+            )),
+        }
+    }
+
     /// A specification expression in proposition position.
     fn prop(&self, e: &Expr, w: When) -> Result<String, String> {
         match &e.val {
@@ -2613,6 +3502,7 @@ impl<'a> Spec<'a> {
                 self.prop(inner, w)
             }
             ExprT::Old(inner) => self.prop(inner, When::Old),
+            ExprT::Unchanged(lv) => self.unchanged(lv, w),
             ExprT::InlinePulse(code, _) => flatten_fragment(&self.inline_pulse(code, w)?),
             // `_live(x)` says the storage exists. A loop invariant restates the
             // whole ownership frame anyway, so by the time this is read the
@@ -2633,7 +3523,12 @@ impl<'a> Spec<'a> {
                     _ => Ok("True".to_string()),
                 }
             }
-            ExprT::UnOp(UnOp::Not, inner) => Ok(format!("(~({}))", self.prop(inner, w)?)),
+            ExprT::UnOp(UnOp::Not, inner) => {
+                let mark = self.guards.borrow().len();
+                let p = self.prop(inner, w)?;
+                self.unmark_guards_since(mark);
+                Ok(format!("(~({}))", p))
+            }
             // A quantified variable is bound at its C type, not at `nat`:
             // `_forall(size_t i, ...)` is a claim about every `size_t`, and
             // binding it that way is what lets every other translation path --
@@ -2644,16 +3539,19 @@ impl<'a> Spec<'a> {
             // total is normally the quantifier's own antecedent, so hoisting
             // the condition out would both be ill-typed and claim something
             // much stronger than the source does.
-            ExprT::Forall(v, ty, body) | ExprT::Exists(v, ty, body) => {
+            ExprT::Forall(v, ty, trigs, body) | ExprT::Exists(v, ty, trigs, body) => {
                 let all = matches!(&e.val, ExprT::Forall(..));
                 let fty = fstar_type(self.tds, ty).ok_or_else(|| {
                     format!("a quantifier over {}", describe(self.tds.resolve(ty)))
                 })?;
                 let bound = format!("var_{}", v.val);
+                let pattern;
                 let mut env = self.env.clone();
                 env.push_var_decl(v, ty.clone(), crate::env::LocalDeclKind::RValue);
                 let mut locals = self.locals.clone();
                 locals.insert(v.val.to_string(), bound.clone());
+                let found = if all { None } else { exists_witness(v, body) };
+                let mut witness = None;
                 let body = {
                     let inner = Spec {
                         tds: self.tds,
@@ -2674,12 +3572,40 @@ impl<'a> Spec<'a> {
                         valued: RefCell::new(Vec::new()),
                         maybes: self.maybes.clone(),
                         defined: RefCell::new(Vec::new()),
+                        walks: self.walks.clone(),
                     };
                     let p = inner.prop(body, w)?;
+                    // A trigger is the term the body reads, translated the
+                    // same way so the pattern matches it, but it states
+                    // nothing: what its translation needs to be defined is
+                    // the body's business, not the pattern's.
+                    let (gm, dm) = (inner.guards.borrow().len(), inner.defined.borrow().len());
+                    pattern = trigger_pattern(v, &bound, trigs, |t| inner.value(t, w))?;
+                    inner.guards.borrow_mut().truncate(gm);
+                    inner.defined.borrow_mut().truncate(dm);
+                    // The witness stands for `v` only if the comparison
+                    // pinning it reads `v` as just its value: a conversion
+                    // that wraps would make `v == w` a congruence instead.
+                    if let Some((vs, wt)) = found {
+                        let pd = inner.has_ptr_diff(vs) || inner.has_ptr_diff(wt);
+                        let side = if pd {
+                            inner.pos_num(vs, w)
+                        } else {
+                            inner.num(vs, w)
+                        };
+                        let plain = ExprT::Var(v.clone()).with_loc(v.loc.clone());
+                        let exact = matches!((side, inner.num(&plain, w)),
+                            (Ok(a), Ok(b)) if unparen(&a) == unparen(&b));
+                        witness = exact.then_some((pd, wt));
+                    }
                     self.uses
                         .borrow_mut()
                         .extend(inner.uses.borrow().iter().cloned());
-                    let g = inner.guards.borrow().join(r" /\ ");
+                    let g = if all {
+                        all_guards(&inner.guards.borrow())
+                    } else {
+                        needed_guards(&inner.guards.borrow())
+                    };
                     if g.is_empty() {
                         p
                     } else if all {
@@ -2688,11 +3614,22 @@ impl<'a> Spec<'a> {
                         format!(r"({} /\ {})", g, p)
                     }
                 };
+                if let Some((pd, wt)) = witness {
+                    let wv = if pd {
+                        self.pos_num(wt, w)?
+                    } else {
+                        self.num(wt, w)?
+                    };
+                    if let Some(f) = witness_let(self.tds, ty, &bound, &wv, &body) {
+                        return Ok(f);
+                    }
+                }
                 Ok(format!(
-                    "({} ({}: {}). {})",
+                    "({} ({}: {}). {}{})",
                     if all { "forall" } else { "exists" },
                     bound,
                     fty,
+                    pattern,
                     body
                 ))
             }
@@ -2705,7 +3642,12 @@ impl<'a> Spec<'a> {
                     _ => None,
                 };
                 if let Some(o) = logical {
+                    let mark = self.guards.borrow().len();
                     let a = self.prop(l, w)?;
+                    // `a || b` and `a ==> b` do not imply what `a` does.
+                    if !matches!(op, BinOp::LogAnd) {
+                        self.unmark_guards_since(mark);
+                    }
                     let mark = self.guards.borrow().len();
                     let mut b = self.prop(r, w)?;
                     let condition = if matches!(op, BinOp::LogOr) {
@@ -2713,8 +3655,20 @@ impl<'a> Spec<'a> {
                     } else {
                         a.clone()
                     };
-                    if let Some(g) = self.guard_since(mark, &condition) {
-                        b = format!(r"({} /\ {})", g, b);
+                    // The right operand's guards are conjoined in front of
+                    // it, which is all its typing needs. The copy under the
+                    // left operand that goes up is implied by the result, so
+                    // only a `forall`'s premise uses it (`implied_guard`).
+                    let drained: Vec<String> = self.guards.borrow_mut().drain(mark..).collect();
+                    let needed = needed_guards(&drained);
+                    if !needed.is_empty() {
+                        b = format!(r"({} /\ {})", needed, b);
+                    }
+                    let all = all_guards(&drained);
+                    if !all.is_empty() {
+                        self.guards
+                            .borrow_mut()
+                            .push(format!("{}({} ==> ({}))", IMPLIED_GUARD, condition, all));
                     }
                     // `_live(x) && p` is just `p` once the frame carries the
                     // storage, and a loop invariant is mostly `_live` clauses.
@@ -2743,7 +3697,7 @@ impl<'a> Spec<'a> {
                 if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
                     Ok(format!("({} == true)", self.value(e, w)?))
                 } else {
-                    Err(format!("{} in a contract", expr_kind(e)))
+                    Err(format!("{} in a contract{}", expr_kind(e), shown_at(e)))
                 }
             }
         }
@@ -2754,12 +3708,32 @@ impl<'a> Spec<'a> {
         {
             {
                 let ty = self.ty_of(l)?;
+                if self.has_ptr_diff(l) || self.has_ptr_diff(r) {
+                    let o = match op {
+                        BinOp::Eq => "==",
+                        BinOp::Lt => "<",
+                        BinOp::LEq => "<=",
+                        _ => return Err("an unsupported operator in a contract".to_string()),
+                    };
+                    return Ok(format!(
+                        "({} {} {})",
+                        self.pos_num(l, w)?,
+                        o,
+                        self.pos_num(r, w)?
+                    ));
+                }
                 if matches!(op, BinOp::Eq) {
                     // `_Bool` equality is equivalence of the two conditions,
                     // not equality of two values: one side is often a
                     // comparison, which has no value in F*.
+                    // Neither side of `<==>` implies the guards its own `&&`,
+                    // `||` or `==>` marked as implied, so they are needed.
                     if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
-                        return Ok(format!("({} <==> {})", self.prop(l, w)?, self.prop(r, w)?));
+                        let mark = self.guards.borrow().len();
+                        let a = self.prop(l, w)?;
+                        let b = self.prop(r, w)?;
+                        self.unmark_guards_since(mark);
+                        return Ok(format!("({} <==> {})", a, b));
                     }
                     // `num` rather than `value`: machine-integer `v` is
                     // injective, so this is the same proposition, and it is
@@ -2771,6 +3745,11 @@ impl<'a> Spec<'a> {
                     BinOp::LEq => "<=",
                     _ => return Err("an unsupported operator in a contract".to_string()),
                 };
+                // Pointers into one array are ordered by where in it they are.
+                if pointee(self.tds, peel(self.tds, &ty)).is_some() {
+                    let (pl, pr) = self.ptr_positions(l, r, w)?;
+                    return Ok(format!("({} {} {})", pl, o, pr));
+                }
                 // C compares machine integers directly; F* orders only
                 // mathematical ones, so an uncast comparison needs the `.v`
                 // that an explicit `(_specint)` would have supplied.
@@ -2797,9 +3776,30 @@ impl<'a> Spec<'a> {
                     .map(|o| format!("(Seq.length {})", o)),
             );
         }
+        if let Some(r) = self.cursor_array(inner, w) {
+            return Some(r.and_then(|(arr, wa)| {
+                let len = ExprT::VAttr(VAttr::Length, arr).with_loc(e.loc.clone());
+                self.length_of(&len, wa).unwrap()
+            }));
+        }
+        let (inner, w) = match &strip_vattr(inner).val {
+            ExprT::Old(i) => (i, When::Old),
+            _ => (inner, w),
+        };
         let ExprT::Var(v) = &inner.val else {
             return Some(Err("`_length` of a computed pointer".to_string()));
         };
+        // A walked pointer is an array of what is left from where it points.
+        if w != When::Old
+            && self.walks.contains_key(&*v.val)
+            && let Some(r) = self.ptr_pos(inner, w)
+        {
+            return Some(r.and_then(|(owner, pos)| match self.pointees.get(&owner) {
+                Some((Some(t), _)) if pos == "0" => Ok(format!("(Seq.length {})", t)),
+                Some((Some(t), _)) => Ok(format!("(Seq.length {} - {})", t, pos)),
+                _ => Err(format!("`{}._length` is not available here", v.val)),
+            }));
+        }
         // A `_pure` array global is published as a sequence constant rather
         // than as an object, so there is no ownership to read the length off
         // and no need for one: the sequence itself has it, and its refined
@@ -2815,7 +3815,12 @@ impl<'a> Spec<'a> {
                 None => Err(format!("`{}._length` in a contract", v.val)),
             },
             Some((pre, post)) => {
+                // Inside a loop invariant the binders are this iteration's;
+                // `_old` is the function's entry, which `olds` names.
                 let chosen = match w {
+                    When::Old if self.olds.contains_key(&*v.val) => {
+                        &Some(self.olds[&*v.val].clone())
+                    }
                     When::Post => post,
                     When::Pre | When::Old => pre,
                 };
@@ -2840,6 +3845,28 @@ impl<'a> Spec<'a> {
             {
                 let owner = self.own_field(parent, &field.val, w)?;
                 return Ok(format!("(({}).own_{})", owner, f));
+            }
+            // The `_owning` arm of an overlay union: the union's ownership is
+            // that arm's struct's.
+            if let ExprT::Member(parent, arm) = &strip_vattr(base).val
+                && let Ok(ty) = self.ty_of(parent)
+                && let TypeT::TypeRef(TypeRefKind::Union(n)) = &peel(self.tds, &ty).val
+                && self
+                    .tds
+                    .unions
+                    .get(&*n.val)
+                    .and_then(|u| u.own.as_ref())
+                    .is_some_and(|o| o.arm == *arm.val)
+                && let Some((pre, post)) = self.owns.get(&self.value(parent, w)?)
+            {
+                let chosen = match w {
+                    When::Post => post,
+                    When::Pre | When::Old => pre,
+                };
+                return match chosen {
+                    Some(o) => Ok(format!("(({}).own_{})", o, f)),
+                    None => Err(format!("`.{}` has no value here", f)),
+                };
             }
             return Err(format!(
                 "`.{}`, whose ownership the contract does not state",
@@ -2928,7 +3955,273 @@ impl<'a> Spec<'a> {
     /// `*p` and `p[i]`. For a scalar parameter the pointee *is* the ghost
     /// value; for an array parameter it is an index into the ghost sequence,
     /// which is why the two cannot share a translation.
+    /// Where a pointer into an array parameter points, as an element index
+    /// from the array's base, and which array that is. `None` is a pointer
+    /// this does not know as one; an array parameter itself is at 0, and a
+    /// pointer a loop walks is wherever its invariant binder says.
+    fn ptr_pos(&self, e: &Expr, w: When) -> Option<Result<(String, String), String>> {
+        if let Some(c) = self.cursor_name(e) {
+            let arr = format!("{}__arr", c);
+            let pos = match (w, &self.pointees[&c]) {
+                (When::Post, (Some(pre), Some(post))) => {
+                    let esize = self.owner_elem_size(&arr)?;
+                    walk_pos(&esize.to_string(), pre, post)
+                }
+                _ => "0".to_string(),
+            };
+            return Some(Ok((arr, pos)));
+        }
+        match &strip_vattr(e).val {
+            ExprT::Old(inner) => self.ptr_pos(inner, When::Old),
+            ExprT::Var(v) => {
+                if w != When::Old
+                    && let Some((owner, esize, addr)) = self.walks.get(&*v.val)
+                    && let Some(cur) = self.locals.get(&*v.val)
+                {
+                    return Some(Ok((owner.clone(), walk_pos(esize, addr, cur))));
+                }
+                if self.walks.values().any(|(o, _, _)| *o == *v.val) {
+                    return Some(Ok((v.val.to_string(), "0".to_string())));
+                }
+                None
+            }
+            ExprT::BinOp(op @ (BinOp::Add | BinOp::Sub), l, r) => {
+                let lt = self.ty_of(l).ok()?;
+                pointee(self.tds, peel(self.tds, &lt))?;
+                let rt = self.ty_of(r).ok()?;
+                if pointee(self.tds, peel(self.tds, &rt)).is_some() {
+                    return None;
+                }
+                let (owner, pos) = match self.ptr_pos(l, w)? {
+                    Ok(x) => x,
+                    Err(e) => return Some(Err(e)),
+                };
+                // A position counts the array's elements; a step of a pointer
+                // to something wider (a word through a byte array) is that
+                // many of them.
+                let lsz = palow_sizeof(self.tds, pointee(self.tds, peel(self.tds, &lt))?)?;
+                let osz = self.owner_elem_size(&owner)?;
+                if osz == 0 || lsz % osz != 0 {
+                    return None;
+                }
+                Some(self.num(r, w).map(|n| {
+                    let n = match lsz / osz {
+                        1 => n,
+                        k => format!("({} * {})", k, n),
+                    };
+                    (owner, pos_op(&pos, *op, &n))
+                }))
+            }
+            // A cast moves no pointer: where it points is still a position in
+            // the same array, counted in that array's elements.
+            ExprT::Cast(inner, to) => {
+                let it = self.ty_of(inner).ok()?;
+                let from = pointee(self.tds, peel(self.tds, &it))?;
+                let to = pointee(self.tds, peel(self.tds, to))?;
+                palow_sizeof(self.tds, from)?;
+                palow_sizeof(self.tds, to)?;
+                self.ptr_pos(inner, w)
+            }
+            _ => None,
+        }
+    }
+
+    /// The size of an element of the array parameter `owner`.
+    fn owner_elem_size(&self, owner: &str) -> Option<u64> {
+        if let Some(c) = owner.strip_suffix("__arr")
+            && let Some(t) = self.env.local_type(c)
+            && let Some(pt) = cursor_pointee(self.tds, &t)
+        {
+            return palow_sizeof(self.tds, pointee(self.tds, peel(self.tds, pt))?);
+        }
+        let t = self.env.local_type(owner)?;
+        palow_sizeof(self.tds, pointee(self.tds, peel(self.tds, &t))?)
+    }
+
+    /// The `_cursor` parameter `p` of `*p`, when the contract owns the array
+    /// it points at.
+    fn cursor_name(&self, e: &Expr) -> Option<String> {
+        let ExprT::Deref(x) = &strip_vattr(e).val else {
+            return None;
+        };
+        let ExprT::Var(v) = &strip_vattr(x).val else {
+            return None;
+        };
+        let t = self.env.local_type(&v.val)?;
+        cursor_pointee(self.tds, &t)?;
+        let arr = format!("{}__arr", v.val);
+        self.pointees
+            .contains_key(&arr)
+            .then_some(v.val.to_string())
+    }
+
+    /// The array a `_cursor` parameter's `*p` points at, as the name the
+    /// contract owns it under and the state to read it in. `(*p)[k]` is the
+    /// incoming array, so it is only meaningful where `*p` is the incoming
+    /// pointer: before the call, or under `_old`. After it, `*p` may have
+    /// moved or be null, and `_old(*p)[k]` names the array's final contents.
+    fn cursor_array(&self, base: &Expr, w: When) -> Option<Result<(Rc<Expr>, When), String>> {
+        let (inner, under_old) = match &strip_vattr(base).val {
+            ExprT::Old(i) => (&**i, true),
+            _ => (base, false),
+        };
+        let c = self.cursor_name(inner)?;
+        let wa = match (under_old, w) {
+            (true, When::Post) => When::Post,
+            (true, _) => When::Old,
+            (false, When::Post) => {
+                return Some(Err(format!(
+                    "`(*{c})[k]` after the call, where `*{c}` may have moved: \
+                     `_old(*{c})[k]` is the array's final contents"
+                )));
+            }
+            (false, w) => w,
+        };
+        let id: Rc<IdentT> = Rc::from(format!("{}__arr", c).as_str());
+        let v = ExprT::Var(id.with_loc(base.loc.clone())).with_loc(base.loc.clone());
+        Some(Ok((v, wa)))
+    }
+
+    /// `p - q` between two pointers into the same array parameter: the
+    /// number of elements between them, which is what C means by it.
+    fn ptr_diff(&self, e: &Expr, w: When) -> Option<Result<String, String>> {
+        let ExprT::BinOp(BinOp::Sub, l, r) = &keeps_diff(self.tds, e).val else {
+            return None;
+        };
+        let lt = self.ty_of(l).ok()?;
+        let rt = self.ty_of(r).ok()?;
+        let lp = pointee(self.tds, peel(self.tds, &lt))?;
+        pointee(self.tds, peel(self.tds, &rt))?;
+        Some(self.ptr_positions(l, r, w).and_then(|(pl, pr)| {
+            // Positions count the array's elements, C's difference those of
+            // the pointers' own type: a word pointer walked over a byte
+            // array is not one element further for each byte.
+            let (ol, _) = self.ptr_pos(l, w).or_else(|| self.ptr_pos(r, w)).unwrap()?;
+            if palow_sizeof(self.tds, lp) != self.owner_elem_size(&ol) {
+                return Err(diff_at_other_size());
+            }
+            Ok(pos_op(&pl, BinOp::Sub, &pr))
+        }))
+    }
+
+    /// The positions of two pointers into one array parameter.
+    fn ptr_positions(&self, l: &Expr, r: &Expr, w: When) -> Result<(String, String), String> {
+        let err = || "a contract that compares pointers not known to be into one array".to_string();
+        // A returned pointer has no position of its own: the other side
+        // says which array it is a position in, as `return - _old(*p)`.
+        if let Some(rp) = self.ret_pos(l, r, w) {
+            return rp;
+        }
+        if let Some(rp) = self.ret_pos(r, l, w) {
+            return rp.map(|(pr, pl)| (pl, pr));
+        }
+        let (ol, pl) = self.ptr_pos(l, w).ok_or_else(err)??;
+        let (or, pr) = self.ptr_pos(r, w).ok_or_else(err)??;
+        if ol != or {
+            return Err(err());
+        }
+        Ok((pl, pr))
+    }
+
+    /// The positions of the returned pointer `ret` and of `other` in the
+    /// array `other` is a position in, after the call. Only a difference of
+    /// the two names it; that `return` is in that array at all is for the
+    /// contract to say (`return == _old(*p) + l`), so this is just the
+    /// distance of the addresses, counted in the array's elements.
+    fn ret_pos(
+        &self,
+        ret: &Expr,
+        other: &Expr,
+        w: When,
+    ) -> Option<Result<(String, String), String>> {
+        if w != When::Post || !matches!(&strip_vattr(ret).val, ExprT::Var(v) if &*v.val == "return")
+        {
+            return None;
+        }
+        let rt = self.ty_of(ret).ok()?;
+        let rp = pointee(self.tds, peel(self.tds, &rt))?;
+        let (owner, pos) = match self.ptr_pos(other, w)? {
+            Ok(x) => x,
+            Err(e) => return Some(Err(e)),
+        };
+        let esize = self.owner_elem_size(&owner)?;
+        if palow_sizeof(self.tds, rp) != Some(esize) {
+            return Some(Err(diff_at_other_size()));
+        }
+        let base = match owner.strip_suffix("__arr") {
+            Some(c) if self.cursor_name_of(c) => match self.pointees.get(c) {
+                Some((Some(pre), _)) => pre.clone(),
+                _ => return None,
+            },
+            _ => self
+                .walks
+                .values()
+                .find(|(o, _, _)| *o == owner)
+                .map(|(_, _, a)| a.clone())?,
+        };
+        Some(Ok((walk_pos(&esize.to_string(), &base, &self.ret), pos)))
+    }
+
+    /// Whether `c` is a `_cursor` parameter whose array the contract owns.
+    fn cursor_name_of(&self, c: &str) -> bool {
+        self.env
+            .local_type(c)
+            .is_some_and(|t| cursor_pointee(self.tds, &t).is_some())
+            && self.pointees.contains_key(&format!("{}__arr", c))
+    }
+
+    /// The element type of array `owner` and the pointee type of `p`, when
+    /// `p` views the array at the other signedness of the same width.
+    fn sign_view_of(&self, p: &Expr, owner: &str) -> Option<(Type, Type)> {
+        let ot = self.env.local_type(owner)?;
+        let oel = pointee(self.tds, peel(self.tds, &ot))?.clone();
+        let pt = self.ty_of(p).ok()?;
+        let pel = pointee(self.tds, peel(self.tds, &pt))?.clone();
+        match (&self.tds.resolve(&oel).val, &self.tds.resolve(&pel).val) {
+            (
+                TypeT::Int {
+                    width: a,
+                    signed: x,
+                },
+                TypeT::Int {
+                    width: b,
+                    signed: y,
+                },
+            ) if a == b && x != y => {
+                Some((peel(self.tds, &oel).clone(), peel(self.tds, &pel).clone()))
+            }
+            _ => None,
+        }
+    }
+
     fn pointee_at(&self, base: &Expr, idx: Option<&Expr>, w: When) -> Result<String, String> {
+        self.pointee_at_in(base, idx, w, w)
+    }
+
+    fn has_ptr_diff(&self, e: &Expr) -> bool {
+        has_ptr_diff(self.tds, e, &|x| {
+            self.ty_of(x)
+                .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
+        })
+    }
+
+    /// An operand next to a distance between pointers, as a number.
+    fn pos_num(&self, e: &Expr, w: When) -> Result<String, String> {
+        match ptrdiff_conv(self.tds, e, &|x| self.ty_of(x).ok()) {
+            Some(inner) => self.num(inner, w),
+            None => self.num(e, w),
+        }
+    }
+
+    /// `pointee_at` with the index read at `wi`: `_old(p)[k]` is the entry
+    /// array at the index `k` has here.
+    fn pointee_at_in(
+        &self,
+        base: &Expr,
+        idx: Option<&Expr>,
+        w: When,
+        wi: When,
+    ) -> Result<String, String> {
         // `*(s->f)` where the contract owns `s` deeply. The deep half already
         // names the value behind every pointer field, so the dereference is a
         // projection out of it rather than something the contract has to be
@@ -2948,11 +4241,46 @@ impl<'a> Spec<'a> {
             && !self.pointees.contains_key(&*v.val)
             && let Some(t) = self.global_array_const(v)
         {
-            let i = self.num(i, w)?;
+            let i = self.index_num(i, wi)?;
             self.guards
                 .borrow_mut()
                 .push(format!("{} < Seq.length {}", i, t));
             return Ok(format!("(Seq.index {} {})", t, i));
+        }
+        if w != When::Old
+            && self.walks.contains_key(&*v.val)
+            && let Some(Ok((owner, pos))) = self.ptr_pos(base, w)
+        {
+            let Some((Some(term), _)) = self.pointees.get(&owner) else {
+                return Err(format!("`*{}` in a contract", v.val));
+            };
+            // `d[k - (d - _old(d))]` (what `_base(d)[k]` is) is element `k`
+            // from the base: index `k` itself, the same term as a base
+            // local's `a[k]`, not `walk_idx .. + (k - walk_idx ..)`.
+            let from_base = idx.and_then(|i| self.base_relative_index(i, &v.val));
+            let at_base = pos == "0" || from_base.is_some();
+            let idx = from_base.or(idx);
+            let i = match idx {
+                None => pos,
+                Some(i) if from_base.is_some() => self.index_num(i, wi)?,
+                Some(i) => pos_op(&pos, BinOp::Add, &self.index_num(i, wi)?),
+            };
+            // At the base the index is the subscript itself, and the guard
+            // is the one a contract's `d[k]` gets.
+            let signed_idx = idx.is_some_and(|i| self.index_may_be_negative(i));
+            self.guards.borrow_mut().push(if at_base && !signed_idx {
+                format!("{} < Seq.length {}", i, term)
+            } else {
+                format!("0 <= {} /\\ {} < Seq.length {}", i, i, term)
+            });
+            let cell = format!("(Seq.index {} {})", term, i);
+            // A pointer viewing the array at the other signedness of its
+            // element type (`const unsigned char *l = (const void *)l0;`)
+            // reads the same byte at its own type, as the body's read does.
+            if let Some((oel, pel)) = self.sign_view_of(base, &owner) {
+                return convert(&oel, &pel, &cell, self.tds.ptr_bytes).map(|c| format!("({})", c));
+            }
+            return Ok(cell);
         }
         let Some((pre, post)) = self.pointees.get(&*v.val) else {
             return Err(format!("`*{}` in a contract", v.val));
@@ -2976,11 +4304,15 @@ impl<'a> Spec<'a> {
         if self.arrays.contains(&*v.val) {
             let i = match idx {
                 None => "0".to_string(),
-                Some(i) => self.num(i, w)?,
+                Some(i) => self.index_num(i, wi)?,
             };
             self.guards
                 .borrow_mut()
-                .push(format!("{} < Seq.length {}", i, term));
+                .push(if idx.is_some_and(|i| self.index_may_be_negative(i)) {
+                    format!("0 <= {} /\\ {} < Seq.length {}", i, i, term)
+                } else {
+                    format!("{} < Seq.length {}", i, term)
+                });
             let cell = format!("(Seq.index {} {})", term, i);
             if self.maybes.contains(&*v.val) {
                 self.defined.borrow_mut().push(format!("Some? {}", cell));
@@ -3031,13 +4363,19 @@ impl<'a> Spec<'a> {
             return None;
         }
         let (signed, width) = self.bits_ty(e)?;
+        let ptr_width = 8 * self.tds.ptr_bytes as u32;
         // C's integer promotion: nothing narrower than `int` is operated on.
-        let (signed, width) = if width < 32 {
-            (true, 32)
+        let ty = if width < 32 {
+            TypeT::Int {
+                signed: true,
+                width: 32,
+            }
+        } else if width == ptr_width && !signed && self.bits_size_t(e) {
+            TypeT::SizeT
         } else {
-            (signed, width)
-        };
-        let ty = TypeT::Int { signed, width }.with_loc(e.loc.clone());
+            TypeT::Int { signed, width }
+        }
+        .with_loc(e.loc.clone());
         self.lower_bits(e, &ty)
     }
 
@@ -3049,6 +4387,7 @@ impl<'a> Spec<'a> {
                 let t = self.ty_of(inner).ok()?;
                 match peel(self.tds, &t).val {
                     TypeT::Int { signed, width } => Some((signed, width)),
+                    TypeT::SizeT => Some((false, 8 * self.tds.ptr_bytes as u32)),
                     _ => None,
                 }
             }
@@ -3067,11 +4406,32 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// Whether a `size_t` operand is what gives a lifted bitwise expression
+    /// its width, so it is computed at `size_t` rather than at the unsigned
+    /// integer type of the same width.
+    fn bits_size_t(&self, e: &Expr) -> bool {
+        match &strip_vattr(e).val {
+            ExprT::Cast(inner, to)
+                if matches!(self.tds.resolve(to).val, TypeT::SpecInt | TypeT::SpecNat) =>
+            {
+                self.ty_of(inner)
+                    .is_ok_and(|t| matches!(peel(self.tds, &t).val, TypeT::SizeT))
+            }
+            ExprT::UnOp(UnOp::BitNot, x) => self.bits_size_t(x),
+            ExprT::BinOp(BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, l, r) => {
+                self.bits_size_t(l) || self.bits_size_t(r)
+            }
+            _ => false,
+        }
+    }
+
     fn lower_bits(&self, e: &Expr, ty: &Rc<Type>) -> Option<Rc<Expr>> {
         let loc = e.loc.clone();
         let lit = |n: BigInt| -> Option<Rc<Expr>> {
-            let TypeT::Int { signed, width } = ty.val else {
-                return None;
+            let (signed, width) = match ty.val {
+                TypeT::Int { signed, width } => (signed, width),
+                TypeT::SizeT => (false, 8 * self.tds.ptr_bytes as u32),
+                _ => return None,
             };
             let m = BigInt::from(1) << width;
             let n = if signed {
@@ -3106,19 +4466,41 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// The count of a shift, narrowed to `UInt32.t` without truncating (see
+    /// `wide_shift_count`), and the obligation that keeps it in range.
+    fn shift_count(&self, r: &Expr, w: When) -> Result<(String, Option<String>), String> {
+        match wide_shift_count(self.tds, |x| self.ty_of(x).ok(), r) {
+            Some((inner, m)) => {
+                let v = self.value(inner, w)?;
+                Ok((
+                    format!("(FStar.UInt32.uint_to_t ({}.v {}))", m, v),
+                    Some(format!("0 <= {m}.v {v} /\\ {m}.v {v}", m = m, v = v)),
+                ))
+            }
+            None => Ok((self.value(r, w)?, None)),
+        }
+    }
+
     /// What has to hold for a partial machine operator to be defined: a shift
     /// count below the width, and no overflow for signed arithmetic. These are
     /// C's own rules, so stating them costs the contract nothing it did not
     /// already owe.
     fn definedness(&self, op: BinOp, ty: &Type, l: &Expr, r: &Expr, w: When) -> Option<String> {
-        // `size_t` is unsigned and its F* operations are the checked ones, so
-        // what it owes is the same non-overflow C already demands of it.
+        // `size_t` is unsigned, so its arithmetic wraps and owes nothing; a
+        // shift owes a count below its width, and a division a divisor.
         if matches!(peel(self.tds, ty).val, TypeT::SizeT) {
-            let (a, b) = (self.value(l, w).ok()?, self.value(r, w).ok()?);
             return match op {
-                BinOp::Add => Some(format!("SizeT.fits (SizeT.v {} + SizeT.v {})", a, b)),
-                BinOp::Sub => Some(format!("SizeT.v {} >= SizeT.v {}", a, b)),
-                BinOp::Mul => Some(format!("SizeT.fits (SizeT.v {} * SizeT.v {})", a, b)),
+                BinOp::Shl | BinOp::Shr => {
+                    let bound = match self.shift_count(r, w).ok()? {
+                        (_, Some(g)) => g,
+                        (c, None) => format!("UInt32.v {}", c),
+                    };
+                    Some(format!(
+                        "{} < 8 * Pulse.Lib.C.Palow.Target.ptr_bytes",
+                        bound
+                    ))
+                }
+                BinOp::Div | BinOp::Mod => Some(format!("SizeT.v {} <> 0", self.value(r, w).ok()?)),
                 _ => None,
             };
         }
@@ -3138,13 +4520,17 @@ impl<'a> Spec<'a> {
                 else {
                     return None;
                 };
-                let mut g = format!(
-                    "{}Int{}.v {} < {}",
-                    if rs { "" } else { "U" },
-                    rw,
-                    self.value(r, w).ok()?,
-                    width
-                );
+                let (count, wide) = self.shift_count(r, w).ok()?;
+                let mut g = match wide {
+                    Some(b) => format!("{} < {}", b, width),
+                    None => format!(
+                        "{}Int{}.v {} < {}",
+                        if rs { "" } else { "U" },
+                        rw,
+                        count,
+                        width
+                    ),
+                };
                 // A shift of a negative signed value is undefined in C, and
                 // F* refuses it too; so is a left shift whose result does not
                 // fit.
@@ -3159,7 +4545,7 @@ impl<'a> Spec<'a> {
                             a,
                             if rs { "" } else { "U" },
                             rw,
-                            self.value(r, w).ok()?,
+                            count,
                             width
                         );
                     }
@@ -3197,6 +4583,208 @@ impl<'a> Spec<'a> {
         }
     }
 
+    /// The mathematical integer `n` converted to the C integer type `ty`, as
+    /// a number: C reduces it modulo the type's range.
+    /// A bitwise operator or shift on an unsigned operand, as the number it
+    /// computes: `FStar.UInt`'s operation at the type's width applied to the
+    /// operands' values. That is the vocabulary F*'s machine-integer
+    /// specifications are stated in (`UInt64.v (logand a b) == UInt.logand
+    /// (v a) (v b)`), so a body's fact about the same bits relates to it by a
+    /// lemma about `FStar.UInt`, and it is the same for `size_t`, which has no
+    /// machine operator of its own here. A shift by the width or more is
+    /// undefined in C, so the amount being in range is a definedness guard,
+    /// like a subscript's bounds. `None` for anything else.
+    fn unsigned_bits(&self, e: &Expr, ty: &Type, w: When) -> Option<Result<String, String>> {
+        let width = match self.tds.resolve(ty).val {
+            TypeT::Int {
+                signed: false,
+                width,
+            } => width,
+            TypeT::SizeT => 8 * self.tds.ptr_bytes as u32,
+            _ => return None,
+        };
+        let go = || -> Result<String, String> {
+            match &strip_vattr(e).val {
+                // The complement is `2^w - 1 - x`, the term the body's `~`
+                // is too (`bitnot`), which arithmetic can use directly.
+                ExprT::UnOp(UnOp::BitNot, x) => Ok(format!(
+                    "({} - {})",
+                    (BigInt::from(1) << width) - 1,
+                    self.num(x, w)?
+                )),
+                ExprT::BinOp(op @ (BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor), l, r) => {
+                    let f = match op {
+                        BinOp::BitAnd => "logand",
+                        BinOp::BitOr => "logor",
+                        _ => "logxor",
+                    };
+                    Ok(format!(
+                        "(FStar.UInt.{} #{} {} {})",
+                        f,
+                        width,
+                        self.num(l, w)?,
+                        self.num(r, w)?
+                    ))
+                }
+                ExprT::BinOp(op @ (BinOp::Shl | BinOp::Shr), l, r) => {
+                    let lty = self.ty_of(l)?;
+                    if matches!(self.tds.resolve(&lty).val, TypeT::SpecInt | TypeT::SpecNat) {
+                        return Err(format!(
+                            "`{}` of a mathematical integer in a contract: shift a value \
+                             of an unsigned C type",
+                            op.to_str()
+                        ));
+                    }
+                    let a = self.num(l, w)?;
+                    // The amount is converted to whatever the machine shift
+                    // takes, which changes nothing about a number the guard
+                    // already holds below the width: say the number.
+                    let r = match &strip_vattr(r).val {
+                        ExprT::Cast(inner, to)
+                            if matches!(
+                                self.tds.resolve(to).val,
+                                TypeT::Int { .. } | TypeT::SizeT
+                            ) && self.ty_of(inner).is_ok_and(|t| {
+                                matches!(
+                                    self.tds.resolve(&t).val,
+                                    TypeT::Int { .. }
+                                        | TypeT::SizeT
+                                        | TypeT::SpecInt
+                                        | TypeT::SpecNat
+                                )
+                            }) =>
+                        {
+                            inner
+                        }
+                        _ => r,
+                    };
+                    let s = self.num(r, w)?;
+                    self.guards
+                        .borrow_mut()
+                        .push(format!(r"(0 <= {s} /\ {s} < {width})"));
+                    Ok(format!(
+                        "(FStar.UInt.{} #{} {} {})",
+                        if matches!(op, BinOp::Shl) {
+                            "shift_left"
+                        } else {
+                            "shift_right"
+                        },
+                        width,
+                        a,
+                        s
+                    ))
+                }
+                _ => unreachable!(),
+            }
+        };
+        match &strip_vattr(e).val {
+            ExprT::UnOp(UnOp::BitNot, _)
+            | ExprT::BinOp(
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr,
+                ..,
+            ) => Some(go()),
+            _ => None,
+        }
+    }
+
+    /// The signedness and width of a machine integer type.
+    fn int_range(&self, ty: &Type) -> Option<(bool, u32)> {
+        match self.tds.resolve(ty).val {
+            TypeT::Int { signed, width } => Some((signed, width)),
+            TypeT::SizeT => Some((false, 8 * self.tds.ptr_bytes as u32)),
+            TypeT::PtrdiffT => Some((true, 8 * self.tds.ptr_bytes as u32)),
+            _ => None,
+        }
+    }
+
+    fn spec_wrap(&self, ty: &Type, n: String) -> String {
+        let (signed, width) = match peel(self.tds, ty).val {
+            TypeT::Int { signed, width } => (signed, width),
+            TypeT::PtrdiffT => (true, (8 * self.tds.ptr_bytes) as u32),
+            _ => (false, (8 * self.tds.ptr_bytes) as u32),
+        };
+        if let Ok(k) = n.parse::<BigInt>() {
+            return wrap_int(&k, signed, width).to_string();
+        }
+        format!(
+            "(spec_to_{} {} {})",
+            if signed { "signed" } else { "unsigned" },
+            BigInt::from(1u8) << width,
+            n
+        )
+    }
+
+    /// A subscript, as a number. The elaborator converts a mathematical index
+    /// to `size_t` to meet C's subscript; it is a position all the same, and
+    /// one outside the sequence fails `Seq.index`'s typing rather than
+    /// wrapping into it, so the conversion is not reduced (`spec_wrap`).
+    /// Whether a contract subscript is read as a number that may be negative
+    /// -- a `_specint` (or signed) position rather than a `size_t` -- so its
+    /// definedness guard must say `0 <=` as well as the upper bound.
+    /// `k` of a subscript `k - (d - _old(d))` of the walked `d`: the element
+    /// counted from `d`'s entry position. A `(_specint)` cast of an unsigned
+    /// `k`, as `_base(d)[k]` writes it, is dropped, so `k` stays the term a
+    /// quantifier over `k` triggers on.
+    fn base_relative_index<'e>(&self, idx: &'e Expr, d: &str) -> Option<&'e Expr> {
+        // The type checker's conversions: of the whole subscript to `size_t`
+        // and of the position to `_specint`.
+        let uncast = |e: &'e Expr| -> &'e Expr {
+            match &strip_vattr(e).val {
+                ExprT::Cast(inner, to)
+                    if matches!(peel(self.tds, to).val, TypeT::SizeT | TypeT::SpecInt) =>
+                {
+                    inner
+                }
+                _ => e,
+            }
+        };
+        let ExprT::BinOp(BinOp::Sub, k, pos) = &strip_vattr(uncast(idx)).val else {
+            return None;
+        };
+        let ExprT::BinOp(BinOp::Sub, cur, old) = &strip_vattr(uncast(pos)).val else {
+            return None;
+        };
+        let is_d = |e: &Expr| matches!(&strip_vattr(e).val, ExprT::Var(x) if &*x.val == d);
+        let ExprT::Old(o) = &strip_vattr(old).val else {
+            return None;
+        };
+        if !is_d(cur) || !is_d(o) {
+            return None;
+        }
+        if let ExprT::Cast(inner, to) = &strip_vattr(k).val
+            && matches!(peel(self.tds, to).val, TypeT::SpecInt)
+            && !self.index_may_be_negative(inner)
+        {
+            return Some(inner);
+        }
+        Some(k)
+    }
+
+    fn index_may_be_negative(&self, e: &Expr) -> bool {
+        let e = match &strip_vattr(e).val {
+            ExprT::Cast(inner, to) if matches!(peel(self.tds, to).val, TypeT::SizeT) => inner,
+            _ => e,
+        };
+        match self.ty_of(e) {
+            Ok(ty) => matches!(
+                self.tds.resolve(&ty).val,
+                TypeT::SpecInt | TypeT::PtrdiffT | TypeT::Int { signed: true, .. }
+            ),
+            Err(_) => false,
+        }
+    }
+
+    fn index_num(&self, e: &Expr, w: When) -> Result<String, String> {
+        if let ExprT::Cast(inner, to) = &strip_vattr(e).val
+            && matches!(peel(self.tds, to).val, TypeT::SizeT)
+            && let Ok(ity) = self.ty_of(inner)
+            && matches!(self.tds.resolve(&ity).val, TypeT::SpecInt | TypeT::SpecNat)
+        {
+            return self.num(inner, w);
+        }
+        self.num(e, w)
+    }
+
     fn num(&self, e: &Expr, w: When) -> Result<String, String> {
         if let ExprT::Old(inner) = &e.val {
             return self.num(inner, When::Old);
@@ -3204,7 +4792,24 @@ impl<'a> Spec<'a> {
         if let Some(l) = self.length_of(e, w) {
             return l;
         }
+        if let Some(d) = self.ptr_diff(e, w) {
+            return d;
+        }
         let ty = self.ty_of(e)?;
+        // A distance between pointers is an element count, a mathematical
+        // integer, and so is anything computed from one: the `size_t` the
+        // elaborator converted to `ptrdiff_t` to meet it is read as the
+        // number it is, not through a machine conversion.
+        if let ExprT::BinOp(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), l, r) = &strip_vattr(e).val
+            && self.has_ptr_diff(e)
+        {
+            return Ok(format!(
+                "({} {} {})",
+                self.pos_num(l, w)?,
+                op.to_str(),
+                self.pos_num(r, w)?
+            ));
+        }
         // Signed arithmetic is undefined on overflow, so where a contract
         // measures it the source can only mean the mathematical result, and
         // the two agree on every program C defines. Saying it that way rather
@@ -3222,16 +4827,65 @@ impl<'a> Spec<'a> {
                     self.num(r, w)?
                 ));
             }
+            // Unsigned arithmetic is the mathematical result reduced modulo
+            // the type's range, said as such. As `SizeT.v (m `add` k)` it
+            // would build a new machine integer out of a bound variable, and a
+            // quantifier triggered on `SizeT.v k` (`_forall(size_t k, ...
+            // d[m + k] ...)`) then instantiates itself on its own result
+            // without end; an integer term gives it nothing to match.
+            if matches!(
+                self.tds.resolve(&ty).val,
+                TypeT::Int { signed: false, .. } | TypeT::SizeT
+            ) {
+                let n = format!("({} {} {})", self.num(l, w)?, op.to_str(), self.num(r, w)?);
+                // Where the operator is partial its definedness guard says
+                // the result is in range, so it is the number itself.
+                if let Err(e) = binop(self.tds, *op, &ty, self.signed_ok) {
+                    let g = self.definedness(*op, &ty, l, r, w).ok_or(e)?;
+                    self.guards.borrow_mut().push(g);
+                    return Ok(n);
+                }
+                return Ok(self.spec_wrap(&ty, n));
+            }
+        }
+        if let ExprT::Cast(inner, to) = &strip_vattr(e).val
+            && let Ok(ity) = self.ty_of(inner)
+            && self.tds.resolve(&ity) == self.tds.resolve(to)
+            && matches!(
+                strip_vattr(inner).val,
+                ExprT::BinOp(BinOp::Shl | BinOp::Shr, ..)
+            )
+        {
+            return self.num(inner, w);
+        }
+        if let Some(b) = self.unsigned_bits(e, &ty, w) {
+            return b;
         }
         // A cast from a specification type is the author writing a
-        // mathematical integer where C's grammar wants a machine one, and the
-        // number they meant is the number it already is. Reading it that way
-        // rather than as `SizeT.uint_to_t n` also avoids a typing obligation
-        // the clause has no way to discharge: a guard conjoined at the top of
-        // the clause cannot mention a variable the clause binds itself, which
-        // is exactly where these casts appear.
+        // mathematical integer where C's grammar wants a machine one. It is
+        // still C's conversion, so a number outside the target's range is
+        // reduced into it (`spec_to_unsigned`); inside, which is what the
+        // author nearly always means, it is the number it already is.
+        // Reading it as a number rather than as `SizeT.uint_to_t n` avoids a
+        // typing obligation the clause has no way to discharge: a guard
+        // conjoined at the top of the clause cannot mention a variable the
+        // clause binds itself, which is exactly where these casts appear.
         if let Some(c) = self.cast_bits(e) {
             return self.num(&c, w);
+        }
+        // A conversion between machine integer types is the number when the
+        // target holds every value of the source, and C's reduction of it
+        // otherwise: `(size_t)n` of an `ssize_t` is `spec_to_unsigned`
+        // rather than a machine conversion whose typing needs the value to
+        // be a valid `size_t` already.
+        if let ExprT::Cast(inner, to) = &strip_vattr(e).val
+            && let Some((ts, tw)) = self.int_range(to)
+            && let Ok(ity) = self.ty_of(inner)
+            && let Some((ss, sw)) = self.int_range(&ity)
+        {
+            let n = self.num(inner, w)?;
+            let fits = if ss == ts { tw >= sw } else { !ss && tw > sw };
+            return Ok(if fits { n } else { self.spec_wrap(to, n) });
         }
         if let ExprT::Cast(inner, _) = &strip_vattr(e).val
             && matches!(
@@ -3241,7 +4895,7 @@ impl<'a> Spec<'a> {
             && let Ok(ity) = self.ty_of(inner)
             && matches!(self.tds.resolve(&ity).val, TypeT::SpecInt | TypeT::SpecNat)
         {
-            return self.num(inner, w);
+            return Ok(self.spec_wrap(&ty, self.num(inner, w)?));
         }
         // Negation is subtraction from zero, so it is undefined on overflow
         // for the same reason and reads mathematically for the same reason.
@@ -3340,7 +4994,7 @@ impl<'a> Spec<'a> {
         let ExprT::Index(base, idx) = &strip_vattr(e).val else {
             return Err(format!("a contract that indexes {}", expr_kind_of(&e.val)));
         };
-        let i = self.num(idx, w)?;
+        let i = self.index_num(idx, w)?;
         let bty = self.ty_of(base)?;
         if matches!(&strip_vattr(base).val, ExprT::Index(..)) {
             let Some((_, width)) = flat_array(self.tds, &bty) else {
@@ -3402,6 +5056,13 @@ impl<'a> Spec<'a> {
             format!("{}sz", k * n)
         } else if n == 1 {
             self.value(i, w)?
+        } else if sym == "+!" && matches!(peel(self.tds, &*self.ty_of(i)?).val, TypeT::SizeT) {
+            return Ok(Some(format!(
+                "(elem_ptr {} {} {})",
+                n,
+                self.value(p, w)?,
+                self.value(i, w)?
+            )));
         } else {
             return Err("pointer arithmetic by a computed index in a contract".to_string());
         };
@@ -3409,9 +5070,24 @@ impl<'a> Spec<'a> {
     }
 
     fn value(&self, e: &Expr, w: When) -> Result<String, String> {
+        // `_length` is a `_specint`, so it may be an operand of specification
+        // arithmetic (`s._length - k`) as well as of a comparison.
+        if let Some(l) = self.length_of(e, w) {
+            return l;
+        }
         match &e.val {
             ExprT::Old(inner) => self.value(inner, When::Old),
             ExprT::Cast(..) if let Some(c) = self.cast_bits(e) => self.value(&c, w),
+            // A conversion that can change a distance's value -- narrower, or
+            // unsigned -- would need the distance as a machine value, which a
+            // contract does not have.
+            ExprT::Cast(inner, to)
+                if !keeps_diff_ty(self.tds, to)
+                    && !matches!(self.tds.resolve(to).val, TypeT::SpecNat)
+                    && self.ptr_diff(inner, w).is_some() =>
+            {
+                Err("a conversion of a pointer distance that can change its value".to_string())
+            }
             ExprT::Cast(inner, to) => {
                 let to = self.tds.resolve(to);
                 match &to.val {
@@ -3421,6 +5097,12 @@ impl<'a> Spec<'a> {
                     TypeT::SpecInt | TypeT::SpecNat => {
                         if let Some(l) = self.length_of(inner, w) {
                             return l;
+                        }
+                        if let Some(d) = self.ptr_diff(inner, w) {
+                            return d;
+                        }
+                        if self.has_ptr_diff(inner) {
+                            return self.num(inner, w);
                         }
                         let ity = self.ty_of(inner)?;
                         match self.int_module(&ity) {
@@ -3479,6 +5161,28 @@ impl<'a> Spec<'a> {
                                     zero
                                 ));
                             }
+                        }
+                        // `(uintptr_t) p`: the address the body's
+                        // `ptr_to_uintptr` observes, as a ghost term.
+                        if matches!(peel(self.tds, &from).val, TypeT::Pointer(..))
+                            && matches!(peel(self.tds, to).val, TypeT::Int { .. } | TypeT::SizeT)
+                        {
+                            let q = self.value(inner, w)?;
+                            if matches!(
+                                peel(self.tds, to).val,
+                                TypeT::Int {
+                                    signed: false,
+                                    width: 64
+                                }
+                            ) {
+                                return Ok(format!("(uintptr_u64 {})", q));
+                            }
+                            let a = format!("(uintptr_of {})", q);
+                            let sz: Rc<Type> = TypeT::SizeT.with_loc(e.loc.clone());
+                            return convert(&sz, peel(self.tds, to), &a, self.tds.ptr_bytes)
+                                .map_err(|_| {
+                                    format!("a contract converting a pointer to {}", describe(to))
+                                });
                         }
                         if fstar_type(self.tds, &from) == fstar_type(self.tds, to) {
                             return self.value(inner, w);
@@ -3557,9 +5261,25 @@ impl<'a> Spec<'a> {
                     &format!("struct_{}_offsetof_{}", sname.val, field.val),
                 ))
             }
+            ExprT::Deref(inner) | ExprT::Index(inner, _)
+                if let Some(r) = self.cursor_array(inner, w) =>
+            {
+                let (arr, wa) = r?;
+                let idx = match &strip_vattr(e).val {
+                    ExprT::Index(_, i) => Some(&**i),
+                    _ => None,
+                };
+                self.pointee_at_in(&arr, idx, wa, w)
+            }
             ExprT::Deref(inner) => self.pointee_at(inner, None, w),
             ExprT::Index(base, idx) if matches!(strip_vattr(base).val, ExprT::Var(_)) => {
                 self.pointee_at(base, Some(idx), w)
+            }
+            ExprT::Index(base, idx)
+                if let ExprT::Old(b) = &strip_vattr(base).val
+                    && matches!(strip_vattr(b).val, ExprT::Var(_)) =>
+            {
+                self.pointee_at_in(b, Some(idx), When::Old, w)
             }
             // An `_array` field's elements are not in the struct's value at
             // all -- the value holds only the pointer -- so the sequence comes
@@ -3574,7 +5294,7 @@ impl<'a> Spec<'a> {
                     unreachable!()
                 };
                 let seq = self.own_field(b, &f.val, w)?;
-                let i = self.num(idx, w)?;
+                let i = self.index_num(idx, w)?;
                 self.guards
                     .borrow_mut()
                     .push(format!("{} < Seq.length {}", i, seq));
@@ -3604,6 +5324,46 @@ impl<'a> Spec<'a> {
                         describe(self.tds.resolve(&uty))
                     ));
                 };
+                if let Some(orig) = u.val.strip_suffix("__island") {
+                    return match island_member(self.tds, orig) {
+                        Some((m0, _)) if *m0 == *m.val => {
+                            // Inside an overlay the island is a byte range
+                            // of the root, and saying so directly is what
+                            // the root's whole-value load and store speak
+                            // of; the chain of views down to it is not
+                            // something the prover unfolds cheaply.
+                            let v = self.value(obj, w)?;
+                            if let Some((r, o)) = self.overlay_root(obj)?
+                                && let Some(n) = palow_sizeof(self.tds, &uty)
+                            {
+                                let rv = self.value(&r, w)?;
+                                if rv != v {
+                                    return Ok(format!(
+                                        "(union_{}_active (slice {} {} {}))",
+                                        u.val,
+                                        rv,
+                                        o,
+                                        o + n
+                                    ));
+                                }
+                            }
+                            Ok(format!("(union_{}_active {})", u.val, v))
+                        }
+                        _ => Err(format!(
+                            "`_active` on member `{}` of `{}` inside an overlay; only the \
+                             member a whole value is loaded through can be asked about",
+                            m.val, orig
+                        )),
+                    };
+                }
+                if is_overlay(self.tds, &u.val) {
+                    return Ok(format!(
+                        "(union_{}_active_{} {})",
+                        u.val,
+                        m.val,
+                        self.value(obj, w)?
+                    ));
+                }
                 Ok(format!(
                     "(Union_{}_{}? {})",
                     u.val,
@@ -3628,7 +5388,9 @@ impl<'a> Spec<'a> {
                 // one, and F* types each clause on its own -- so the clause
                 // carries the tag test itself, as an array index carries its
                 // bound.
-                if let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(self.tds, &bty).val {
+                if let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(self.tds, &bty).val
+                    && !is_overlay(self.tds, &u.val)
+                {
                     self.guards
                         .borrow_mut()
                         .push(format!("Union_{}_{}? ({})", u.val, f.val, x));
@@ -3757,12 +5519,12 @@ impl<'a> Spec<'a> {
                             binop(self.tds, *op, &ty, true)?
                         }
                     };
-                    return Ok(format!(
-                        "({} {} {})",
-                        self.value(l, w)?,
-                        o,
+                    let rv = if matches!(op, BinOp::Shl | BinOp::Shr) {
+                        self.shift_count(r, w)?.0
+                    } else {
                         self.value(r, w)?
-                    ));
+                    };
+                    return Ok(format!("({} {} {})", self.value(l, w)?, o, rv));
                 }
                 let o = match op {
                     BinOp::Add => "+",
@@ -3894,7 +5656,24 @@ impl<'a> Spec<'a> {
                     .ok_or_else(|| format!("`_Alignof` of {}", describe(self.tds.resolve(t))))?;
                 Ok(format!("{}sz", n))
             }
-            _ => Err(format!("{} in a contract", expr_kind(e))),
+            // A struct value is an F* record, so an initialiser is that record:
+            // the named fields given, the rest zeroed, exactly as in a body.
+            // This is what lets a `_pure` function build a struct.
+            ExprT::StructInit(n, inits) => {
+                let Some(si) = self.tds.structs.get(&*n.val) else {
+                    return Err(format!("an initialiser for struct {} in a contract", n.val));
+                };
+                let mut vals = Vec::new();
+                for f in si.fields.iter() {
+                    let v = match inits.iter().find(|(i, _)| *i.val == *f.name) {
+                        Some((_, e)) => self.value(e, w)?,
+                        None => zero_initializer(self.tds, &f.ty)?,
+                    };
+                    vals.push(format!("fld_{} = {}", f.name, v));
+                }
+                Ok(format!("({{ {} }})", record_fields(vals, false)))
+            }
+            _ => Err(format!("{} in a contract{}", expr_kind(e), shown_at(e))),
         }
     }
 }
@@ -3961,6 +5740,7 @@ fn emit_let_decl(tds: &Typedefs, env: &Env, ld: &LetDecl) -> Result<String, Stri
         valued: RefCell::new(Vec::new()),
         maybes: HashSet::new(),
         defined: RefCell::new(Vec::new()),
+        walks: HashMap::new(),
     };
     let clause = |es: &Exprs| -> Result<String, String> {
         let mut props: Vec<String> = Vec::new();
@@ -4060,6 +5840,7 @@ fn emit_pure_fn(
         valued: RefCell::new(Vec::new()),
         maybes: HashSet::new(),
         defined: RefCell::new(Vec::new()),
+        walks: HashMap::new(),
     };
     let clause = |sp: &Spec, es: &Exprs| -> Result<String, String> {
         let mut props: Vec<String> = Vec::new();
@@ -4260,77 +6041,26 @@ fn emit_fn(
     // parameter's own refinements is what makes it reach the contract, and
     // binding `this` to the struct value is what makes it mean the same thing
     // it means in the declaration.
-    let struct_refines = |ty: &Type| -> Vec<Rc<Expr>> {
-        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
-            return Vec::new();
-        };
-        tds.refined_structs
-            .get(&*n.val.to_string())
-            .and_then(|r| refinements(tds, r).ok())
-            .map(|(ps, _, _)| ps)
-            .unwrap_or_default()
-    };
-    // A `_refine` written on one *field* of a struct is an invariant of the
-    // struct type just as a struct-level one is, and it means the same thing
-    // wherever a value of that type is: `this` is the field. The generated
-    // ownership cannot carry it -- it is built from representations and has no
-    // hook for a clause -- so it is stated in the contract of every function
-    // that holds such a struct, at whichever ends the struct itself is stated.
-    fn field_refines(tds: &Typedefs, ty: &Type) -> Vec<FieldRefinement> {
-        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
-            return Vec::new();
-        };
-        let sname = n.val.to_string();
-        let Some(si) = tds.structs.get(&sname) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for f in &si.fields {
-            let Ok((mut ps, _, _)) = field_refinements(tds, &f.ty) else {
-                continue;
-            };
-            // An embedded struct carries its declaration's invariant just
-            // as a parameter of that type does. Do not follow pointers:
-            // storing an address is not ownership of the pointed-to object.
-            let nested = !is_plain(tds, &f.ty)
-                && !is_plain_chain(&f.ty)
-                && matches!(peel(tds, &f.ty).val, TypeT::TypeRef(TypeRefKind::Struct(_)));
-            if nested {
-                if let TypeT::TypeRef(TypeRefKind::Struct(child)) = &peel(tds, &f.ty).val
-                    && let Some(r) = tds.refined_structs.get(&*child.val)
-                    && let Ok((clauses, _, _)) = refinements(tds, r)
-                {
-                    for cl in clauses {
-                        if !ps.iter().any(|p| Rc::ptr_eq(p, &cl)) {
-                            ps.push(cl);
-                        }
-                    }
-                }
-            }
-            for cl in ps {
-                out.push(FieldRefinement {
-                    parents: Vec::new(),
-                    container: sname.clone(),
-                    field: f.name.clone(),
-                    ty: f.ty.clone(),
-                    clause: cl,
-                });
-            }
-            if nested {
-                for mut child in field_refines(tds, &f.ty) {
-                    child.parents.insert(0, f.name.clone());
-                    out.push(child);
-                }
-            }
-        }
-        out
-    }
+    let struct_refines = |ty: &Type| struct_refines(tds, ty);
     // The `_own` predicate a value of this type carries, when its type is a
     // struct that has one.
     // `peel` and not `resolve`: the annotation that makes a struct interesting
     // is as often on the typedef that names it, and a `_refine` wrapper must
     // not hide the struct underneath.
     let own_for = |ty: &Type| -> Option<(String, String)> {
+        // An overlay union carries the deep ownership of its `_owning` member.
+        if let TypeT::TypeRef(TypeRefKind::Union(n)) = &peel(tds, ty).val {
+            return tds
+                .unions
+                .get(&*n.val.to_string())
+                .filter(|ui| ui.own.is_some())
+                .map(|_| {
+                    (
+                        format!("union_{}", n.val),
+                        format!("union_{}_own_spec", n.val),
+                    )
+                });
+        }
         let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
             return None;
         };
@@ -4377,14 +6107,52 @@ fn emit_fn(
     // separate from the map that permits ordinary specification dereferences.
     let mut guarded_pointees: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
 
-    for (i, arg) in decl.args.iter().enumerate() {
+    // A `_cursor` parameter `p` comes with the array `*p` points at, owned
+    // for the call as if it were a `_nullable _array` parameter of its own
+    // whose address is the incoming `*p`. It is not passed: its address is
+    // the ghost value of `*p`, which is what the pointer binder is named
+    // after (`var_p__arr`), and its contents get binders like any array's.
+    let mut all_args: Vec<(FnArg, bool)> = decl.args.iter().map(|a| (a.clone(), false)).collect();
+    for a in &decl.args {
+        if let (Some(n), Some(pt)) = (&a.name, cursor_pointee(tds, &a.ty)) {
+            if a.mode != ParamMode::Regular {
+                return Err(format!(
+                    "`_cursor` parameter var_{} is not a plain `T **`",
+                    n.val
+                ));
+            }
+            let id: Rc<IdentT> = Rc::from(format!("{}__arr", n.val).as_str());
+            all_args.push((
+                FnArg {
+                    name: Some(id.with_loc(n.loc.clone())),
+                    ty: pt.clone(),
+                    mode: ParamMode::Regular,
+                    cursor_from: None,
+                },
+                true,
+            ));
+        }
+    }
+    let seeds = cursor_seeds(tds, decl)?;
+    for (i, (arg, cursor_arr)) in all_args.iter().enumerate() {
         let pname = match &arg.name {
             Some(n) => format!("var_{}", n.val),
             None => format!("arg_{}", i),
         };
         let fty = fstar_type(tds, &arg.ty)
             .ok_or_else(|| format!("parameter {} is {}", pname, describe(tds.resolve(&arg.ty))))?;
-        params.push(format!("({}: {})", pname, fty));
+        if !cursor_arr {
+            params.push(format!("({}: {})", pname, fty));
+        }
+        // A `_cursor_from` seed is where the cursor starts, and what it
+        // points at is the cursor's array: it owns nothing of its own.
+        if arg
+            .name
+            .as_ref()
+            .is_some_and(|n| seeds.contains_key(&*n.val))
+        {
+            continue;
+        }
 
         // A user-supplied ownership predicate is a contract even when the
         // parameter is `_plain` and so has no points-to of its own -- `_plain`
@@ -4480,7 +6248,11 @@ fn emit_fn(
         })?;
         let vty = fstar_type(tds, pt).unwrap();
         let base = pname.trim_start_matches("var_").to_string();
-        let vname = format!("val_{}", base);
+        let vname = if cursor_pointee(tds, &arg.ty).is_some() {
+            format!("var_{}__arr", base)
+        } else {
+            format!("val_{}", base)
+        };
         // A kind of refinement Palow cannot state is not a reason to drop the
         // function -- it is a reason to say its contract is incomplete, which
         // is what the dropped-contract path already does, and which is what
@@ -4608,6 +6380,19 @@ fn emit_fn(
                     }
                 }
             };
+        let elem_refine = match &peel(tds, pt).val {
+            TypeT::TypeRef(TypeRefKind::Struct(sn))
+                if extent(tds, &arg.ty) == Some(Extent::Array)
+                    && arg.mode != ParamMode::Out
+                    && tds
+                        .structs
+                        .get(&*sn.val)
+                        .is_some_and(|si| si.elem_refine.is_some()) =>
+            {
+                Some(format!("struct_{}__refine", sn.val))
+            }
+            _ => None,
+        };
         // The deep half of the parameter's ownership. A struct pointer in C
         // almost always means the struct *and* what its pointers reach; the
         // two are separate predicates here, so the contract states both. A
@@ -4734,6 +6519,9 @@ fn emit_fn(
                             pre: format!("{}_pts_to {} 1.0R ", pn, pname),
                             uninit: Some(format!("{}_pts_to_uninit {}", pn, pname)),
                             entry: String::new(),
+                            elem_refine: None,
+                            fixed: false,
+                            own: None,
                         });
                     }
                     if !ens_own {
@@ -4823,6 +6611,9 @@ fn emit_fn(
                         pre: pts_to("1.0R", ""),
                         uninit: Some(format!("{}_pts_to_uninit {}", pn, pname)),
                         entry: String::new(),
+                        elem_refine: None,
+                        fixed: false,
+                        own: None,
                     });
                 }
                 // The mode is a statement about the *pre*condition: what
@@ -4874,6 +6665,17 @@ fn emit_fn(
                     pre: pts_to(&perm, ""),
                     uninit: None,
                     entry: format!("(reveal {})", vname),
+                    elem_refine: elem_refine.clone(),
+                    fixed: true,
+                    own: own_info
+                        .as_ref()
+                        .filter(|_| !null_guard)
+                        .map(|(sn, osty)| OwnInfo {
+                            sn: sn.clone(),
+                            osty: osty.clone(),
+                            perm: perm.clone(),
+                            entry: format!("(reveal {})", oname),
+                        }),
                 });
                 if let Some((sn, osty)) = &own_info {
                     ghosts.push(format!("(#{}: erased ({}))", oname, osty));
@@ -4898,6 +6700,17 @@ fn emit_fn(
                     pre: pts_to("1.0R", ""),
                     uninit: None,
                     entry: format!("(reveal {})", vname),
+                    elem_refine: elem_refine.clone(),
+                    fixed: false,
+                    own: own_info
+                        .as_ref()
+                        .filter(|_| !null_guard)
+                        .map(|(sn, osty)| OwnInfo {
+                            sn: sn.clone(),
+                            osty: osty.clone(),
+                            perm: "1.0R".to_string(),
+                            entry: format!("(reveal {})", oname),
+                        }),
                 });
                 if let Some((sn, osty)) = &own_info {
                     ghosts.push(format!("(#{}: erased ({}))", oname, osty));
@@ -4916,18 +6729,61 @@ fn emit_fn(
             ParamMode::Regular => {
                 ghosts.push(format!("(#{}: erased ({}))", vname, vty));
                 wits.push((vname.clone(), vty.clone(), true));
-                req.push(pts_to("1.0R", &vname));
+                // A seeded cursor's slot holds the cursor only when the seed
+                // is null. Otherwise it is storage the call initialises, and
+                // the cursor starts at the seed.
+                if let Some(seed) = seeds
+                    .iter()
+                    .find(|(_, c)| **c == base)
+                    .map(|(s, _)| s.clone())
+                {
+                    req.push(format!(
+                        "null_or var_{} ({}) ({}_pts_to_uninit {})",
+                        seed,
+                        pts_to("1.0R", &vname),
+                        pn,
+                        pname
+                    ));
+                    req.push(format!(
+                        "pure (not (is_null var_{}) ==> reveal {} == var_{})",
+                        seed, vname, seed
+                    ));
+                } else {
+                    req.push(pts_to("1.0R", &vname));
+                }
                 owned.push(OwnedParam {
                     base: base.clone(),
                     vty: vty.clone(),
                     pre: pts_to("1.0R", ""),
                     uninit: None,
                     entry: format!("(reveal {})", vname),
+                    elem_refine: elem_refine.clone(),
+                    fixed: false,
+                    own: own_info
+                        .as_ref()
+                        .filter(|_| !null_guard)
+                        .map(|(sn, osty)| OwnInfo {
+                            sn: sn.clone(),
+                            osty: osty.clone(),
+                            perm: "1.0R".to_string(),
+                            entry: format!("(reveal {})", oname),
+                        }),
                 });
+                // A C object keeps its size, so a flexible struct's tail
+                // comes back as long as it went in. A caller that holds the
+                // struct as a union member, where the tail has a fixed
+                // length, needs that to have the member back.
+                let keep_len = match flex_tail(tds, pt).filter(|_| !null_guard) {
+                    Some((_, f, _)) => format!(
+                        " ** pure (Seq.length ({}').fld_{} == Seq.length (reveal {}).fld_{})",
+                        vname, f.name, vname, f.name
+                    ),
+                    None => String::new(),
+                };
                 fresh.push((
                     format!("{}'", vname),
                     vty,
-                    pts_to("1.0R", &format!("{}'", vname)),
+                    format!("{}{}", pts_to("1.0R", &format!("{}'", vname)), keep_len),
                 ));
                 // The new value comes first, because what the deep half owns
                 // is stated in terms of it: a body that overwrote a pointer
@@ -5042,6 +6898,8 @@ fn emit_fn(
     // keep.
     let mut ret_guard: Option<(String, String, Vec<String>)> = None;
     let mut ret_block: Option<RetBlock> = None;
+    // Whether that block is an array, which a caller cannot take over yet.
+    let mut ret_array = false;
     // Ownership the author wrote on the return type in their own Pulse, which
     // `_allocated` is only the commonest case of. A constructor that hands back
     // a validated object says so with a `_refine` or a `_refine_value` on the
@@ -5101,6 +6959,7 @@ fn emit_fn(
                 pn: String::new(),
                 raw: true,
                 guarded: None,
+                array: false,
             });
         } else if let Some(freeable) = alloc {
             let pt = pointee(tds, &decl.ret_type).unwrap();
@@ -5145,6 +7004,33 @@ fn emit_fn(
                     );
                     ret_guard = Some((pn, binders, inner));
                 }
+                // An array the callee allocated: what the caller gets is the
+                // sequence the block holds and the right to free it, and the
+                // size the right is for is the sequence's, since nothing else
+                // records how many elements the allocation asked for. Only
+                // `_nullable`: the allocators that hand back arrays are
+                // `malloc`'s, and `malloc` may fail.
+                (Some(pn), Some(vty), Some(Extent::Array))
+                    if is_nullable(tds, &decl.ret_type) && palow_sizeof(tds, pt).is_some() =>
+                {
+                    let esize = palow_sizeof(tds, pt).unwrap();
+                    let binders = format!("(val_return: Seq.seq {}) (n_return: SizeT.t)", vty);
+                    let inner = vec![
+                        format!(
+                            "array_pts_to {pn}_repr {esize} (SizeT.v {pn}_alignof) {PTR_HOLE} \
+                             1.0R val_return"
+                        ),
+                        format!("freeable {} n_return", PTR_HOLE),
+                        format!(
+                            "pure (SizeT.v n_return == {} * Seq.length val_return)",
+                            esize
+                        ),
+                    ];
+                    pointees.insert("return".to_string(), (None, Some("val_return".to_string())));
+                    arrays.insert("return".to_string());
+                    ret_array = true;
+                    ret_guard = Some((pn, binders, inner));
+                }
                 (Some(pn), Some(vty), Some(Extent::One)) => {
                     fresh.push((
                         "val_return".to_string(),
@@ -5175,6 +7061,7 @@ fn emit_fn(
                         pn,
                         raw: false,
                         guarded: None,
+                        array: false,
                     });
                     refines_struct.extend(
                         struct_refines(pt)
@@ -5202,6 +7089,19 @@ fn emit_fn(
         }
     }
 
+    // A nullable array parameter's contents and length may be named, but only
+    // where the pointer is not null: a clause that mentions its sequence is
+    // stated as `not (is_null p) ==> ...`, the way a refinement of it is, so
+    // on a null path it says nothing about the arbitrary witness.
+    let mut guarded_arrays: Vec<(String, String)> = Vec::new();
+    for (b, entry) in &guarded_pointees {
+        if arrays.contains(b) && !null_outs.contains_key(b) && !pointees.contains_key(b) {
+            pointees.insert(b.clone(), entry.clone());
+            if let Some(p) = null_wrap.get(b) {
+                guarded_arrays.push((format!("val_{}", b), p.clone()));
+            }
+        }
+    }
     // The contract is all-or-nothing: a half-translated one would be silently
     // weaker in a way nothing downstream could detect.
     let spec = Spec {
@@ -5223,17 +7123,28 @@ fn emit_fn(
         valued: RefCell::new(Vec::new()),
         maybes: HashSet::new(),
         defined: RefCell::new(Vec::new()),
+        walks: HashMap::new(),
     };
     let translate = |es: &Exprs, w: When| -> Result<Vec<String>, String> {
         es.iter()
             .map(|e| {
                 spec.guards.borrow_mut().clear();
-                let p = spec.prop(e, w)?;
-                let guards = spec.guards.borrow();
-                Ok(if guards.is_empty() {
+                let p = spec.prop(e, w).map_err(|why| with_loc_tag(why, e))?;
+                let guards = needed_guards(&spec.guards.borrow());
+                let p = if guards.is_empty() {
                     p
                 } else {
-                    format!("{} /\\ {}", guards.join(" /\\ "), p)
+                    format!("{} /\\ {}", guards, p)
+                };
+                let nonnull: Vec<String> = guarded_arrays
+                    .iter()
+                    .filter(|(v, _)| mentions_ident(&p, v))
+                    .map(|(_, ptr)| format!("not (is_null {})", ptr))
+                    .collect();
+                Ok(if nonnull.is_empty() {
+                    p
+                } else {
+                    format!("({} ==> ({}))", nonnull.join(" /\\ "), p)
                 })
             })
             .collect()
@@ -5402,6 +7313,7 @@ fn emit_fn(
             valued: RefCell::new(Vec::new()),
             maybes: HashSet::new(),
             defined: RefCell::new(Vec::new()),
+            walks: HashMap::new(),
         };
         let r = how(&inner, w);
         spec.uses
@@ -5427,11 +7339,11 @@ fn emit_fn(
             siblings,
             &|sp: &Spec, w| {
                 let prop = sp.prop(p, w)?;
-                let guards = sp.guards.borrow();
+                let guards = needed_guards(&sp.guards.borrow());
                 Ok(if guards.is_empty() {
                     prop
                 } else {
-                    format!(r"({} /\ {})", guards.join(r" /\ "), prop)
+                    format!(r"({} /\ {})", guards, prop)
                 })
             },
         )
@@ -5617,6 +7529,7 @@ fn emit_fn(
                 None => stated_own,
             });
         }
+        let mut elem_refined: HashSet<String> = HashSet::new();
         for (base, ty, p) in &refines_struct {
             let Some((pre, post)) = spec
                 .pointees
@@ -5630,6 +7543,35 @@ fn emit_fn(
                 _ => pre.as_deref(),
             };
             let Some(this) = this else { continue };
+            // An `_array`'s value is a sequence, and the struct's refinement
+            // is about each element of it, not about the sequence: it is
+            // stated once per array through the struct's named predicate.
+            if spec.arrays.contains(base)
+                && let TypeT::TypeRef(TypeRefKind::Struct(sn)) = &peel(tds, ty).val
+                && struct_refines(ty).iter().any(|q| Rc::ptr_eq(q, p))
+            {
+                if !elem_refined.insert(base.clone()) {
+                    continue;
+                }
+                if tds
+                    .structs
+                    .get(&*sn.val)
+                    .and_then(|si| si.elem_refine.as_ref())
+                    .is_none()
+                {
+                    return Err(format!(
+                        "parameter var_{} is an array of struct {}, whose `_refine` is not a \
+                         proposition about the value of each element",
+                        base, sn.val
+                    ));
+                }
+                let t = format!("seq_forall struct_{}__refine ({})", sn.val, this);
+                out.push(match null_wrap.get(base) {
+                    Some(ptr) => format!("pure (not (is_null {}) ==> ({}))", ptr, t),
+                    None => format!("pure ({})", t),
+                });
+                continue;
+            }
             let pure_guarded = null_wrap.get(base).filter(|_| !refine_states_own(tds, p));
             let t = with_this(
                 base,
@@ -5676,11 +7618,11 @@ fn emit_fn(
                 &sibs,
                 &|sp: &Spec, w| {
                     let t = sp.refinement(p, w)?;
-                    let guards = sp.guards.borrow();
+                    let guards = needed_guards(&sp.guards.borrow());
                     Ok(if guards.is_empty() {
                         t
                     } else {
-                        format!(r"({}) ** pure ({})", t, guards.join(r" /\ "))
+                        format!(r"({}) ** pure ({})", t, guards)
                     })
                 },
             )?;
@@ -5724,6 +7666,60 @@ fn emit_fn(
         .cloned()
         .collect();
     let (ens_slprops, ens_props) = split(&ensures_rest);
+    // A clause that fixes the result outright -- `_ensures(return == E)`, with
+    // `E` free of `return` -- is emitted as Pulse's `rewrites_to` rather than
+    // as a `pure` equality. The two assert the same thing, but `rewrites_to`
+    // is the form Pulse's prover reads as a *substitution*: the bound result
+    // is replaced by `E` throughout the context and the goal. That is what a
+    // conditional needs. A call inside a branch binds its result to a
+    // branch-local name, so the branch's postcondition closes over it
+    // existentially, and Pulse's join gives up on an `exists*`. With
+    // `rewrites_to` the local never reaches the postcondition.
+    //
+    // `rewrites_to` is F* equality, so only a result whose C `==` *is* F*
+    // equality qualifies: machine integers, `_Bool`, and struct values, which
+    // C cannot compare at all and a contract compares as records. A float's
+    // `==` is IEEE equality, and a pointer result may sit behind a nullness
+    // guard; both keep the ordinary clause. So does an `E` whose translation
+    // needs a side condition, since `rewrites_to` has nowhere to put one.
+    let mut post_rewrites: Vec<String> = Vec::new();
+    let ens_props: Exprs = {
+        let ret_fty = fstar_type(tds, &decl.ret_type);
+        let mut rest = Vec::new();
+        for e in ens_props {
+            let Some(rhs) = determined_result(&e, &ret_name) else {
+                rest.push(e);
+                continue;
+            };
+            let qualifies = spec.ty_of(rhs).is_ok_and(|ty| {
+                matches!(
+                    peel(tds, &ty).val,
+                    TypeT::Int { .. }
+                        | TypeT::SizeT
+                        | TypeT::PtrdiffT
+                        | TypeT::Bool
+                        | TypeT::TypeRef(TypeRefKind::Struct(_))
+                ) && ret_fty.is_some()
+                    && fstar_type(tds, &ty) == ret_fty
+            });
+            if qualifies {
+                spec.guards.borrow_mut().clear();
+                let mark = spec.defined.borrow().len();
+                let t = spec.value(rhs, When::Post);
+                let clean = spec.guards.borrow().is_empty() && spec.defined.borrow().len() == mark;
+                spec.guards.borrow_mut().clear();
+                spec.defined.borrow_mut().truncate(mark);
+                if let Ok(t) = t
+                    && clean
+                {
+                    post_rewrites.push(format!("rewrites_to {} ({})", ret_name, t));
+                    continue;
+                }
+            }
+            rest.push(e);
+        }
+        rest
+    };
     let mut slprop_err: Option<String> = None;
     let generated_req = req.len();
     for (es, w, into) in [
@@ -5858,6 +7854,93 @@ fn emit_fn(
             }
         }
     }
+    // A result that is a value -- a scalar, or a struct returned whole --
+    // satisfies its type's pure refinements, the struct's own `_refine` and
+    // those on its fields included, just as a parameter of that type is
+    // required to. The body proves them at its `return`s and the caller is
+    // given them. A clause with no translation here is not promised, rather
+    // than costing the function its contract.
+    if pointee(tds, &decl.ret_type).is_none() {
+        let mut ps: Vec<Rc<Expr>> = refinements(tds, &decl.ret_type)
+            .map(|(ps, _, _)| ps)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| slprop_refine(tds, p).is_none())
+            .collect();
+        for p in struct_refines(&decl.ret_type) {
+            if !ps.iter().any(|q| Rc::ptr_eq(q, &p)) {
+                ps.push(p);
+            }
+        }
+        let pure_clause = |sp: &Spec, w: When, p: &Rc<Expr>| -> Result<String, String> {
+            let prop = sp.prop(p, w)?;
+            let guards = sp.guards.borrow();
+            Ok(if guards.is_empty() {
+                format!("pure ({})", prop)
+            } else {
+                format!(r"pure ({} /\ {})", guards.join(r" /\ "), prop)
+            })
+        };
+        for p in &ps {
+            if refine_states_own(tds, p) {
+                continue;
+            }
+            if let Ok(t) = with_this(
+                "return",
+                Some((&ret_name, None, true)),
+                &decl.ret_type,
+                p,
+                When::Post,
+                false,
+                None,
+                &[],
+                &|sp: &Spec, w| pure_clause(sp, w, p),
+            ) {
+                ret_own.push(t);
+            }
+        }
+        for field in field_refines(tds, &decl.ret_type) {
+            let p = &field.clause;
+            if refine_states_own(tds, p) || matches!(extent(tds, &field.ty), Some(Extent::Array)) {
+                continue;
+            }
+            let mut this = ret_name.clone();
+            for parent in &field.parents {
+                this = format!("({}).fld_{}", this, parent);
+            }
+            let sibs: Vec<(String, String, Rc<Type>)> = tds
+                .structs
+                .get(&field.container)
+                .map(|si| {
+                    si.fields
+                        .iter()
+                        .filter(|g| g.name != field.field)
+                        .map(|g| {
+                            (
+                                g.name.clone(),
+                                format!("(({}).fld_{})", this, g.name),
+                                g.ty.clone(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let fthis = format!("({}).fld_{}", this, field.field);
+            if let Ok(t) = with_this(
+                "return",
+                Some((&fthis, None, false)),
+                &field.ty,
+                p,
+                When::Post,
+                false,
+                None,
+                &sibs,
+                &|sp: &Spec, w| pure_clause(sp, w, p),
+            ) {
+                ret_own.push(t);
+            }
+        }
+    }
     for (_, ty, ident, vty, binder, fty, p) in &ret_valued {
         let how = |sp: &Spec, w: When| sp.refinement(p, w);
         match with_this(
@@ -5916,6 +7999,7 @@ fn emit_fn(
             // gathered above.
             req.truncate(generated_req);
             owned_post.clear();
+            post_rewrites.clear();
             let why = match contract {
                 Err(why) => why,
                 _ => slprop_err.or(value_err).unwrap_or_default(),
@@ -6005,6 +8089,7 @@ fn emit_fn(
                 pn,
                 raw: false,
                 guarded: Some(guard),
+                array: ret_array,
             });
         }
     }
@@ -6078,6 +8163,7 @@ fn emit_fn(
         bodies.push("pure False".to_string());
     }
     bodies.extend(post_props.iter().map(|p| format!("pure ({})", p)));
+    bodies.extend(post_rewrites.iter().cloned());
     // A postcondition that names a `__fp` wrapper is one that hands something
     // about that function on -- a validity, most of the time, and one the
     // body seeded itself. Reading it back off the assembled text is cruder
@@ -6136,6 +8222,7 @@ fn emit_fn(
             pn: String::new(),
             raw: true,
             guarded: None,
+            array: false,
         });
     }
 
@@ -6378,6 +8465,13 @@ fn emit_fn(
         );
     }
 
+    let trivial_pre = perms.is_empty()
+        && ghosts.is_empty()
+        && out.lines().all(|l| {
+            let l = l.trim_start();
+            !l.starts_with("preserves ") && (!l.starts_with("requires ") || l == "requires emp")
+        });
+
     Ok(FnSurface {
         olens,
         ret_spliced: contract_ok && !(ret_slprops.is_empty() && ret_valued.is_empty()),
@@ -6397,6 +8491,12 @@ fn emit_fn(
         spliced_own: contract_ok
             && (!(req_slprops.is_empty() && ens_slprops.is_empty()) || refine_own_spliced.take()),
         contract: contract_ok,
+        determined: !post_rewrites.is_empty(),
+        determined_by_witness: post_rewrites.iter().any(|r| {
+            r.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
+                .any(|w| fresh.iter().any(|(b, _, _)| b == w))
+        }),
+        trivial_pre,
         fp,
         fp_wits: wits.len(),
         implicits: perms
@@ -6652,6 +8752,7 @@ fn refine_prop(
         valued: RefCell::new(Vec::new()),
         maybes: HashSet::new(),
         defined: RefCell::new(Vec::new()),
+        walks: HashMap::new(),
     };
     let mut out = Vec::new();
     for p in &ps {
@@ -6709,14 +8810,90 @@ fn struct_invariant(tds: &Typedefs, env: &Env, fields: &[StructField]) -> Option
     Some(out.join(" /\\ "))
 }
 
+/// The `_refine` on a struct declaration as a proposition about a binder `x`
+/// of the struct's type, for stating of every element of an `_array` of it.
+///
+/// A parameter of the struct type carries the refinement at its own value,
+/// but an array has a sequence of values and no `this` to bind; the clause has
+/// to become a predicate first. Only a clause that is a proposition about the
+/// value qualifies: ownership in a refinement cannot be spread over the
+/// elements of a sequence, and a clause that does not render here is refused
+/// at the array rather than dropped (see `refine_own` in `emit_fn_sig`).
+fn struct_elem_refine(tds: &Typedefs, env: &Env, name: &str) -> Option<String> {
+    let r = tds.refined_structs.get(name)?;
+    let (ps, _, _) = refinements(tds, r).ok()?;
+    let first = ps.first()?;
+    let sty = TypeT::TypeRef(TypeRefKind::Struct(
+        Rc::<str>::from(name).with_loc(first.loc.clone()),
+    ))
+    .with_loc(first.loc.clone());
+    let mut env = env.clone();
+    env.push_var_decl(
+        &Rc::<str>::from("this").with_loc(first.loc.clone()),
+        sty,
+        crate::env::LocalDeclKind::RValue,
+    );
+    let mut locals = HashMap::new();
+    locals.insert("this".to_string(), "x".to_string());
+    let spec = Spec {
+        tds,
+        env: &env,
+        pointees: HashMap::new(),
+        old_vals: HashMap::new(),
+        olds: HashMap::new(),
+        arrays: HashSet::new(),
+        olens: HashMap::new(),
+        owns: HashMap::new(),
+        addrs: HashMap::new(),
+        guarded: HashSet::new(),
+        guards: RefCell::new(Vec::new()),
+        ret: "x".to_string(),
+        locals,
+        uses: RefCell::new(HashSet::new()),
+        signed_ok: false,
+        valued: RefCell::new(Vec::new()),
+        maybes: HashSet::new(),
+        defined: RefCell::new(Vec::new()),
+        walks: HashMap::new(),
+    };
+    let mut out = Vec::new();
+    for p in &ps {
+        let (mut own, mut props) = (Vec::new(), Vec::new());
+        split_refine(tds, p, &mut own, &mut props);
+        if !own.is_empty() {
+            return None;
+        }
+        for c in props {
+            out.push(format!("({})", spec.prop(c, When::Pre).ok()?));
+            if !spec.guards.borrow().is_empty() {
+                return None;
+            }
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out.join(" /\\ "))
+}
+
 fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<Chunk> {
     let layouts = crate::layout::LayoutCtx::of_tu(tu);
+    let (reach, islands) = overlay_reach(tu, tds);
     let mut code: Vec<Chunk> = Vec::new();
     for decl in &tu.decls {
         if let DeclT::UnionDefn(ud) = &decl.val {
-            let mut c = collect_union(tds, &layouts, ud);
+            let overlay = ud.overlay || reach.contains(&format!("union {}", ud.name.val));
+            if !overlay {
+                code.extend(sized_flex_members(tds, env, &reach, &layouts, ud));
+            }
+            let mut c = collect_union(tds, &layouts, ud, overlay);
             c.origin = origin_of(decl);
             code.push(c);
+            if islands.contains(&*ud.name.val)
+                && let Some(c) = collect_island(tds, &layouts, ud)
+            {
+                code.push(c);
+            }
             continue;
         }
         let DeclT::StructDefn(sd) = &decl.val else {
@@ -6741,7 +8918,6 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
         // Every field has to have a Palow type. Structs are processed in
         // declaration order, so a field of an earlier struct type works and a
         // field of a later one does not -- which is also all C allows.
-        let mut fields = Vec::new();
         let mut bitfields: Vec<(String, BitField)> = Vec::new();
         let mut ok = true;
         let mut bad = String::new();
@@ -6814,117 +8990,360 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
             }
             i = j;
         }
-        for (fname, fty, off) in plan {
-            let (Some(shape), true) = (field_shape(tds, &fty), field_type(tds, &fty).is_some())
+        let origin = origin_of(decl);
+        let chunk = finish_struct(
+            tds,
+            env,
+            &reach,
+            &name,
+            (size, align),
+            plan,
+            bitfields,
+            if ok { None } else { Some(bad) },
+            origin,
+        );
+        code.push(chunk);
+    }
+    code
+}
+
+/// The rest of a struct's collection once its fields are laid out: each
+/// field's shape, the packed-struct fix-ups, the `StructInfo`, and the module.
+/// `failed` is why laying the fields out already failed, if it did.
+#[allow(clippy::too_many_arguments)]
+fn finish_struct(
+    tds: &mut Typedefs,
+    env: &Env,
+    reach: &HashSet<String>,
+    name: &str,
+    (size, align): (u64, u64),
+    plan: Vec<(String, Rc<Type>, u64)>,
+    bitfields: Vec<(String, BitField)>,
+    failed: Option<String>,
+    origin: Option<Origin>,
+) -> Chunk {
+    let name = name.to_string();
+    let mut fields = Vec::new();
+    let mut ok = failed.is_none();
+    let mut bad = failed.unwrap_or_default();
+    let in_overlay = reach.contains(&format!("struct {}", name));
+    for (fname, fty, off) in plan {
+        let fty = match &peel(tds, &fty).val {
+            TypeT::TypeRef(TypeRefKind::Union(n))
+                if in_overlay && tds.unions.contains_key(&island_name(&n.val)) =>
+            {
+                Rc::new(Type {
+                    val: TypeT::TypeRef(TypeRefKind::Union(Rc::new(Ident {
+                        val: island_name(&n.val).into(),
+                        loc: n.loc.clone(),
+                    }))),
+                    loc: fty.loc.clone(),
+                })
+            }
+            _ => fty,
+        };
+        let (Some(shape), true) = (field_shape(tds, &fty), field_type(tds, &fty).is_some()) else {
+            ok = false;
+            bad = format!("field `{}` is {}", fname, describe(tds.resolve(&fty)));
+            break;
+        };
+        let Some(fsize) = shape.size(tds, &fty) else {
+            ok = false;
+            bad = format!("field `{}` has no size", fname);
+            break;
+        };
+        // An `_array` field's refinement is about the sequence in the
+        // ownership record; every other field's is about its value.
+        let seq = extent(tds, &fty) == Some(Extent::Array) || flex_elem(tds, &fty).is_some();
+        let inv = field_invariant(tds, env, &fty, seq);
+        fields.push(StructField {
+            name: fname,
+            ty: fty,
+            offset: off,
+            size: fsize,
+            shape,
+            inv,
+        });
+    }
+    // A packed struct -- or one with a packed struct inside -- can be
+    // less aligned than its fields. The struct keeps the alignment C gives
+    // it, which is what an allocator or an enclosing object guarantees,
+    // and each field is aligned or not by arithmetic on that: it is when
+    // its own alignment divides both the struct's and its offset. A
+    // scalar or a pointer that is not is owned by its bytes alone and
+    // accessed by the `_u` operations, which go through an aligned
+    // temporary; anything bigger would need unaligned versions of its
+    // whole ownership, which is not done.
+    if ok {
+        for f in &mut fields {
+            let Some(fa) = palow_alignof(tds, &f.ty)
+                .or_else(|| flex_elem(tds, &f.ty).and_then(|t| palow_alignof(tds, t)))
             else {
-                ok = false;
-                bad = format!("field `{}` is {}", fname, describe(tds.resolve(&fty)));
-                break;
+                continue;
             };
-            let Some(fsize) = shape.size(tds, &fty) else {
-                ok = false;
-                bad = format!("field `{}` has no size", fname);
-                break;
-            };
-            // An `_array` field's refinement is about the sequence in the
-            // ownership record; every other field's is about its value.
-            let seq = extent(tds, &fty) == Some(Extent::Array) || flex_elem(tds, &fty).is_some();
-            let inv = field_invariant(tds, env, &fty, seq);
-            fields.push(StructField {
-                name: fname,
-                ty: fty,
-                offset: off,
-                size: fsize,
-                shape,
-                inv,
-            });
-        }
-        // A packed struct -- or one with a packed struct inside -- can be
-        // less aligned than its fields. The struct keeps the alignment C gives
-        // it, which is what an allocator or an enclosing object guarantees,
-        // and each field is aligned or not by arithmetic on that: it is when
-        // its own alignment divides both the struct's and its offset. A
-        // scalar or a pointer that is not is owned by its bytes alone and
-        // accessed by the `_u` operations, which go through an aligned
-        // temporary; anything bigger would need unaligned versions of its
-        // whole ownership, which is not done.
-        if ok {
-            for f in &mut fields {
-                let Some(fa) = palow_alignof(tds, &f.ty)
-                    .or_else(|| flex_elem(tds, &f.ty).and_then(|t| palow_alignof(tds, t)))
-                else {
-                    continue;
-                };
-                if align % fa == 0 && f.offset % fa == 0 {
-                    continue;
+            if align % fa == 0 && f.offset % fa == 0 {
+                continue;
+            }
+            match &f.shape {
+                FieldShape::One { pn } if UNALIGNED_TYPES.contains(&pn.as_str()) => {
+                    f.shape = FieldShape::Unaligned { pn: pn.clone() };
                 }
-                match &f.shape {
-                    FieldShape::One { pn } if UNALIGNED_TYPES.contains(&pn.as_str()) => {
-                        f.shape = FieldShape::Unaligned { pn: pn.clone() };
-                    }
-                    _ => {
-                        ok = false;
-                        bad = format!(
-                            "field `{}` is not aligned, as the struct is packed, and is not a scalar or a pointer",
-                            f.name
-                        );
-                        break;
-                    }
+                _ => {
+                    ok = false;
+                    bad = format!(
+                        "field `{}` is not aligned, as the struct is packed, and is not a scalar or a pointer",
+                        f.name
+                    );
+                    break;
                 }
             }
         }
-        if !ok {
-            code.push(Chunk {
-                module: format!("Struct_{}", name),
-                code: format!("(* skipped struct {}: {} *)\n\n", name, bad),
-                origin: origin_of(decl),
-            });
+    }
+    if !ok {
+        return Chunk {
+            module: format!("Struct_{}", name),
+            code: format!("(* skipped struct {}: {} *)\n\n", name, bad),
+            origin,
+        };
+    }
+    // The byte-level view needs every field to have one and to sit at a
+    // byte offset of its own, so that the object splits into fields and
+    // padding with nothing left over. An array field qualifies when its
+    // element does: `array_repr` is that element's representation laid end
+    // to end, and it pins the field's length as a scalar's does.
+    //
+    // Bound the whole-object proof context for very wide configuration
+    // records. Larger structs retain their field-wise view; the limit is
+    // a proof-generation budget, not a restriction of the memory model.
+    let has_bytes = fields.len() <= MAX_BYTE_LEVEL_FIELDS
+        && fields.iter().all(|f| {
+            match &f.shape {
+                FieldShape::One { .. } | FieldShape::Unaligned { .. } => has_repr(tds, &f.ty),
+                // `field_shape` only gives an array field its shape when
+                // the element has a representation. A zero-length one
+                // owns no bytes, and the view does not say so for it.
+                FieldShape::Array { .. } => f.size > 0,
+                FieldShape::Flex { .. } => false,
+            }
+        });
+    let has_read = fields.iter().all(|f| readable_field(tds, &f.ty));
+    let inv = struct_invariant(tds, env, &fields);
+    tds.structs.insert(
+        name.clone(),
+        StructInfo {
+            fields,
+            own: Vec::new(),
+            bitfields,
+            size,
+            align,
+            has_read,
+            has_bytes,
+            view: false,
+            inv,
+            elem_refine: None,
+            deep_refine: false,
+            tag_arms: HashMap::new(),
+        },
+    );
+    let own = collect_own_items(tds, &tds.structs[&name], &name);
+    tds.structs.get_mut(&name).unwrap().own = own;
+    let elem_refine = struct_elem_refine(tds, env, &name);
+    tds.structs.get_mut(&name).unwrap().elem_refine = elem_refine;
+    let tag_arms = struct_tag_arms(tds, env, &name);
+    tds.structs.get_mut(&name).unwrap().tag_arms = tag_arms;
+    let deep = !deep_refine_parts(tds, &name, "x").is_empty();
+    tds.structs.get_mut(&name).unwrap().deep_refine = deep;
+    let mut sc = emit_struct(tds, &name);
+    if reach.contains(&format!("struct {}", name))
+        && let Some(v) = emit_struct_view(tds, &name)
+    {
+        sc += &v;
+        tds.structs.get_mut(&name).unwrap().view = true;
+    }
+    Chunk {
+        module: format!("Struct_{}", name),
+        code: sc,
+        origin,
+    }
+}
+
+/// A struct whose last field is a flexible array member, as a member of a
+/// union: `union { struct bitmap b; uint8_t storage[N]; }`, where another
+/// member gives the union the size the flexible struct's tail is meant to
+/// fill. As a member, such a struct is not of unknown size: its tail runs to
+/// the end of the union, as far as whole elements go. Its member type is a
+/// copy of the struct with that tail as a fixed-size array, `S__fill<k>`,
+/// which has a byte-level `_repr` when the copy does.
+fn flex_fill(tds: &Typedefs, ty: &Type, usize: u64) -> Option<(String, u64, u64)> {
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, ty).val else {
+        return None;
+    };
+    let si = tds.structs.get(&*n.val)?;
+    let flex = si.fields.last()?;
+    let FieldShape::Flex { esize, .. } = &flex.shape else {
+        return None;
+    };
+    if usize < flex.offset || *esize == 0 {
+        return None;
+    }
+    let k = (usize - flex.offset) / esize;
+    let ssize = flex.offset + k * esize;
+    if ssize % si.align != 0 {
+        return None;
+    }
+    Some((format!("{}__fill{}", n.val, k), k, ssize))
+}
+
+/// The member type `flex_fill` gives a flexible struct in a union of `usize`
+/// bytes, once `sized_flex_members` has generated it.
+fn sized_flex_type(tds: &Typedefs, ty: &Type, usize: u64) -> Option<Rc<Type>> {
+    let (name, _, _) = flex_fill(tds, ty, usize)?;
+    tds.structs.contains_key(&name).then(|| {
+        Rc::new(Type {
+            val: TypeT::TypeRef(TypeRefKind::Struct(Rc::new(Ident {
+                val: name.into(),
+                loc: ty.loc.clone(),
+            }))),
+            loc: ty.loc.clone(),
+        })
+    })
+}
+
+/// Generate the sized copy (`flex_fill`) of each flexible struct that is a
+/// member of the union `ud`.
+fn sized_flex_members(
+    tds: &mut Typedefs,
+    env: &Env,
+    reach: &HashSet<String>,
+    layouts: &crate::layout::LayoutCtx,
+    ud: &crate::ir::UnionDefn,
+) -> Vec<Chunk> {
+    let key = TypeRefKind::Union(ud.name.clone());
+    let Some(usize) = layouts
+        .table
+        .get(&LayoutKey::of_type_ref(&key))
+        .map(|l| l.size)
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for f in &ud.fields {
+        let mty = f.val.logical_type(&f.loc);
+        let Some((name, k, ssize)) = flex_fill(tds, &mty, usize) else {
+            continue;
+        };
+        if tds.structs.contains_key(&name) {
             continue;
         }
-        // The byte-level view needs every field to have one and to sit at a
-        // byte offset of its own, so that the object splits into fields and
-        // padding with nothing left over. An array field qualifies when its
-        // element does: `array_repr` is that element's representation laid end
-        // to end, and it pins the field's length as a scalar's does.
-        //
-        // Bound the whole-object proof context for very wide configuration
-        // records. Larger structs retain their field-wise view; the limit is
-        // a proof-generation budget, not a restriction of the memory model.
-        let has_bytes = fields.len() <= MAX_BYTE_LEVEL_FIELDS
-            && fields.iter().all(|f| {
-                match &f.shape {
-                    FieldShape::One { .. } | FieldShape::Unaligned { .. } => has_repr(tds, &f.ty),
-                    // `field_shape` only gives an array field its shape when
-                    // the element has a representation. A zero-length one
-                    // owns no bytes, and the view does not say so for it.
-                    FieldShape::Array { .. } => f.size > 0,
-                    FieldShape::Flex { .. } => false,
-                }
-            });
-        let has_read = fields.iter().all(|f| readable_field(tds, &f.ty));
-        let inv = struct_invariant(tds, env, &fields);
-        tds.structs.insert(
-            name.clone(),
-            StructInfo {
-                fields,
-                own: Vec::new(),
-                bitfields,
-                size,
-                align,
-                has_read,
-                has_bytes,
-                inv,
-            },
+        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, &mty).val else {
+            unreachable!()
+        };
+        let si = &tds.structs[&*n.val];
+        let align = si.align;
+        let plan: Vec<(String, Rc<Type>, u64)> = si
+            .fields
+            .iter()
+            .map(|f| {
+                let ty = match &peel(tds, &f.ty).val {
+                    TypeT::FlexArray(t) => Rc::new(Type {
+                        val: TypeT::FixedArray(t.clone(), k),
+                        loc: f.ty.loc.clone(),
+                    }),
+                    _ => f.ty.clone(),
+                };
+                (f.name.clone(), ty, f.offset)
+            })
+            .collect();
+        let bitfields = si.bitfields.clone();
+        let views = flex_fill_views(si, &n.val, &name, k);
+        tds.aggregate_layouts
+            .insert(format!("struct {}", name), (ssize, align));
+        let mut chunk = finish_struct(
+            tds,
+            env,
+            reach,
+            &name,
+            (ssize, align),
+            plan,
+            bitfields,
+            None,
+            None,
         );
-        let own = collect_own_items(tds, &tds.structs[&name], &name);
-        tds.structs.get_mut(&name).unwrap().own = own;
-        code.push(Chunk {
-            module: format!("Struct_{}", name),
-            code: emit_struct(tds, &name),
-            origin: origin_of(decl),
-        });
+        if let Some(v) = views {
+            chunk.code += &v;
+        }
+        out.push(chunk);
     }
-    code
+    out
+}
+
+fn flex_fill_viewable(si: &StructInfo) -> bool {
+    si.fields.last().is_some_and(|t| si.size == t.offset)
+        && si.bitfields.is_empty()
+        && si.fields.iter().all(|f| f.inv.is_none())
+}
+
+/// The sized copy a predicate name `struct_S__fill<k>` stands for, when it has
+/// the views `flex_fill_views` gives it.
+fn flex_fill_view(tds: &Typedefs, pn: &str) -> Option<String> {
+    let name = pn.strip_prefix("struct_")?;
+    let (base, k) = name.rsplit_once("__fill")?;
+    k.parse::<u64>().ok()?;
+    let si = tds.structs.get(base)?;
+    (tds.structs.contains_key(name) && flex_fill_viewable(si)).then(|| pn.to_string())
+}
+
+/// The sized copy `S__fill<k>` and the flexible struct `S` it was made from
+/// describe the same bytes, so a member can be lent to a function that takes
+/// an `S *`, and taken back once its tail is again `k` elements long. The two
+/// points-to differ only in their names when `S` has no padding after its
+/// fixed fields -- the tail starts where they end -- and when nothing on its
+/// fields' types needs re-proving, which is when these are emitted.
+fn flex_fill_views(si: &StructInfo, base: &str, name: &str, k: u64) -> Option<String> {
+    if !flex_fill_viewable(si) {
+        return None;
+    }
+    let tail = si.fields.last()?;
+    let (bm, bs, fs) = (
+        format!("Struct_{}", base),
+        format!("struct_{}", base),
+        format!("struct_{}", name),
+    );
+    let rec = |qual: &str, src: &str, srcq: &str| {
+        let fields: Vec<String> = si
+            .fields
+            .iter()
+            .map(|f| format!("{}fld_{} = {}.{}fld_{}", qual, f.name, src, srcq, f.name))
+            .collect();
+        format!("{{ {} }}", fields.join("; "))
+    };
+    let to = rec(&format!("{}.", bm), "x", "");
+    let of = rec("", "y", &format!("{}.", bm));
+    Some(format!(
+        "ghost fn {fs}_to_flex (a: ptr) (#p: perm) (#x: {fs})
+  requires {fs}_pts_to a p x
+  ensures  {bm}.{bs}_pts_to a p ({to})
+{{
+  unfold {fs}_pts_to a p x;
+  unfold {fs}_padding a p;
+  fold ({bm}.{bs}_padding a p);
+  fold ({bm}.{bs}_pts_to a p ({to}));
+}}
+
+ghost fn {fs}_of_flex (a: ptr) (#p: perm)
+    (#y: (y: {bm}.{bs} {{ Seq.length y.{bm}.fld_{t} == {k} }}))
+  requires {bm}.{bs}_pts_to a p y
+  ensures  {fs}_pts_to a p ({of})
+{{
+  unfold ({bm}.{bs}_pts_to a p y);
+  unfold ({bm}.{bs}_padding a p);
+  fold ({fs}_padding a p);
+  fold ({fs}_pts_to a p ({of}));
+}}
+
+",
+        t = tail.name,
+    ))
 }
 
 /// Generate the Palow type for one union. Every member has to have a
@@ -6937,6 +9356,7 @@ fn collect_union(
     tds: &mut Typedefs,
     layouts: &crate::layout::LayoutCtx,
     ud: &crate::ir::UnionDefn,
+    overlay: bool,
 ) -> Chunk {
     let name = ud.name.val.to_string();
     let key = TypeRefKind::Union(ud.name.clone());
@@ -6959,10 +9379,14 @@ fn collect_union(
     };
     tds.aggregate_layouts
         .insert(format!("union {}", name), (size, align));
+    if overlay {
+        return collect_overlay_union(tds, ud, size, align);
+    }
     let mut members = Vec::new();
     for f in &ud.fields {
         let mname = f.val.name().val.to_string();
         let mty = f.val.logical_type(&f.loc);
+        let mty = sized_flex_type(tds, &mty, size).unwrap_or(mty);
         // A member's own ownership has to be defined over *bytes*: the
         // members overlap, so the union's representation is a case split on
         // the same bytes and a member whose ownership is field-wise has
@@ -7001,6 +9425,10 @@ fn collect_union(
             members,
             size,
             align,
+            overlay: false,
+            ints: Vec::new(),
+            islands: Vec::new(),
+            own: None,
         },
     );
     Chunk {
@@ -7008,6 +9436,1274 @@ fn collect_union(
         code: emit_union(tds, &name),
         origin: None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Overlay unions (`_overlay`)
+//
+// A union declared `_overlay` is not a choice between its members but one
+// object that every member is a view of -- a layered request, where a
+// scheduler, a library and a request type each own different fields of the
+// same bytes. Its value is those bytes. A member is readable
+// when the bytes it reads through are (`_is_m`), and is then what they read
+// as (`_get_m`). A scalar is read and written at its constant offset in the
+// union, so a store through one member changes exactly the bytes of that
+// field: a field of another member keeps its value if its bytes do not
+// overlap them, and is changed if they do. That is the property the tagged
+// model cannot state. See palow.md, "Overlay unions".
+// ---------------------------------------------------------------------------
+
+/// A scalar an overlay union reads and writes at a byte offset: its size, its
+/// F* type, and the predicate on its bytes that makes them readable at that
+/// type (`Pulse.Lib.C.Palow.Overlay`). An integer is readable when its bytes
+/// are plain; a `bool` when they are also 0 or 1; a pointer when they are some
+/// pointer's representation, provenance and all.
+struct OvLeaf {
+    size: u64,
+    fty: &'static str,
+    ok: &'static str,
+}
+
+fn ov_leaf(tds: &Typedefs, pn: &str) -> Option<OvLeaf> {
+    let (size, fty, ok) = match pn {
+        "uint8_t" => (1, "UInt8.t", "plain"),
+        "int8_t" => (1, "Int8.t", "plain"),
+        "uint16_t" => (2, "UInt16.t", "plain"),
+        "int16_t" => (2, "Int16.t", "plain"),
+        "uint32_t" => (4, "UInt32.t", "plain"),
+        "int32_t" => (4, "Int32.t", "plain"),
+        "uint64_t" => (8, "UInt64.t", "plain"),
+        "int64_t" => (8, "Int64.t", "plain"),
+        "bool_t" => (1, "bool", "bool_t_view_ok"),
+        "size_t" => (tds.ptr_bytes, "SizeT.t", "plain"),
+        "ptr" => (tds.ptr_bytes, "ptr", "ptr_view_ok"),
+        _ => return None,
+    };
+    Some(OvLeaf { size, fty, ok })
+}
+
+/// The leaves an array field of a viewed struct may have: the fixed-width
+/// integers, whose bytes are readable exactly when they are plain.
+fn ov_array_leaf(pn: &str) -> bool {
+    matches!(
+        pn,
+        "uint8_t"
+            | "int8_t"
+            | "uint16_t"
+            | "int16_t"
+            | "uint32_t"
+            | "int32_t"
+            | "uint64_t"
+            | "int64_t"
+    )
+}
+
+/// The named unions the translation unit uses as whole values: as a
+/// parameter, a return value, a global or a local.
+fn value_unions(tu: &TranslationUnit, tds: &Typedefs) -> HashSet<String> {
+    fn note(tds: &Typedefs, t: &Type, out: &mut HashSet<String>) {
+        // An array of unions holds whole values too.
+        let t = flat_array(tds, t).map_or(t, |(e, _)| e);
+        if let TypeT::TypeRef(TypeRefKind::Union(n)) = &peel(tds, t).val {
+            out.insert(n.val.to_string());
+        }
+    }
+    fn stmts(tds: &Typedefs, ss: &Stmts, out: &mut HashSet<String>) {
+        for st in ss {
+            match &st.val {
+                StmtT::Decl(_, t)
+                | StmtT::Let(_, t, _)
+                | StmtT::DeclStackArray { elem_type: t, .. } => note(tds, t, out),
+                StmtT::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    stmts(tds, then_branch, out);
+                    stmts(tds, else_branch, out);
+                }
+                StmtT::Match {
+                    branches,
+                    default_branch,
+                    ..
+                } => {
+                    for b in branches.iter() {
+                        stmts(tds, &b.body, out);
+                    }
+                    stmts(tds, default_branch, out);
+                }
+                StmtT::While { body, .. } | StmtT::GotoBlock { body, .. } => stmts(tds, body, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    for d in &tu.decls {
+        let decl = match &d.val {
+            DeclT::FnDefn(f) => {
+                stmts(tds, &f.body, &mut out);
+                &f.decl
+            }
+            DeclT::FnDecl(f) => f,
+            DeclT::GlobalVar(g) => {
+                note(tds, &g.ty, &mut out);
+                continue;
+            }
+            _ => continue,
+        };
+        note(tds, &decl.ret_type, &mut out);
+        for a in &decl.args {
+            note(tds, &a.ty, &mut out);
+        }
+    }
+    out
+}
+
+/// The aggregates an `_overlay` union reaches through its members and their
+/// fields, at any depth, as `struct X` and `union X`; and the islands among
+/// the unions it reaches, by name.
+///
+/// Only the structs reached get an overlay view: it is a proof obligation for
+/// every struct that has one, and nothing else needs it. A union reached is an
+/// overlay union too, `_overlay` or not: it is part of the same bytes, which
+/// every layer sees through its own members, so a union of alternative names
+/// inside a layer is punned exactly as the outer one is -- unless the program
+/// uses it as a whole value somewhere (`value_unions`). An overlay union has
+/// no whole values, so such a union keeps its tagged model, and inside an
+/// overlay it is an island: a run of bytes the view does not look into, typed
+/// `union_X__island`, whose members are not reached through it.
+fn overlay_reach(tu: &TranslationUnit, tds: &Typedefs) -> (HashSet<String>, HashSet<String>) {
+    let mut defs: HashMap<String, Vec<Rc<Type>>> = HashMap::new();
+    let mut stack: Vec<String> = Vec::new();
+    let mut marked: HashSet<String> = HashSet::new();
+    for d in &tu.decls {
+        match &d.val {
+            DeclT::StructDefn(sd) => {
+                defs.insert(
+                    format!("struct {}", sd.name.val),
+                    sd.fields
+                        .iter()
+                        .map(|f| f.val.logical_type(&f.loc))
+                        .collect(),
+                );
+            }
+            DeclT::UnionDefn(ud) => {
+                if ud.overlay {
+                    marked.insert(ud.name.val.to_string());
+                    stack.push(format!("union {}", ud.name.val));
+                }
+                defs.insert(
+                    format!("union {}", ud.name.val),
+                    ud.fields
+                        .iter()
+                        .map(|f| f.val.logical_type(&f.loc))
+                        .collect(),
+                );
+            }
+            _ => {}
+        }
+    }
+    let values = value_unions(tu, tds);
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut islands: HashSet<String> = HashSet::new();
+    while let Some(k) = stack.pop() {
+        if !seen.insert(k.clone()) {
+            continue;
+        }
+        for t in defs.get(&k).into_iter().flatten() {
+            let t = flat_array(tds, t).map_or(&**t, |(e, _)| e);
+            match &peel(tds, t).val {
+                TypeT::TypeRef(TypeRefKind::Struct(n)) => stack.push(format!("struct {}", n.val)),
+                TypeT::TypeRef(TypeRefKind::Union(n))
+                    if marked.contains(&*n.val) || !values.contains(&*n.val) =>
+                {
+                    stack.push(format!("union {}", n.val))
+                }
+                TypeT::TypeRef(TypeRefKind::Union(n)) => {
+                    islands.insert(n.val.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    (seen, islands)
+}
+
+/// The type a field of a struct value of type `bty` has when it is an island
+/// (see `overlay_reach`): the field's C type is the named union, but inside an
+/// overlay what it holds is the union's bytes.
+fn island_field(tds: &Typedefs, bty: &Type, f: &str) -> Option<Rc<Type>> {
+    // A union's flexible struct member has the sized type `flex_fill` gave it.
+    if let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(tds, bty).val {
+        let m = tds
+            .unions
+            .get(&*u.val)?
+            .members
+            .iter()
+            .find(|m| m.name == f)?;
+        return match &m.ty.val {
+            TypeT::TypeRef(TypeRefKind::Struct(n)) if n.val.contains("__fill") => {
+                Some(m.ty.clone())
+            }
+            _ => None,
+        };
+    }
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, bty).val else {
+        return None;
+    };
+    let fld = tds
+        .structs
+        .get(&*n.val)?
+        .fields
+        .iter()
+        .find(|x| x.name == f)?;
+    match &peel(tds, &fld.ty).val {
+        TypeT::TypeRef(TypeRefKind::Union(u)) if u.val.ends_with("__island") => {
+            Some(fld.ty.clone())
+        }
+        _ => None,
+    }
+}
+
+/// The name of the byte-valued twin of the island union `u`.
+fn island_name(u: &str) -> String {
+    format!("{}__island", u)
+}
+
+/// The islands found among the fields of a struct that has an overlay view,
+/// or of an overlay union, by the C names of the unions they are twins of.
+fn view_islands(tds: &Typedefs, ty: &Type, out: &mut BTreeSet<String>) {
+    let ty = flat_array(tds, ty).map_or(ty, |(e, _)| e);
+    match &peel(tds, ty).val {
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+            if let Some(si) = tds.structs.get(&*n.val) {
+                for f in &si.fields {
+                    view_islands(tds, &f.ty, out);
+                }
+            }
+        }
+        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+            if let Some(orig) = n.val.strip_suffix("__island") {
+                out.insert(orig.to_string());
+            } else if let Some(ui) = tds.unions.get(&*n.val) {
+                out.extend(ui.islands.iter().cloned());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The scalar types found among the leaves of a struct that has an overlay
+/// view, or of an overlay union.
+fn view_ints(tds: &Typedefs, ty: &Type, out: &mut BTreeSet<String>) {
+    match &peel(tds, ty).val {
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+            if let Some(si) = tds.structs.get(&*n.val) {
+                for f in &si.fields {
+                    match &f.shape {
+                        FieldShape::One { pn } | FieldShape::Array { pn, .. }
+                            if ov_leaf(tds, pn).is_some() =>
+                        {
+                            out.insert(pn.clone());
+                        }
+                        _ => view_ints(tds, &f.ty, out),
+                    }
+                }
+            }
+        }
+        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+            if let Some(ui) = tds.unions.get(&*n.val) {
+                out.extend(ui.ints.iter().cloned());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The overlay view of a struct: `_view_ok b`, that the bytes of every field
+/// are readable as it (see `ov_leaf`); `_view b`, the ghost value they read
+/// as; and the two lemmas that make these the same thing as `_repr` where it
+/// holds. The padding is in neither, which is the point: a struct read
+/// through a range of bytes does not care what its padding holds.
+///
+/// `None` when the struct does not qualify. Every field has to be a leaf, an
+/// array of integers, a struct with a view, or an overlay union;
+/// and nothing may be refined, since the view builds values of the field
+/// types from arbitrary bytes.
+fn emit_struct_view(tds: &Typedefs, name: &str) -> Option<String> {
+    let si = tds.structs.get(name)?;
+    if !si.has_bytes || si.inv.is_some() || si.fields.is_empty() {
+        return None;
+    }
+    let sn = format!("struct_{}", name);
+    let sz = si.size;
+    let (mut ok, mut vw, mut l1, mut l2) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for f in &si.fields {
+        if f.inv.is_some() {
+            return None;
+        }
+        let (o, n, fname) = (f.offset, f.size, &f.name);
+        let sl = format!("(slice b {} {})", o, o + n);
+        match &f.shape {
+            FieldShape::One { pn } if ov_leaf(tds, pn).is_some() => {
+                let leaf = ov_leaf(tds, pn).unwrap();
+                if field_type(tds, &f.ty).as_deref() != Some(leaf.fty) || leaf.size != n {
+                    return None;
+                }
+                ok.push(format!("{} {}", leaf.ok, sl));
+                vw.push(format!("fld_{} = {}_of_bytes {}", fname, pn, sl));
+                l1.push(format!("{}_view_repr {}", pn, sl));
+                l2.push(format!("{}_repr_view x.fld_{} {}", pn, fname, sl));
+            }
+            FieldShape::Array { pn, esize, len }
+                if ov_array_leaf(pn)
+                    && ov_leaf(tds, pn).is_some_and(|l| l.size == *esize)
+                    && *len > 0 =>
+            {
+                let fty = ov_leaf(tds, pn).unwrap().fty;
+                if fstar_type(tds, flat_array(tds, &f.ty)?.0).as_deref() != Some(fty) {
+                    return None;
+                }
+                ok.push(format!("plain {}", sl));
+                vw.push(format!(
+                    "fld_{} = array_view {} {} {}_of_bytes {}",
+                    fname, esize, len, pn, sl
+                ));
+                l1.push(format!(
+                    "{pn}_view_repr_all (); array_view_repr {pn}_repr {esize} {len} {pn}_of_bytes {sl}"
+                ));
+                l2.push(format!(
+                    "{pn}_repr_view_all (); array_repr_view {pn}_repr {esize} {len} {pn}_of_bytes x.fld_{fname} {sl}"
+                ));
+            }
+            FieldShape::Array { pn, esize, len }
+                if *len > 0
+                    && matches!(
+                        &peel(tds, flat_array(tds, &f.ty)?.0).val,
+                        TypeT::TypeRef(TypeRefKind::Struct(t))
+                            if tds.structs.get(&*t.val).is_some_and(|x| x.view && x.size == *esize)
+                    ) =>
+            {
+                let args = format!("{pn}_repr {esize} {len} {pn}_view_ok {pn}_view");
+                ok.push(format!("array_view_ok {esize} {len} {pn}_view_ok {sl}"));
+                vw.push(format!(
+                    "fld_{fname} = array_view_g {esize} {len} {pn}_view {sl}"
+                ));
+                l1.push(format!("array_view_g_repr {args} {pn}_view_repr {sl}"));
+                l2.push(format!(
+                    "array_repr_view_g {args} {pn}_repr_view x.fld_{fname} {sl}"
+                ));
+            }
+            FieldShape::One { pn } => match &peel(tds, &f.ty).val {
+                TypeT::TypeRef(TypeRefKind::Struct(t))
+                    if tds.structs.get(&*t.val).is_some_and(|x| x.view) =>
+                {
+                    ok.push(format!("{}_view_ok {}", pn, sl));
+                    vw.push(format!("fld_{} = {}_view {}", fname, pn, sl));
+                    l1.push(format!("{}_view_repr {}", pn, sl));
+                    l2.push(format!("{}_repr_view x.fld_{} {}", pn, fname, sl));
+                }
+                TypeT::TypeRef(TypeRefKind::Union(t))
+                    if tds.unions.get(&*t.val).is_some_and(|x| x.overlay) =>
+                {
+                    vw.push(format!("fld_{} = {}", fname, sl));
+                }
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+    let or_true = |v: &Vec<String>, sep: &str| match v.is_empty() {
+        true => "True".to_string(),
+        false => v.join(sep),
+    };
+    let or_unit = |v: &Vec<String>| match v.is_empty() {
+        true => "()".to_string(),
+        false => v.join(";\n    "),
+    };
+    Some(format!(
+        "\n(* The overlay view: what a run of {sz} bytes reads as through this type,\n   \
+         and when it is readable at all. See `Pulse.Lib.C.Palow.Overlay`. *)\n\
+         open Pulse.Lib.C.Palow.Pun\n\
+         open Pulse.Lib.C.Palow.Overlay\n\n\
+         let {sn}_view_ok (b: bytes {{ len b == {sz} }}) : prop =\n  {ok}\n\n\
+         let {sn}_view (b: bytes {{ len b == {sz} }}) : GTot {sn} =\n  {{ {vw} }}\n\n\
+         let {sn}_view_repr (b: bytes {{ len b == {sz} }})\n  \
+         : Lemma (requires {sn}_view_ok b) (ensures {sn}_repr ({sn}_view b) b)\n  \
+         = {l1}\n\n\
+         let {sn}_repr_view (x: {sn}) (b: bytes {{ len b == {sz} }})\n  \
+         : Lemma (requires {sn}_repr x b) (ensures {sn}_view_ok b /\\ {sn}_view b == x)\n  \
+         = {l2}\n\n",
+        ok = or_true(&ok, " /\\\n  "),
+        vw = vw.join("; "),
+        l1 = or_unit(&l1),
+        l2 = or_unit(&l2),
+    ))
+}
+
+/// The byte-valued twin of a named union that an overlay reaches: an overlay
+/// union of the same size and alignment with no members, so that a struct
+/// inside the overlay can hold the union's bytes without the view having to
+/// choose which of its members they are. The union's own, tagged type is
+/// unchanged; the twin is only what the field holds inside the overlay.
+fn collect_island(
+    tds: &mut Typedefs,
+    layouts: &crate::layout::LayoutCtx,
+    ud: &crate::ir::UnionDefn,
+) -> Option<Chunk> {
+    let l = layouts
+        .table
+        .get(&LayoutKey::of_type_ref(&TypeRefKind::Union(
+            ud.name.clone(),
+        )))?;
+    let name = island_name(&ud.name.val);
+    tds.unions.insert(
+        name.clone(),
+        UnionInfo {
+            members: Vec::new(),
+            size: l.size,
+            align: l.align,
+            overlay: true,
+            ints: Vec::new(),
+            islands: Vec::new(),
+            own: None,
+        },
+    );
+    let mut code = emit_overlay_union(tds, &name);
+    code += &emit_island_access(tds, &ud.name.val);
+    Some(Chunk {
+        module: format!("Union_{}", name),
+        code,
+        origin: None,
+    })
+}
+
+/// The member an island is loaded through: the first one, when its value can
+/// be read whole with nothing to choose inside it (`value_read_guard`).
+fn island_member(tds: &Typedefs, u: &str) -> Option<(String, String)> {
+    let ui = tds.unions.get(u).filter(|ui| !ui.overlay)?;
+    let m = ui.members.first()?;
+    if !matches!(m.shape, FieldShape::One { .. })
+        || value_reader(tds, &m.ty).is_none()
+        || value_read_guard(tds, &m.ty, "v").is_some()
+    {
+        return None;
+    }
+    Some((m.name.clone(), field_type(tds, &m.ty)?))
+}
+
+/// The whole-value load and store of an island at a constant offset into an
+/// overlay's bytes. What a store writes is a representation of the value --
+/// which bytes the padding gets is not said -- and nothing else; a load needs
+/// the bytes to be a representation of a value of the first member, which is
+/// the member the tagged model reads a whole value through.
+fn emit_island_access(tds: &Typedefs, u: &str) -> String {
+    let Some((m0, t0)) = island_member(tds, u) else {
+        return String::new();
+    };
+    let ui = &tds.unions[u];
+    let (n, al) = (ui.size, ui.align);
+    let un = format!("union_{}", u);
+    let isl = format!("union_{}", island_name(u));
+    let k = format!("Union_{}_{}", u, m0);
+    let sl = format!("(slice u (SizeT.v o) (SizeT.v o + {n}))");
+    format!(
+        "(* The bytes are those of a `{u}` whose `{m0}` is live: what a whole-value\n   \
+         load of the island needs. *)\n\
+         let {isl}_readable (b: bytes) : prop = exists (v: {t0}). {un}_repr ({k} v) b\n\n\
+         let {isl}_active (b: bytes) : GTot (r: bool {{ r = true <==> {isl}_readable b }}) =\n  \
+         FStar.IndefiniteDescription.strong_excluded_middle ({isl}_readable b)\n\n\
+         fn {isl}_load (a: ptr) (al: SizeT.t) (o: SizeT.t) (#p: perm) (#u: erased bytes)\n\
+         \x20 preserves mem_pts_to a p u\n\
+         \x20 requires pure (SizeT.v o + {n} <= len u /\\ SizeT.fits (SizeT.v o + {n}) /\\ aligned a al /\\\n\
+         \x20                SizeT.v al % {al} == 0 /\\ SizeT.v o % {al} == 0 /\\ {isl}_readable {sl})\n\
+         \x20 returns  x : {un}\n\
+         \x20 ensures  pure (SizeT.v o + {n} <= len u /\\ {k}? x /\\ {un}_repr x {sl})\n\
+         {{\n  \
+         mem_carve a o {n}sz;\n  \
+         assert_norm (pow2 32 % {al} == 0);\n  \
+         aligned_field a al o {un}_alignof;\n  \
+         mem_share (a +! o);\n  \
+         let w = ov_pick (fun (v: {t0}) -> {un}_repr ({k} v) {sl});\n  \
+         {un}_conceal (a +! o) #(p /. 2.0R) #{sl} #({k} (reveal w));\n  \
+         let x = {un}_{m0}_read (a +! o);\n  \
+         {un}_reveal (a +! o);\n  \
+         mem_gather (a +! o) #(p /. 2.0R) #(p /. 2.0R) #{sl};\n  \
+         rewrite (mem_pts_to (a +! o) (p /. 2.0R +. p /. 2.0R) {sl})\n       \
+         as (mem_pts_to (a +! o) p {sl});\n  \
+         mem_uncarve a o {n}sz;\n  \
+         x\n}}\n\n\
+         fn {isl}_store (a: ptr) (al: SizeT.t) (o: SizeT.t) (x: {un}) (#u: erased bytes)\n\
+         \x20 requires mem_pts_to a 1.0R u\n\
+         \x20 requires pure (SizeT.v o + {n} <= len u /\\ SizeT.fits (SizeT.v o + {n}) /\\ aligned a al /\\\n\
+         \x20                SizeT.v al % {al} == 0 /\\ SizeT.v o % {al} == 0)\n\
+         \x20 ensures  exists* (c: bytes). mem_pts_to a 1.0R (overlay u 0 c (SizeT.v o))\n\
+         \x20            ** pure (len c == {n} /\\ {un}_repr x c)\n\
+         {{\n  \
+         mem_carve a o {n}sz;\n  \
+         assert_norm (pow2 32 % {al} == 0);\n  \
+         aligned_field a al o {un}_alignof;\n  \
+         {un}_claim_uninit (a +! o) #{sl};\n  \
+         {un}_write_uninit (a +! o) x;\n  \
+         {un}_reveal (a +! o);\n  \
+         with c. assert (mem_pts_to (a +! o) 1.0R c);\n  \
+         {un}_repr_len x c;\n  \
+         mem_uncarve a o {n}sz #c;\n}}\n\n\
+         (* The same, where the island is an object of its own: a field reached\n   \
+         through a pointer to the struct rather than through the overlay. *)\n\
+         fn {isl}_read (a: ptr) (#p: perm) (#u: erased {isl})\n\
+         \x20 preserves {isl}_pts_to a p u\n\
+         \x20 requires pure ({isl}_readable u)\n\
+         \x20 returns  x : {un}\n\
+         \x20 ensures  pure ({k}? x /\\ {un}_repr x u)\n\
+         {{\n  \
+         unfold {isl}_pts_to a p u;\n  \
+         mem_share a;\n  \
+         let w = ov_pick (fun (v: {t0}) -> {un}_repr ({k} v) u);\n  \
+         {un}_conceal a #(p /. 2.0R) #(reveal u) #({k} (reveal w));\n  \
+         let x = {un}_{m0}_read a;\n  \
+         {un}_reveal a;\n  \
+         mem_gather a #(p /. 2.0R) #(p /. 2.0R) #(reveal u);\n  \
+         rewrite (mem_pts_to a (p /. 2.0R +. p /. 2.0R) u) as (mem_pts_to a p u);\n  \
+         fold {isl}_pts_to a p u;\n  \
+         x\n}}\n\n\
+         fn {isl}_write (a: ptr) (x: {un}) (#u: erased {isl})\n\
+         \x20 requires {isl}_pts_to a 1.0R u\n\
+         \x20 ensures  exists* (c: {isl}). {isl}_pts_to a 1.0R c ** pure ({un}_repr x c)\n\
+         {{\n  \
+         unfold {isl}_pts_to a 1.0R u;\n  \
+         {un}_claim_uninit a #(reveal u);\n  \
+         {un}_write_uninit a x;\n  \
+         {un}_reveal a;\n  \
+         with c. assert (mem_pts_to a 1.0R c);\n  \
+         {un}_repr_len x c;\n  \
+         let c' : erased {isl} = hide #{isl} c;\n  \
+         rewrite (mem_pts_to a 1.0R c) as (mem_pts_to a 1.0R (reveal c'));\n  \
+         fold {isl}_pts_to a 1.0R (reveal c');\n}}\n\n"
+    )
+}
+
+/// An `_overlay` union: every member has to be a struct with an overlay view
+/// or another overlay union.
+fn collect_overlay_union(
+    tds: &mut Typedefs,
+    ud: &crate::ir::UnionDefn,
+    size: u64,
+    align: u64,
+) -> Chunk {
+    let name = ud.name.val.to_string();
+    let skip = |why: String| Chunk {
+        module: format!("Union_{}", name),
+        code: format!("(* skipped union {}: {} *)\n\n", name, why),
+        origin: None,
+    };
+    let mut members = Vec::new();
+    let mut ints: BTreeSet<String> = BTreeSet::new();
+    let mut islands: BTreeSet<String> = BTreeSet::new();
+    for f in &ud.fields {
+        let mname = f.val.name().val.to_string();
+        let mty = f.val.logical_type(&f.loc);
+        let pn = palow_name(tds, &mty);
+        // An array of integers is a member too -- the bytes under a name --
+        // but one that is only read and written element by element, at a
+        // constant subscript, through the union's scalar accessors.
+        if let Some((et, len)) = flat_array(tds, &mty) {
+            let epn = palow_name(tds, et).filter(|p| ov_array_leaf(p));
+            let esize = epn.as_deref().and_then(|p| ov_leaf(tds, p)).map(|l| l.size);
+            let (Some(epn), Some(esize)) = (epn, esize) else {
+                return skip(format!(
+                    "`_overlay` member `{}` is an array of {}; an array member of an overlay \
+                     union has to be of fixed-width integers",
+                    mname,
+                    describe(tds.resolve(et))
+                ));
+            };
+            if esize * len > size {
+                return skip(format!("member `{}` is larger than the union", mname));
+            }
+            ints.insert(epn.clone());
+            members.push(UnionMember {
+                name: mname,
+                ty: mty,
+                shape: FieldShape::Array {
+                    pn: epn,
+                    esize,
+                    len,
+                },
+                size: esize * len,
+            });
+            continue;
+        }
+        let msize = match &peel(tds, &mty).val {
+            TypeT::TypeRef(TypeRefKind::Struct(n))
+                if tds.structs.get(&*n.val).is_some_and(|x| x.view) =>
+            {
+                tds.structs[&*n.val].size
+            }
+            TypeT::TypeRef(TypeRefKind::Union(n))
+                if tds.unions.get(&*n.val).is_some_and(|x| x.overlay) =>
+            {
+                tds.unions[&*n.val].size
+            }
+            _ if pn
+                .as_deref()
+                .and_then(|p| ov_leaf(tds, p))
+                .is_some_and(|l| field_type(tds, &mty).as_deref() == Some(l.fty)) =>
+            {
+                let p = pn.as_deref().unwrap();
+                ints.insert(p.to_string());
+                ov_leaf(tds, p).unwrap().size
+            }
+            _ => {
+                return skip(format!(
+                    "`_overlay` member `{}` is {}; a member of an overlay union has to be a \
+                     scalar, an array of integers, a struct of such fields, or another overlay \
+                     union",
+                    mname,
+                    describe(tds.resolve(&mty))
+                ));
+            }
+        };
+        if msize > size {
+            return skip(format!("member `{}` is larger than the union", mname));
+        }
+        let Some(pn) = pn else {
+            return skip(format!("member `{}` has no Palow type", mname));
+        };
+        view_ints(tds, &mty, &mut ints);
+        view_islands(tds, &mty, &mut islands);
+        members.push(UnionMember {
+            name: mname,
+            ty: mty,
+            shape: FieldShape::One { pn },
+            size: msize,
+        });
+    }
+    if members.is_empty() {
+        return skip("it has no members".to_string());
+    }
+    // A scalar is accessed at an offset its own alignment divides, in an
+    // object the union's alignment places: both are needed for the access to
+    // be aligned, so a type wider than the union's alignment gets none.
+    let ints = ints
+        .into_iter()
+        .filter(|t| ov_leaf(tds, t).is_some_and(|l| align % l.size == 0))
+        .collect();
+    let islands = islands
+        .into_iter()
+        .filter(|u| island_member(tds, u).is_some() && align % tds.unions[u.as_str()].align == 0)
+        .collect();
+    let own = match overlay_union_own(tds, ud, &members) {
+        Ok(o) => o,
+        Err(why) => return skip(why),
+    };
+    tds.unions.insert(
+        name.clone(),
+        UnionInfo {
+            members,
+            size,
+            align,
+            overlay: true,
+            ints,
+            islands,
+            own,
+        },
+    );
+    Chunk {
+        module: format!("Union_{}", name),
+        code: emit_overlay_union(tds, &name) + &emit_overlay_own(tds, &name),
+        origin: None,
+    }
+}
+
+/// The deep ownership of an overlay union with an `_owning` member `m` of
+/// struct type `S`: `S`'s own, at `_get_m u`, with the owned pointers' bytes
+/// readable as pointers. Keyed on the union's value like a struct's, with a
+/// `_follow` that moves it to a new value that has the same bytes where `S`'s
+/// ownership reads -- so a store through any member that misses those bytes
+/// keeps it, and one that hits them does not.
+fn emit_overlay_own(tds: &Typedefs, name: &str) -> String {
+    let Some(o) = &tds.unions[name].own else {
+        return String::new();
+    };
+    let un = format!("union_{}", name);
+    let sn = format!("struct_{}", o.sn);
+    let arm = &o.arm;
+    let conj = |v: Vec<String>| match v.is_empty() {
+        true => "True".to_string(),
+        false => v.join(" /\\ "),
+    };
+    let ok = conj(
+        o.ptrs
+            .iter()
+            .map(|(a, _)| format!("ptr_view_ok (slice u {} {})", a, a + tds.ptr_bytes))
+            .collect(),
+    );
+    let same = conj(
+        o.reads
+            .iter()
+            .map(|(a, b)| format!("slice u {a} {b} == slice y {a} {b}"))
+            .collect(),
+    );
+    let owned: Vec<&str> = tds.structs[&o.sn]
+        .fields
+        .iter()
+        .filter(|f| {
+            tds.structs[&o.sn]
+                .own
+                .iter()
+                .any(|i| i.at.contains(&format!("(x).fld_{})", f.name)))
+        })
+        .map(|f| &*f.name)
+        .collect();
+    let rw: String = owned
+        .iter()
+        .map(|f| {
+            format!("  rewrite each ({un}_get_{arm} u).fld_{f} as ({un}_get_{arm} y).fld_{f};\n")
+        })
+        .collect();
+    let same_view = conj(
+        owned
+            .iter()
+            .map(|f| format!("({un}_get_{arm} u).fld_{f} == ({un}_get_{arm} y).fld_{f}"))
+            .collect(),
+    );
+    // A load of an owned pointer that comes back as the term the ownership
+    // is at, so that what it points to is found by it.
+    let readers: String = o
+        .ptrs
+        .iter()
+        .map(|(a, at)| {
+            let key = at.replace("(x)", &format!("({un}_get_{arm} u)"));
+            format!(
+                "fn {un}_own_at_{a}_read (r: ptr) (#p: perm) (#u: erased {un})\n\
+                 \x20 preserves {un}_pts_to r p u\n\
+                 \x20 requires pure ({un}_own_ok u)\n\
+                 \x20 returns  y : ptr\n\
+                 \x20 ensures  rewrites_to y {key}\n\
+                 {{\n  let y = {un}_ptr_read r {a}sz;\n  y\n}}\n\n"
+            )
+        })
+        .collect();
+    format!(
+        "(* The deep ownership member `{arm}` is `_owning` for: what its pointers\n   \
+         reach, while the bytes they are in still hold them. *)\n\
+         let {un}_own_spec : Type = {sn}_own_spec\n\n\
+         let {un}_own_ok (u: {un}) : prop = {ok}\n\n\
+         let {un}_own ([@@@mkey] u: {un}) (p: perm) (s: {un}_own_spec) : slprop =\n  \
+         pure ({un}_own_ok u) ** {sn}_own ({un}_get_{arm} u) p s\n\n\
+         ghost fn {un}_own_scatter (u: {un}) (#p: perm) (#s: {un}_own_spec)\n\
+         \x20 requires {un}_own u p s\n\
+         \x20 ensures  {sn}_own ({un}_get_{arm} u) p s ** pure ({un}_own_ok u)\n\
+         {{\n  unfold {un}_own u p s;\n}}\n\n\
+         ghost fn {un}_own_gather (u: {un}) (#p: perm) (#s: {un}_own_spec)\n\
+         \x20 requires {sn}_own ({un}_get_{arm} u) p s ** pure ({un}_own_ok u)\n\
+         \x20 ensures  {un}_own u p s\n\
+         {{\n  fold {un}_own u p s;\n}}\n\n\
+         (* The bytes the ownership is keyed on. *)\n\
+         let {un}_own_same (u y: {un}) : prop = {same}\n\n\
+         ghost fn {un}_own_follow (a: ptr) (u: {un}) (#p #q: perm) (#y: {un}) (#s: {un}_own_spec)\n\
+         \x20 requires {un}_pts_to a p y ** {un}_own u q s ** pure ({un}_own_same u y)\n\
+         \x20 ensures  {un}_pts_to a p y ** {un}_own y q s\n\
+         {{\n  unfold {un}_own u q s;\n  \
+         unfold {sn}_own ({un}_get_{arm} u) q s;\n\
+         {rw}  fold {sn}_own ({un}_get_{arm} y) q s;\n  \
+         fold {un}_own y q s;\n}}\n\n\
+         (* The same, after a store through member `{arm}` itself: its view\n   \
+         still has the owned pointers, so the bytes they are in still hold them. *)\n\
+         ghost fn {un}_own_follow_view (a: ptr) (u: {un}) (#p #q: perm) (#y: {un}) (#s: {un}_own_spec)\n\
+         \x20 requires {un}_pts_to a p y ** {un}_own u q s ** pure ({un}_is_{arm} y /\\ {same_view})\n\
+         \x20 ensures  {un}_pts_to a p y ** {un}_own y q s\n\
+         {{\n  unfold {un}_own u q s;\n  \
+         unfold {sn}_own ({un}_get_{arm} u) q s;\n\
+         {rw}  fold {sn}_own ({un}_get_{arm} y) q s;\n  \
+         fold {un}_own y q s;\n}}\n\n"
+    ) + &readers
+}
+
+/// The ownership an overlay union carries through its `_owning` member, if
+/// it has one.
+///
+/// An overlay union has no tag, so nothing in the bytes says which member's
+/// pointers are live; the annotation is the author saying that this one's
+/// are, whatever else the bytes are also read as. One member at most: two
+/// would be two claims on whatever both their pointers' bytes reach.
+fn overlay_union_own(
+    tds: &Typedefs,
+    ud: &crate::ir::UnionDefn,
+    members: &[UnionMember],
+) -> Result<Option<UnionOwn>, String> {
+    let mut owning = ud.owning.iter().map(|i| i.val.to_string());
+    let Some(arm) = owning.next() else {
+        return Ok(None);
+    };
+    if owning.next().is_some() {
+        return Err("more than one member is `_owning`".to_string());
+    }
+    let Some(m) = members.iter().find(|m| m.name == arm) else {
+        return Err(format!("`_owning` member `{}` is not a member", arm));
+    };
+    let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, &m.ty).val else {
+        return Err(format!(
+            "`_owning` member `{}` is not a struct; only a struct's pointer fields own",
+            arm
+        ));
+    };
+    let sn = n.val.to_string();
+    let si = &tds.structs[&sn];
+    if si.own.is_empty() {
+        return Err(format!(
+            "`_owning` member `{}` is a struct `{}` that owns nothing",
+            arm, sn
+        ));
+    }
+    let reads = si
+        .fields
+        .iter()
+        .filter(|f| {
+            si.own
+                .iter()
+                .any(|i| i.at.contains(&format!("(x).fld_{})", f.name)))
+        })
+        .map(|f| (f.offset, f.offset + f.size))
+        .collect();
+    let mut ptrs = Vec::new();
+    owned_ptr_offsets(tds, &sn, 0, "x", &mut ptrs);
+    Ok(Some(UnionOwn {
+        arm,
+        sn,
+        reads,
+        ptrs,
+    }))
+}
+
+/// The pointer fields a struct's ownership is directly at, through the
+/// structs it embeds: their offsets from `base`, and their terms with `x`
+/// standing for `outer`.
+fn owned_ptr_offsets(
+    tds: &Typedefs,
+    sn: &str,
+    base: u64,
+    outer: &str,
+    out: &mut Vec<(u64, String)>,
+) {
+    let si = &tds.structs[sn];
+    for f in &si.fields {
+        let at = format!("((x).fld_{})", f.name);
+        let here = format!("(({}).fld_{})", outer, f.name);
+        for i in si.own.iter().filter(|i| i.at == at) {
+            if !i.embedded {
+                out.push((base + f.offset, here.clone()));
+            } else if let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(tds, &f.ty).val {
+                owned_ptr_offsets(tds, &n.val, base + f.offset, &here, out);
+            }
+        }
+    }
+}
+
+/// The generated code for an `_overlay` union.
+///
+/// The value is the union's bytes, so `_pts_to` is the points-to of those
+/// bytes and nothing is chosen. Per member `m`:
+///
+/// - `_is_m u` / `_get_m u`: whether the member's bytes are readable at its
+///   type, and what they read as. A nested overlay union is always readable:
+///   it is bytes too.
+/// - `_focus_m` / `_unfocus_m`: lend the member as its own type, keeping the
+///   bytes past it exactly (`_rest_m`), and take it back. Coming back, only
+///   the member's own range has changed: `overlay u 0 c 0`.
+/// - `_focus_read_m` / `_unfocus_read_m`, for a struct member or a nested
+///   overlay union: the same lend for a read, which gives the union back with
+///   exactly the bytes it had.
+/// - `_switch_m`: the member's storage, for a callee to fill.
+/// - `_as_m` / `_of_m` (`pulse_intro`), when `m` is an overlay union of the
+///   same size and alignment: the conversions a pointer cast between the two
+///   needs, which the prover applies where it has to.
+///
+/// And per integer type `t` among the leaves, `_t_read` / `_t_write` at a
+/// byte offset, which is how the body reads and writes a scalar field
+/// through any path of members: the write changes those bytes and no others.
+fn emit_overlay_union(tds: &Typedefs, name: &str) -> String {
+    let ui = &tds.unions[name];
+    let un = format!("union_{}", name);
+    let n_all = ui.size;
+    let mut c = String::new();
+    c += "open Pulse.Lib.C.Palow.Pun\nopen Pulse.Lib.C.Palow.Overlay\n\n";
+    c += &format!(
+        "(* An overlay union (`_overlay`): one object that every member is a view\n   \
+         of. Its value is its bytes; see `Pulse.Lib.C.Palow.Overlay`. *)\n\
+         type {un} = b: bytes {{ len b == {n_all} }}\n\n"
+    );
+    c += &format!("let {}_sizeof : SizeT.t = {}sz\n", un, ui.size);
+    c += &format!("let {}_alignof : SizeT.t = {}sz\n\n", un, ui.align);
+    c += &format!(
+        "let {un}_ctype : ET.ctype = ET.TUnion \"{un}\" {size} [{ms}]\n\n",
+        size = ui.size,
+        ms = ui
+            .members
+            .iter()
+            .filter_map(|m| Some(format!("(0, {})", ctype_of_shape(&m.shape)?)))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    {
+        let mut cs: Vec<String> = Vec::new();
+        let mut ps: Vec<String> = Vec::new();
+        for m in ui
+            .members
+            .iter()
+            .filter(|m| matches!(m.shape, FieldShape::One { .. }))
+        {
+            let pn = m.shape.pn();
+            if let Some(al) = m.shape.aligned_at("a") {
+                cs.push(al);
+                ps.push(format!("aligned_divides a {un}_alignof {pn}_alignof"));
+            }
+        }
+        if cs.is_empty() {
+            cs.push("True".to_string());
+            ps.push("()".to_string());
+        }
+        c += &format!(
+            "let {un}_member_aligned (a: ptr)\n  \
+             : Lemma (requires aligned a {un}_alignof)\n          \
+             (ensures  {conj})\n  = {proof}\n\n",
+            conj = cs.join("\n                    /\\ "),
+            proof = ps.join(";\n    ")
+        );
+    }
+    c += &format!(
+        "let {un}_repr (u: {un}) (b: bytes) : prop = b == u\n\n\
+         let {un}_repr_len (u: {un}) (b: bytes)\n  \
+         : Lemma (requires {un}_repr u b) (ensures len b == SizeT.v {un}_sizeof)\n  = ()\n\n\
+         let {un}_pts_to ([@@@mkey] a: ptr) (p: perm) (u: {un}) : slprop =\n  \
+         mem_pts_to a p u ** pure (aligned a {un}_alignof)\n\n\
+         let {un}_pts_to_uninit ([@@@mkey] a: ptr) : slprop =\n  \
+         exists* b. mem_pts_to a 1.0R b\n             \
+         ** pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof)\n\n\
+         ghost fn {un}_pts_to_not_null (a: ptr) (#p: perm) (#u: {un})\n  \
+         preserves {un}_pts_to a p u\n  \
+         ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
+         {{\n  unfold {un}_pts_to a p u;\n  mem_pts_to_not_null a;\n  fold {un}_pts_to a p u;\n}}\n\n"
+    );
+    // An array member has no functions of its own: its elements are read and
+    // written by the scalar accessors below, at constant subscripts.
+    for m in ui
+        .members
+        .iter()
+        .filter(|m| matches!(m.shape, FieldShape::One { .. }))
+    {
+        let f = &m.name;
+        let tp = m.shape.pn();
+        let sz = m.size;
+        let leaf = ov_leaf(tds, tp);
+        let is_union = matches!(&peel(tds, &m.ty).val, TypeT::TypeRef(TypeRefKind::Union(_)));
+        // A struct member or a scalar one is read through its view; a nested
+        // overlay union is bytes, like this one, and always readable.
+        let is_struct = !is_union;
+        let (is_def, get_def) = match (&leaf, is_union) {
+            (Some(l), _) => (
+                format!("{} (slice u 0 {sz})", l.ok),
+                format!("{tp}_of_bytes (slice u 0 {sz})"),
+            ),
+            (None, false) => (
+                format!("{tp}_view_ok (slice u 0 {sz})"),
+                format!("{tp}_view (slice u 0 {sz})"),
+            ),
+            (None, true) => ("True".to_string(), format!("slice u 0 {sz}")),
+        };
+        // The getter's type: a leaf's F* type, not its C name.
+        let gty = leaf.as_ref().map_or(tp, |l| l.fty);
+        c += &format!(
+            "(* Member `{f}`: readable when its bytes are, and then what they read as. *)\n\
+             let {un}_is_{f} (u: {un}) : prop = {is_def}\n\
+             let {un}_get_{f} (u: {un}) : GTot {gty} = {get_def}\n\
+             let {un}_active_{f} (u: {un}) : GTot (b: bool {{ b = true <==> {un}_is_{f} u }}) =\n  \
+             FStar.IndefiniteDescription.strong_excluded_middle ({un}_is_{f} u)\n\n\
+             (* Everything but member `{f}`, exactly: what a focus on it leaves behind. *)\n\
+             let {un}_rest_{f} (a: ptr) (p: perm) (u: {un}) : slprop =\n  \
+             mem_pts_to (a +! {sz}sz) p (slice u {sz} {n_all}) ** pure (aligned a {un}_alignof)\n\n\
+             ghost fn {un}_focus_{f} (a: ptr) (#p: perm) (#u: {un})\n\
+             \x20 requires {un}_pts_to a p u\n\
+             \x20 requires pure ({un}_is_{f} u)\n\
+             \x20 ensures  {tp}_pts_to a p ({un}_get_{f} u)\n\
+             \x20 ensures  {un}_rest_{f} a p u\n\
+             {{\n  \
+             unfold {un}_pts_to a p u;\n  \
+             {un}_member_aligned a;\n  \
+             mem_split a {sz}sz;\n"
+        );
+        if is_struct {
+            c += &format!("  {tp}_view_repr (slice u 0 {sz});\n");
+        }
+        c += &format!(
+            "  {tp}_conceal a #p #(slice u 0 {sz}) #({un}_get_{f} u);\n  \
+             fold {un}_rest_{f} a p u;\n}}\n\n"
+        );
+        if is_struct && leaf.is_none() {
+            c += &format!(
+                "(* A read-only lend of member `{f}`: the view gets half the permission and\n   \
+                 the other half keeps the member's bytes, so when the view comes back\n   \
+                 they are known to be exactly the ones lent, padding included. *)\n\
+                 let {un}_rest_read_{f} (a: ptr) (p: perm) (u: {un}) : slprop =\n  \
+                 mem_pts_to a (p /. 2.0R) (slice u 0 {sz}) ** {un}_rest_{f} a p u\n\n\
+                 ghost fn {un}_focus_read_{f} (a: ptr) (#p: perm) (#u: {un})\n\
+                 \x20 requires {un}_pts_to a p u\n\
+                 \x20 requires pure ({un}_is_{f} u)\n\
+                 \x20 ensures  {tp}_pts_to a (p /. 2.0R) ({un}_get_{f} u)\n\
+                 \x20 ensures  {un}_rest_read_{f} a p u\n\
+                 {{\n  \
+                 unfold {un}_pts_to a p u;\n  \
+                 {un}_member_aligned a;\n  \
+                 mem_split a {sz}sz;\n  \
+                 mem_share a #p #(slice u 0 {sz});\n  \
+                 {tp}_view_repr (slice u 0 {sz});\n  \
+                 {tp}_conceal a #(p /. 2.0R) #(slice u 0 {sz}) #({un}_get_{f} u);\n  \
+                 fold {un}_rest_{f} a p u;\n  \
+                 fold {un}_rest_read_{f} a p u;\n}}\n\n\
+                 ghost fn {un}_unfocus_read_{f} (a: ptr) (#p: perm) (#u: {un})\n\
+                 \x20 requires {tp}_pts_to a (p /. 2.0R) ({un}_get_{f} u)\n\
+                 \x20 requires {un}_rest_read_{f} a p u\n\
+                 \x20 ensures  {un}_pts_to a p u\n\
+                 {{\n  \
+                 {tp}_reveal a #(p /. 2.0R) #({un}_get_{f} u);\n  \
+                 with c. assert (mem_pts_to a (p /. 2.0R) c ** pure ({tp}_repr ({un}_get_{f} u) c));\n  \
+                 unfold {un}_rest_read_{f} a p u;\n  \
+                 {tp}_repr_len ({un}_get_{f} u) c;\n  \
+                 mem_gather a #(p /. 2.0R) #(p /. 2.0R) #(slice u 0 {sz}) #c;\n  \
+                 rewrite (mem_pts_to a (p /. 2.0R +. p /. 2.0R) (slice u 0 {sz}))\n    \
+                 as (mem_pts_to a p (slice u 0 {sz}));\n  \
+                 unfold {un}_rest_{f} a p u;\n  \
+                 mem_join a #p #(slice u 0 {sz}) #(slice u {sz} {n_all}) {sz}sz;\n  \
+                 slice_append u {sz};\n  \
+                 rewrite (mem_pts_to a p (append (slice u 0 {sz}) (slice u {sz} (len u))))\n    \
+                 as (mem_pts_to a p u);\n  \
+                 fold {un}_pts_to a p u;\n}}\n\n"
+            );
+        }
+        if is_struct {
+            c += &format!(
+                "ghost fn {un}_unfocus_{f} (a: ptr) (#p: perm) (#u: {un}) (#v: {gty})\n\
+                 \x20 requires {tp}_pts_to a p v\n\
+                 \x20 requires {un}_rest_{f} a p u\n\
+                 \x20 ensures  exists* (c: bytes).\n\
+                 \x20            {un}_pts_to a p (overlay u 0 c 0) **\n\
+                 \x20            pure (len c == {sz} /\\ {un}_is_{f} (overlay u 0 c 0) /\\\n\
+                 \x20                  {un}_get_{f} (overlay u 0 c 0) == v)\n\
+                 {{\n  \
+                 {tp}_reveal a #p #v;\n  \
+                 with c. assert (mem_pts_to a p c ** pure ({tp}_repr v c));\n  \
+                 {tp}_repr_len v c;\n  \
+                 {tp}_repr_view v c;\n"
+            );
+        } else {
+            c += &format!(
+                "ghost fn {un}_unfocus_{f} (a: ptr) (#p: perm) (#u: {un}) (#v: {gty})\n\
+                 \x20 requires {tp}_pts_to a p v\n\
+                 \x20 requires {un}_rest_{f} a p u\n\
+                 \x20 ensures  {un}_pts_to a p (overlay u 0 v 0)\n\
+                 {{\n  \
+                 {tp}_reveal a #p #v;\n  \
+                 with c. assert (mem_pts_to a p c ** pure ({tp}_repr v c));\n"
+            );
+        }
+        let c_or_v = if is_struct { "c" } else { "v" };
+        c += &format!(
+            "  unfold {un}_rest_{f} a p u;\n  \
+             mem_join a #p #c #(slice u {sz} {n_all}) {sz}sz;\n  \
+             append_overlay u {c_or_v};\n  \
+             rewrite (mem_pts_to a p (append c (slice u {sz} {n_all})))\n    \
+             as (mem_pts_to a p (overlay u 0 {c_or_v} 0));\n  \
+             fold {un}_pts_to a p (overlay u 0 {c_or_v} 0);\n}}\n\n\
+             ghost fn {un}_switch_{f} (a: ptr) (#u: {un})\n\
+             \x20 requires {un}_pts_to a 1.0R u\n\
+             \x20 ensures  {tp}_pts_to_uninit a\n\
+             \x20 ensures  {un}_rest_{f} a 1.0R u\n\
+             {{\n  \
+             unfold {un}_pts_to a 1.0R u;\n  \
+             {un}_member_aligned a;\n  \
+             mem_split a {sz}sz;\n  \
+             {tp}_claim_uninit a #(slice u 0 {sz});\n  \
+             fold {un}_rest_{f} a 1.0R u;\n}}\n\n"
+        );
+        if is_union {
+            // A nested overlay union's value is its bytes, so the lend gives
+            // them back as they were: the union is exactly what it was.
+            c += &format!(
+                "ghost fn {un}_focus_read_{f} (a: ptr) (#p: perm) (#u: {un})\n\
+                 \x20 requires {un}_pts_to a p u\n\
+                 \x20 ensures  {tp}_pts_to a p ({un}_get_{f} u)\n\
+                 \x20 ensures  {un}_rest_{f} a p u\n\
+                 {{\n  {un}_focus_{f} a;\n}}\n\n\
+                 ghost fn {un}_unfocus_read_{f} (a: ptr) (#p: perm) (#u: {un})\n\
+                 \x20 requires {tp}_pts_to a p ({un}_get_{f} u)\n\
+                 \x20 requires {un}_rest_{f} a p u\n\
+                 \x20 ensures  {un}_pts_to a p u\n\
+                 {{\n  \
+                 {un}_unfocus_{f} a;\n  \
+                 overlay_self u 0 {sz};\n  \
+                 rewrite ({un}_pts_to a p (overlay u 0 ({un}_get_{f} u) 0)) as ({un}_pts_to a p u);\n}}\n\n"
+            );
+        }
+    }
+    // A member that is itself an overlay union of the same size and alignment
+    // is the whole object under another name: the two points-to are the same
+    // bytes, so a pointer cast between them -- `(BASE*)derived`, or a
+    // containing-record cast back -- changes no value. The prover applies
+    // these conversions itself wherever one view is held and the other is
+    // asked for, however the pointer got there.
+    for m in &ui.members {
+        let TypeT::TypeRef(TypeRefKind::Union(inner)) = &peel(tds, &m.ty).val else {
+            continue;
+        };
+        let Some(ii) = tds.unions.get(&*inner.val) else {
+            continue;
+        };
+        if !matches!(m.shape, FieldShape::One { .. })
+            || !ii.overlay
+            || m.size != n_all
+            || ii.size != n_all
+            || ii.align != ui.align
+        {
+            continue;
+        }
+        let (f, tp) = (&m.name, m.shape.pn());
+        c += &format!(
+            "(* Member `{f}` is the whole object as another overlay union: the same\n   \
+             bytes, so either view is the other. *)\n\
+             [@@pulse_intro]\n\
+             ghost fn {un}_as_{f} (a: ptr) (#p: perm) (#u: {un})\n\
+             \x20 requires {un}_pts_to a p u\n\
+             \x20 ensures  {tp}_pts_to a p u\n\
+             {{\n  \
+             unfold {un}_pts_to a p u;\n  \
+             fold {tp}_pts_to a p u;\n}}\n\n\
+             [@@pulse_intro]\n\
+             ghost fn {un}_of_{f} (a: ptr) (#p: perm) (#u: {tp})\n\
+             \x20 requires {tp}_pts_to a p u\n\
+             \x20 ensures  {un}_pts_to a p u\n\
+             {{\n  \
+             unfold {tp}_pts_to a p u;\n  \
+             fold {un}_pts_to a p u;\n}}\n\n"
+        );
+    }
+    for t in &ui.ints {
+        let OvLeaf {
+            size: n,
+            fty: mt,
+            ok,
+        } = ov_leaf(tds, t).unwrap();
+        c += &format!(
+            "(* A {t} at byte `o`, through whichever members name it. *)\n\
+             fn {un}_{t}_read (a: ptr) (o: SizeT.t) (#p: perm) (#u: erased {un})\n\
+             \x20 preserves {un}_pts_to a p u\n\
+             \x20 requires pure (SizeT.v o + {n} <= {n_all} /\\ SizeT.v o % {n} == 0 /\\\n\
+             \x20                {ok} (slice u (SizeT.v o) (SizeT.v o + {n})))\n\
+             \x20 returns  x : {mt}\n\
+             \x20 ensures  pure (SizeT.v o + {n} <= {n_all} /\\\n\
+             \x20                x == {t}_of_bytes (slice u (SizeT.v o) (SizeT.v o + {n})))\n\
+             {{\n  \
+             unfold {un}_pts_to a p u;\n  \
+             SizeT.fits_at_least_16 (SizeT.v o + {n});\n  \
+             let x = ov_{t}_read a {un}_alignof o;\n  \
+             fold {un}_pts_to a p u;\n  \
+             x\n}}\n\n\
+             fn {un}_{t}_write (a: ptr) (o: SizeT.t) (x: {mt}) (#u: erased {un})\n\
+             \x20 requires {un}_pts_to a 1.0R u\n\
+             \x20 requires pure (SizeT.v o + {n} <= {n_all} /\\ SizeT.v o % {n} == 0)\n\
+             \x20 ensures  {un}_pts_to a 1.0R (overlay u 0 ({t}_bytes x) (SizeT.v o))\n\
+             {{\n  \
+             unfold {un}_pts_to a 1.0R u;\n  \
+             SizeT.fits_at_least_16 (SizeT.v o + {n});\n  \
+             ov_{t}_write a {un}_alignof o x;\n  \
+             fold {un}_pts_to a 1.0R (overlay u 0 ({t}_bytes x) (SizeT.v o));\n}}\n\n"
+        );
+    }
+    for i in &ui.islands {
+        let il = &tds.unions[i.as_str()];
+        let (n, al) = (il.size, il.align);
+        let tun = format!("union_{}", i);
+        let isl = format!("union_{}", island_name(i));
+        let (m0, _) = island_member(tds, i).unwrap();
+        let k = format!("Union_{}.Union_{}_{}", i, i, m0);
+        let sl = format!("(slice u (SizeT.v o) (SizeT.v o + {n}))");
+        c += &format!(
+            "(* A whole `{i}` at byte `o`, an island in the bytes. *)\n\
+             fn {un}_{isl}_read (a: ptr) (o: SizeT.t) (#p: perm) (#u: erased {un})\n\
+             \x20 preserves {un}_pts_to a p u\n\
+             \x20 requires pure (SizeT.v o + {n} <= {n_all} /\\ SizeT.v o % {al} == 0 /\\\n\
+             \x20                {isl}_readable {sl})\n\
+             \x20 returns  x : {tun}\n\
+             \x20 ensures  pure (SizeT.v o + {n} <= {n_all} /\\ {k}? x /\\ {tun}_repr x {sl})\n\
+             {{\n  \
+             unfold {un}_pts_to a p u;\n  \
+             SizeT.fits_at_least_16 (SizeT.v o + {n});\n  \
+             let x = {isl}_load a {un}_alignof o;\n  \
+             fold {un}_pts_to a p u;\n  \
+             x\n}}\n\n\
+             fn {un}_{isl}_write (a: ptr) (o: SizeT.t) (x: {tun}) (#u: erased {un})\n\
+             \x20 requires {un}_pts_to a 1.0R u\n\
+             \x20 requires pure (SizeT.v o + {n} <= {n_all} /\\ SizeT.v o % {al} == 0)\n\
+             \x20 ensures  exists* (c: bytes). {un}_pts_to a 1.0R (overlay u 0 c (SizeT.v o))\n\
+             \x20            ** pure (len c == {n} /\\ {tun}_repr x c)\n\
+             {{\n  \
+             unfold {un}_pts_to a 1.0R u;\n  \
+             SizeT.fits_at_least_16 (SizeT.v o + {n});\n  \
+             {isl}_store a {un}_alignof o x;\n  \
+             with c. assert (mem_pts_to a 1.0R (overlay u 0 c (SizeT.v o)));\n  \
+             fold {un}_pts_to a 1.0R (overlay u 0 c (SizeT.v o));\n}}\n\n"
+        );
+    }
+    // The storage layer every type publishes, so that an overlay union can be
+    // a local, an array element or a struct field like any other.
+    c += &format!(
+        "ghost fn {un}_claim_uninit (a: ptr) (#b: bytes)\n\
+         \x20 requires mem_pts_to a 1.0R b\n\
+         \x20 requires pure (len b == SizeT.v {un}_sizeof /\\ aligned a {un}_alignof)\n\
+         \x20 ensures  {un}_pts_to_uninit a\n\
+         {{\n  fold {un}_pts_to_uninit a;\n}}\n\n\
+         ghost fn {un}_reveal_uninit (a: ptr)\n\
+         \x20 requires {un}_pts_to_uninit a\n\
+         \x20 ensures  exists* b. mem_pts_to a 1.0R b ** pure (len b == SizeT.v {un}_sizeof)\n\
+         {{\n  unfold {un}_pts_to_uninit a;\n}}\n\n\
+         ghost fn {un}_conceal (a: ptr) (#p: perm) (#b: bytes) (#u: {un})\n\
+         \x20 requires mem_pts_to a p b\n\
+         \x20 requires pure ({un}_repr u b /\\ aligned a {un}_alignof)\n\
+         \x20 ensures  {un}_pts_to a p u\n\
+         {{\n  \
+         rewrite (mem_pts_to a p b) as (mem_pts_to a p u);\n  \
+         fold {un}_pts_to a p u;\n}}\n\n\
+         ghost fn {un}_reveal (a: ptr) (#p: perm) (#u: {un})\n\
+         \x20 requires {un}_pts_to a p u\n\
+         \x20 ensures  exists* b. mem_pts_to a p b ** pure ({un}_repr u b)\n\
+         {{\n  unfold {un}_pts_to a p u;\n}}\n\n\
+         (* Any bytes are a value of an overlay union, so storage owned outright\n   \
+         already is one: there is nothing to initialise and nothing to forget. *)\n\
+         ghost fn {un}_of_uninit (a: ptr)\n\
+         \x20 requires {un}_pts_to_uninit a\n\
+         \x20 ensures  exists* (u: {un}). {un}_pts_to a 1.0R u\n\
+         {{\n  \
+         unfold {un}_pts_to_uninit a;\n  \
+         with b. assert (mem_pts_to a 1.0R b);\n  \
+         let u : erased {un} = hide #{un} b;\n  \
+         rewrite (mem_pts_to a 1.0R b) as (mem_pts_to a 1.0R (reveal u));\n  \
+         fold {un}_pts_to a 1.0R (reveal u);\n}}\n\n\
+         ghost fn {un}_forget (a: ptr) (#u: {un})\n\
+         \x20 requires {un}_pts_to a 1.0R u\n\
+         \x20 ensures  {un}_pts_to_uninit a\n\
+         {{\n  unfold {un}_pts_to a 1.0R u;\n  fold {un}_pts_to_uninit a;\n}}\n\n\
+         fn {un}_stack_alloc ()\n\
+         \x20 requires emp\n\
+         \x20 returns  a: ptr\n\
+         \x20 ensures  {un}_pts_to_uninit a ** pure (not (is_null a))\n\
+         {{\n  let a = mem_stack_alloc {un}_sizeof {un}_alignof;\n  \
+         fold {un}_pts_to_uninit a;\n  a\n}}\n\n\
+         fn {un}_stack_free (a: ptr)\n\
+         \x20 requires {un}_pts_to_uninit a\n\
+         \x20 ensures  emp\n\
+         {{\n  unfold {un}_pts_to_uninit a;\n  mem_stack_free a;\n}}\n\n"
+    );
+    c
 }
 
 /// The generated code for one union: the tagged value type, its layout
@@ -7395,6 +11091,11 @@ fn emit_union(tds: &Typedefs, name: &str) -> String {
          {{\n  unfold {un}_pts_to_uninit a;\n  mem_stack_free a;\n}}\n\n",
         un = un
     );
+    // A union with an overlay union in a member is written member by member,
+    // like a struct with one; see `holds_overlay`.
+    if ui.members.iter().any(|m| holds_overlay(tds, &m.ty)) {
+        return c;
+    }
     // Storing a whole union value is the one operation that has to know which
     // member is live, and the value is where that is written down. The match
     // is on the *value*, not on memory, so nothing here reads a tag that C
@@ -7543,7 +11244,7 @@ fn own_chain(tds: &Typedefs, at: String, name: String, ty: &Type, out: &mut Vec<
         at,
         embedded: false,
         esize: None,
-        inv: None,
+        inv: owned_target_inv(tds, ty),
     });
     if let Some(to) = owned_pointer(tds, ty) {
         let to = to.clone();
@@ -7792,6 +11493,55 @@ fn struct_inv_req(si: &StructInfo, sn: &str, v: &str) -> String {
     }
 }
 
+/// The struct an embedded field holds, by C name.
+fn embedded_struct(tds: &Typedefs, ty: &Type) -> Option<Rc<str>> {
+    let mut ty = tds.resolve(ty);
+    while let TypeT::Refine(t, _)
+    | TypeT::RefineAlways(t, _)
+    | TypeT::RefineUninit(t, _)
+    | TypeT::RefineValue(t, ..) = &ty.val
+    {
+        ty = tds.resolve(t);
+    }
+    match &ty.val {
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => Some(n.val.clone()),
+        _ => None,
+    }
+}
+
+/// The conjuncts of `struct_X__deep_refine x`: the declaration's own
+/// `_refine`, and the deep refinement of each struct embedded in it.
+fn deep_refine_parts(tds: &Typedefs, name: &str, x: &str) -> Vec<String> {
+    let Some(si) = tds.structs.get(name) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if si.elem_refine.is_some() {
+        out.push(format!("struct_{}__refine {}", name, x));
+    }
+    for f in &si.fields {
+        if !matches!(f.shape, FieldShape::One { .. }) {
+            continue;
+        }
+        if let Some(n) = embedded_struct(tds, &f.ty)
+            && tds.structs.get(&*n).is_some_and(|c| c.deep_refine)
+        {
+            out.push(format!("struct_{}__deep_refine ({}).fld_{}", n, x, f.name));
+        }
+    }
+    out
+}
+
+/// What an owned pointer to an object of this type says of the object's
+/// value `v`, beyond its points-to.
+fn owned_target_inv(tds: &Typedefs, ty: &Type) -> Option<String> {
+    let n = embedded_struct(tds, ty)?;
+    tds.structs
+        .get(&*n)
+        .filter(|si| si.deep_refine)
+        .map(|_| format!("struct_{}__deep_refine v", n))
+}
+
 fn refined_ty(ty: &str, inv: Option<&String>) -> String {
     match inv {
         Some(p) => format!("(v: {} {{ {} }})", ty, p),
@@ -8020,6 +11770,19 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
         }
         None => String::new(),
     };
+    // The declaration's own `_refine`, named so that every `_array` of the
+    // struct states the same term of its elements, in every module.
+    if let Some(p) = &si.elem_refine {
+        c += &format!("let {}__refine (x: {}) : prop =\n  {}\n\n", sn, sn, p);
+    }
+    if si.deep_refine {
+        c += &format!(
+            "let {}__deep_refine (x: {}) : prop =\n  {}\n\n",
+            sn,
+            sn,
+            deep_refine_parts(tds, name, "x").join(" /\\ ")
+        );
+    }
     let inv_at = |v: &str| struct_inv_req(si, &sn, v);
     c += &format!(
         "let {}_pts_to ([@@@mkey] a: ptr) (p: perm) (x: {}) : slprop =\n  {} **\n  {}_padding a p{}\n\n",
@@ -8307,10 +12070,17 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
                     at = at(f.offset),
                     repr = repr_of(f, &val, &v)
                 );
-                // An array's representation states its length itself; a
-                // scalar's or a struct's is a lemma.
-                if !matches!(f.shape, FieldShape::Array { .. }) {
-                    r += &format!("  {}_repr_len {} {};\n", pn, val, v);
+                // A scalar's or a struct's length is a lemma. An array's is
+                // stated by `array_reveal_o` as a product, made a literal by
+                // `array_len_lit` outside this (large) proof context.
+                match &f.shape {
+                    FieldShape::Array { esize, len, .. } => {
+                        r += &format!(
+                            "  array_len_lit (len {}) (Seq.length {}) {} {} {};\n",
+                            v, val, esize, len, f.size
+                        );
+                    }
+                    _ => r += &format!("  {}_repr_len {} {};\n", pn, val, v),
                 }
                 // Keep numeric lengths in scope before joining: recovering
                 // them through nested representations can overwhelm SMT.
@@ -8397,6 +12167,39 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         sn = sn,
         acc = accs[regions.len() - 1]
     );
+    // Both directions are congruence: a field's representation holds of its
+    // slice exactly when it holds of the bytes the slice is equal to. What a
+    // representation *says* never matters here, and an aggregate's says a
+    // great deal -- unfolded, a wide struct of nested ones is a context the
+    // solver drowns in. So the proofs do not see what they say.
+    let mut hidden: Vec<String> = Vec::new();
+    for f in &si.fields {
+        // An empty field's repr holds of no bytes by its definition, which
+        // is what the proofs use instead of a reveal.
+        if let FieldShape::One { pn } = &f.shape
+            && f.size > 0
+            && (pn.starts_with("struct_") || pn.starts_with("union_"))
+        {
+            let mut m = pn.clone();
+            m[..1].make_ascii_uppercase();
+            let h = format!(" -{}.{}_repr", m, pn);
+            if !hidden.contains(&h) {
+                hidden.push(h);
+            }
+        }
+    }
+    let (push, pop) = if hidden.is_empty() {
+        (String::new(), String::new())
+    } else {
+        (
+            format!(
+                "#push-options \"--using_facts_from '*{}'\"\n",
+                hidden.concat()
+            ),
+            "#pop-options\n\n".to_string(),
+        )
+    };
+    c += &push;
     c += &format!(
         "ghost fn {sn}_reveal (a: ptr) (#p: perm) (#x: {sn})\n\
          \x20 requires {sn}_pts_to a p x\n\
@@ -8453,6 +12256,7 @@ fn emit_struct_bytes(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> String 
         iv = struct_inv_req(si, &sn, "x"),
         w = w
     );
+    c += &pop;
 
     // The adapters that make the struct an array element. `elem_pts_to` is
     // the generic array layer's view of one slot, stated over the element's
@@ -8501,6 +12305,10 @@ fn fill_name(pn: &str, esize: u64, len: u64) -> String {
 /// that declares such a structure. The index is a real argument, and the
 /// measure is how much of the array is left.
 fn emit_fill(tds: &Typedefs, ty: &Type, pn: &str, esize: u64, len: u64) -> String {
+    // An element with overlay bytes in it has no value writer to fill with.
+    if holds_overlay(tds, ty) {
+        return String::new();
+    }
     let elem = fstar_type(tds, ty).unwrap();
     let f = fill_name(pn, esize, len);
     let at = format!("(a +! ({}sz `SizeT.mul` k))", esize);
@@ -8676,20 +12484,13 @@ fn emit_struct_flex_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> 
         f = flex.name
     );
 
-    // A pointer to an object is a pointer to its first field; see the
-    // general case.
-    if let Some(first) = si.fields.iter().find(|f| f.offset == 0)
-        && let FieldShape::One { pn } = &first.shape
-        && !matches!(
-            tds.resolve(&first.ty).val,
-            TypeT::TypeRef(..) | TypeT::FixedArray(..)
-        )
-    {
+    // An object shares its fields' provenance; see the general case.
+    if let Some((lemma, f)) = field_not_null(tds, si, false) {
         c += &format!(
-            "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n  preserves {sn}_pts_to a p x\n  ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n{{\n  {sn}_focus_{f} a;\n  {pn}_pts_to_not_null (a +! {sn}_offsetof_{f});\n  {sn}_unfocus_read_{f} a;\n}}\n\n",
+            "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n  preserves {sn}_pts_to a p x\n  ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n{{\n  {sn}_focus_{f} a;\n  {lemma} (a +! {sn}_offsetof_{f});\n  let _ = Pulse.Lib.C.Palow.Ptr.null_addr;\n  {sn}_unfocus_read_{f} a;\n}}\n\n",
             sn = sn,
-            pn = pn,
-            f = first.name
+            lemma = lemma,
+            f = f
         );
     }
 
@@ -8973,30 +12774,24 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     // and `gather` puts a value back together out of fields that now hold
     // one. Nothing in between is a struct, which is exactly why neither the
     // focus nor the whole-object write could express it.
-    // A pointer to an object is a pointer to its first field, and a scalar
+    // A pointer to an object shares its fields' provenance, and a scalar
     // points-to already says that its address is not null and has a
     // provenance. That is worth stating at the object, because a predicate
     // over a linked structure is where the null case has to be ruled out and
     // the caller has no reason to know which field sits at offset zero.
-    if let Some(first) = si.fields.iter().find(|f| f.offset == 0) {
-        if let FieldShape::One { pn } = &first.shape {
-            if !matches!(
-                tds.resolve(&first.ty).val,
-                TypeT::TypeRef(..) | TypeT::FixedArray(..)
-            ) {
-                c += &format!(
-                    "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n\
-                     \x20 preserves {sn}_pts_to a p x\n\
-                     \x20 ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
-                     {{\n\x20 {sn}_focus_{f} a;\n\
-                     \x20 {pn}_pts_to_not_null (a +! {sn}_offsetof_{f});\n\
-                     \x20 {sn}_unfocus_read_{f} a;\n}}\n\n",
-                    sn = sn,
-                    pn = pn,
-                    f = first.name
-                );
-            }
-        }
+    if let Some((lemma, f)) = field_not_null(tds, si, false) {
+        c += &format!(
+            "ghost fn {sn}_pts_to_not_null (a: ptr) (#p: perm) (#x: {sn})\n\
+             \x20 preserves {sn}_pts_to a p x\n\
+             \x20 ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
+             {{\n\x20 {sn}_focus_{f} a;\n\
+             \x20 {lemma} (a +! {sn}_offsetof_{f});\n\
+             \x20 let _ = Pulse.Lib.C.Palow.Ptr.null_addr;\n\
+             \x20 {sn}_unfocus_read_{f} a;\n}}\n\n",
+            sn = sn,
+            lemma = lemma,
+            f = f
+        );
     }
 
     c += &format!(
@@ -9019,6 +12814,22 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         sn = sn,
         u = uninit.join("\n\x20 requires ")
     );
+    // The same fact for storage not yet written, which is what a caller has
+    // in hand when it supplies the object to an optional output.
+    if let Some((lemma, f)) = field_not_null(tds, si, true) {
+        c += &format!(
+            "ghost fn {sn}_pts_to_uninit_not_null (a: ptr)\n\
+             \x20 preserves {sn}_pts_to_uninit a\n\
+             \x20 ensures   pure (not (is_null a) /\\ Some? (prov_of a))\n\
+             {{\n\x20 {sn}_scatter_uninit a;\n\
+             \x20 {lemma} (a +! {sn}_offsetof_{f});\n\
+             \x20 let _ = Pulse.Lib.C.Palow.Ptr.null_addr;\n\
+             \x20 {sn}_gather_uninit a;\n}}\n\n",
+            sn = sn,
+            lemma = lemma,
+            f = f
+        );
+    }
     {
         let binders: Vec<String> = si
             .fields
@@ -9360,41 +13171,46 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         forget = forget
     );
 
-    let mut write = String::new();
-    write += &format!("  unfold {}_pts_to_uninit a;\n", sn);
-    for f in &si.fields {
-        match &f.shape {
-            FieldShape::One { .. } | FieldShape::Unaligned { .. } => {
-                write += &format!(
-                    "  {} (a +! {}_offsetof_{}) x.fld_{};\n",
-                    f.shape.write_fn(),
-                    sn,
-                    f.name,
-                    f.name
-                );
-            }
-            FieldShape::Flex { .. } => write += NO_FLEX_STORAGE,
-            FieldShape::Array { pn, esize, len } => {
-                write += &format!(
-                    "  {}_fill (a +! {}_offsetof_{}) x.fld_{};\n",
-                    fill_name(pn, *esize, *len),
-                    sn,
-                    f.name,
-                    f.name
-                );
+    // A struct with an overlay union in it is written field by field; see
+    // `holds_overlay`.
+    let writable = !si.fields.iter().any(|f| holds_overlay(tds, &f.ty));
+    if writable {
+        let mut write = String::new();
+        write += &format!("  unfold {}_pts_to_uninit a;\n", sn);
+        for f in &si.fields {
+            match &f.shape {
+                FieldShape::One { .. } | FieldShape::Unaligned { .. } => {
+                    write += &format!(
+                        "  {} (a +! {}_offsetof_{}) x.fld_{};\n",
+                        f.shape.write_fn(),
+                        sn,
+                        f.name,
+                        f.name
+                    );
+                }
+                FieldShape::Flex { .. } => write += NO_FLEX_STORAGE,
+                FieldShape::Array { pn, esize, len } => {
+                    write += &format!(
+                        "  {}_fill (a +! {}_offsetof_{}) x.fld_{};\n",
+                        fill_name(pn, *esize, *len),
+                        sn,
+                        f.name,
+                        f.name
+                    );
+                }
             }
         }
+        c += &format!(
+            "fn {sn}_write_uninit (a: ptr) (x: {sn})\n\
+             \x20 requires {sn}_pts_to_uninit a\n\
+             {iv}\
+             \x20 ensures  {sn}_pts_to a 1.0R x\n\
+             {{\n{write}  fold {sn}_pts_to a 1.0R x;\n}}\n\n",
+            iv = struct_inv_req(si, &sn, "x"),
+            sn = sn,
+            write = write
+        );
     }
-    c += &format!(
-        "fn {sn}_write_uninit (a: ptr) (x: {sn})\n\
-         \x20 requires {sn}_pts_to_uninit a\n\
-         {iv}\
-         \x20 ensures  {sn}_pts_to a 1.0R x\n\
-         {{\n{write}  fold {sn}_pts_to a 1.0R x;\n}}\n\n",
-        iv = struct_inv_req(si, &sn, "x"),
-        sn = sn,
-        write = write
-    );
 
     // Overwriting a whole structure that already holds a value. Going through
     // `_forget` rather than writing the fields in place is not a detour: both
@@ -9406,7 +13222,33 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
     if si.has_read {
         let mut read = String::new();
         let mut guards = Vec::new();
+        // A union whose live member the struct's tag says is read as that
+        // member, by a branch on the tag just read.
+        let tagged = tag_arms(tds, name);
         for f in &si.fields {
+            if let Some(ta) = tagged.get(&f.name)
+                && let TypeT::TypeRef(TypeRefKind::Union(un)) = &peel(tds, &f.ty).val
+                && let Some(g) = tag_read_guard(tds, &un.val, ta, "(reveal x)", &f.name)
+            {
+                guards.push(format!("  requires pure ({})\n", g));
+                let at = format!("(a +! {}_offsetof_{})", sn, f.name);
+                let mut arm = format!("union_{}_{}_read {}", un.val, ta.default, at);
+                for (k, m) in ta.cases.iter().rev() {
+                    arm = format!(
+                        "if (v_{} = {}) then union_{}_{}_read {} else {}",
+                        ta.tag,
+                        int_literal(tds, k, &ta.tag_ty).unwrap(),
+                        un.val,
+                        m,
+                        at,
+                        arm
+                    );
+                }
+                read += &format!("  {}_focus_{} a;\n", sn, f.name);
+                read += &format!("  let v_{} = ({});\n", f.name, arm);
+                read += &format!("  {}_unfocus_read_{} a;\n", sn, f.name);
+                continue;
+            }
             let reader = match &f.shape {
                 FieldShape::One { .. } => value_reader(tds, &f.ty).unwrap(),
                 FieldShape::Unaligned { pn } => format!("{}_read_u", pn),
@@ -9449,15 +13291,17 @@ fn emit_struct_storage(tds: &Typedefs, name: &str, gaps: &[(u64, u64)]) -> Strin
         );
     }
 
-    c += &format!(
-        "fn {sn}_write (a: ptr) (x: {sn}) (#y: erased {sn})\n\
-         \x20 requires {sn}_pts_to a 1.0R y\n\
-         {iv}\
-         \x20 ensures  {sn}_pts_to a 1.0R x\n\
-         {{\n  {sn}_forget a;\n  {sn}_write_uninit a x;\n}}\n\n",
-        iv = struct_inv_req(si, &sn, "x"),
-        sn = sn
-    );
+    if writable {
+        c += &format!(
+            "fn {sn}_write (a: ptr) (x: {sn}) (#y: erased {sn})\n\
+             \x20 requires {sn}_pts_to a 1.0R y\n\
+             {iv}\
+             \x20 ensures  {sn}_pts_to a 1.0R x\n\
+             {{\n  {sn}_forget a;\n  {sn}_write_uninit a x;\n}}\n\n",
+            iv = struct_inv_req(si, &sn, "x"),
+            sn = sn
+        );
+    }
     c
 }
 
@@ -9559,6 +13403,25 @@ fn const_expr(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<String> {
             }
             Some(format!("({{ {} }})", record_fields(vals, false)))
         }
+        ExprT::UnionInit(n, member, init) => {
+            let TypeT::TypeRef(TypeRefKind::Union(tn)) = &target.val else {
+                return None;
+            };
+            if *tn.val != *n.val {
+                return None;
+            }
+            let field = tds
+                .unions
+                .get(&*n.val)?
+                .members
+                .iter()
+                .find(|f| *f.name == *member.val)?;
+            let value = const_expr(tds, &field.ty, init)?;
+            Some(format!(
+                "(Union_{}.Union_{}_{} {})",
+                n.val, n.val, member.val, value
+            ))
+        }
         ExprT::ArrayInit { .. } => const_array(tds, ty, e).map(|(_, _, v)| v),
         _ => None,
     }
@@ -9640,7 +13503,8 @@ fn collect_array_fill_type(tds: &Typedefs, ty: &Type, out: &mut BTreeMap<String,
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, ..)
-        | TypeT::Nullable(inner) => {
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => {
             collect_array_fill_type(tds, inner, out);
         }
         _ => {}
@@ -9673,6 +13537,7 @@ fn collect_array_fill_expr(tds: &Typedefs, e: &Expr, out: &mut BTreeMap<String, 
         | ExprT::Deref(x)
         | ExprT::Member(x, _)
         | ExprT::Live(x)
+        | ExprT::Unchanged(x)
         | ExprT::Old(x)
         | ExprT::ContainerOf(x, _, _)
         | ExprT::VAttr(_, x) => collect_array_fill_expr(tds, x, out),
@@ -9708,8 +13573,11 @@ fn collect_array_fill_expr(tds: &Typedefs, e: &Expr, out: &mut BTreeMap<String, 
             collect_array_fill_expr(tds, c, out);
         }
         ExprT::MemsetZero(_, x) | ExprT::Free(x) => collect_array_fill_expr(tds, x, out),
-        ExprT::Forall(_, ty, body) | ExprT::Exists(_, ty, body) => {
+        ExprT::Forall(_, ty, trigs, body) | ExprT::Exists(_, ty, trigs, body) => {
             collect_array_fill_type(tds, ty, out);
+            for t in trigs.iter().flatten() {
+                collect_array_fill_expr(tds, t, out);
+            }
             collect_array_fill_expr(tds, body, out);
         }
         _ => {}
@@ -10102,6 +13970,15 @@ struct Touched {
     declared: HashSet<String>,
 }
 
+/// A clause that only claims storage, `_live(x) && _live(y)`.
+fn live_only(e: &Expr) -> bool {
+    match &strip_vattr(e).val {
+        ExprT::Live(_) => true,
+        ExprT::BinOp(BinOp::LogAnd, a, b) => live_only(a) && live_only(b),
+        _ => false,
+    }
+}
+
 /// The variable an lvalue ultimately reaches through, if it is a named object.
 fn lvalue_base(e: &Expr) -> Option<String> {
     match &e.val {
@@ -10195,6 +14072,12 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
                 touch_expr(a, t);
             }
         }
+        ExprT::Forall(_, _, trigs, x) | ExprT::Exists(_, _, trigs, x) => {
+            for a in trigs.iter().flatten() {
+                touch_expr(a, t);
+            }
+            touch_expr(x, t);
+        }
         ExprT::Deref(x)
         | ExprT::Member(x, _)
         | ExprT::VAttr(_, x)
@@ -10202,8 +14085,7 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         | ExprT::Cast(x, _)
         | ExprT::ContainerOf(x, _, _)
         | ExprT::Old(x)
-        | ExprT::Forall(_, _, x)
-        | ExprT::Exists(_, _, x)
+        | ExprT::Unchanged(x)
         | ExprT::UnionInit(_, _, x)
         | ExprT::MallocArray(_, x)
         | ExprT::CallocArray(_, x)
@@ -10672,12 +14554,17 @@ pub fn decl_name(decl: &Decl) -> String {
     }
 }
 
+/// `--split-invariants`: see `assert_invariant_clauses`.
+static SPLIT_INVARIANTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn emit_palow(
     tu: &TranslationUnit,
     header_statics: &[super::linkage::HeaderStatic],
     has_errors: bool,
     portable: bool,
+    split_invariants: bool,
 ) -> Vec<PalowModule> {
+    SPLIT_INVARIANTS.store(split_invariants, std::sync::atomic::Ordering::Relaxed);
     let mut tds = Typedefs::new(tu);
     let mut base = Env::new();
     for decl in &tu.decls {
@@ -10909,7 +14796,10 @@ pub fn emit_palow(
             aliases: {
                 let mut e = base.clone();
                 e.push_fn_decl_args_for_body(&d.decl);
-                alias_map(&d.body, &|x| ptr_base(&tds, &e, x))
+                alias_map(&d.body, &|x| ptr_base(&tds, &e, x), &|x| {
+                    returned_place_k(&e, x)
+                })
+                .0
             },
             ..Touched::default()
         };
@@ -11070,6 +14960,16 @@ pub fn emit_palow(
                     )
                 }) {
                     Err("moves ownership across the call")
+                } else if fndecl
+                    .args
+                    .iter()
+                    .any(|a| cursor_pointee(&tds, &a.ty).is_some())
+                {
+                    // The callee owns the array `*p` points at under a name
+                    // of its own; the caller would have to lend it the array
+                    // its pointer walks and take back a pointer into it,
+                    // which its slot bookkeeping does not model yet.
+                    Err("takes a `_cursor` parameter, which callers cannot pass yet")
                 } else if fndecl.args.iter().any(|a| refined(&tds, &a.ty)) && !sig.contract {
                     // A `_refine` on a parameter is part of the contract on
                     // both sides of the call. When the contract translated it
@@ -11082,6 +14982,28 @@ pub fn emit_palow(
                 },
                 void: matches!(tds.resolve(&fndecl.ret_type).val, TypeT::Void),
                 contract: sig.contract,
+                determined_by_witness: sig.determined_by_witness,
+                // Pulse reads such a call in a specification as the term its
+                // `rewrites_to` names, and checks none of the callee's
+                // precondition while doing so. So the callee must have none:
+                // no `_requires`, and only by-value parameters whose types
+                // carry nothing -- no pointer (ownership, liveness, array
+                // length, nullness), no `_out`/`_consumes`, no refinement.
+                spec_call: sig.determined
+                    && sig.trivial_pre
+                    && fndecl.requires.is_empty()
+                    && fndecl.args.iter().all(|a| {
+                        matches!(a.mode, ParamMode::Regular | ParamMode::Const)
+                            && matches!(
+                                tds.resolve(&a.ty).val,
+                                TypeT::Bool
+                                    | TypeT::Int { .. }
+                                    | TypeT::Float { .. }
+                                    | TypeT::SizeT
+                                    | TypeT::PtrdiffT
+                                    | TypeT::TypeRef(TypeRefKind::Struct(_))
+                            )
+                    }),
                 fp: sig.fp.is_some(),
                 fp_wits: sig.fp_wits,
                 implicits: sig.implicits.clone(),
@@ -11112,10 +15034,35 @@ pub fn emit_palow(
                     .iter()
                     .map(|a| extent(&tds, &a.ty) == Some(Extent::Array))
                     .collect(),
+                arr_elems: fndecl
+                    .args
+                    .iter()
+                    .map(|a| pointee(&tds, peel(&tds, &a.ty)).and_then(|e| palow_name(&tds, e)))
+                    .collect(),
                 consumes: fndecl
                     .args
                     .iter()
                     .map(|a| a.mode == ParamMode::Consumed)
+                    .collect(),
+                nullables: fndecl
+                    .args
+                    .iter()
+                    .map(|a| is_nullable(&tds, &a.ty))
+                    .collect(),
+                spliced_own: sig.spliced_own,
+                refined_pointees: fndecl
+                    .args
+                    .iter()
+                    .map(|a| refined_pointee(&tds, &a.ty))
+                    .collect(),
+                null_inputs: fndecl
+                    .args
+                    .iter()
+                    .map(|a| {
+                        (a.mode != ParamMode::Out && is_nullable(&tds, &a.ty))
+                            .then(|| null_input(&tds, &a.ty))
+                            .flatten()
+                    })
                     .collect(),
                 allocated: sig.ret_block.clone(),
             },
@@ -11370,6 +15317,7 @@ open Pulse.Lib.C.Palow.Float\n\
 open Pulse.Lib.C.Palow.CTypes\n\
 open Pulse.Lib.C.Palow.Machine\n\
 open Pulse.Lib.C.Palow.Array\n\
+open Pulse.Lib.C.Palow.Word\n\
 open Pulse.Lib.C.Palow.Unaligned\n\
 open Pulse.Lib.C.Palow.ConstSeq\n\
 open Pulse.Lib.C.Palow.Local\n\
@@ -11490,6 +15438,42 @@ fn target_assumption(tu: &TranslationUnit) -> String {
     )
 }
 
+fn module_opens(
+    module: &str,
+    code: &str,
+    owner: &HashMap<String, String>,
+    deps: &HashMap<String, BTreeSet<String>>,
+) -> BTreeSet<String> {
+    // A module's own declarations shadow earlier names, including the
+    // acquire_literal_<n> helpers independently emitted for each function.
+    let own: HashSet<String> = defined_names(code).into_iter().collect();
+    let mut opens = BTreeSet::new();
+    let mut word = String::new();
+    for c in code.chars().chain(std::iter::once(' ')) {
+        if c.is_alphanumeric() || c == '_' || c == '\'' {
+            word.push(c);
+            continue;
+        }
+        if !word.is_empty() {
+            if let Some(m) = owner.get(&word).filter(|_| !own.contains(&word)) {
+                if m != module {
+                    opens.insert(m.clone());
+                }
+            }
+            word.clear();
+        }
+    }
+    let mut queue: Vec<String> = opens.iter().cloned().collect();
+    while let Some(m) = queue.pop() {
+        for d in deps.get(&m).into_iter().flatten() {
+            if d != module && opens.insert(d.clone()) {
+                queue.push(d.clone());
+            }
+        }
+    }
+    opens
+}
+
 /// Wrap each chunk in a module that opens exactly the earlier modules it
 /// names. The edges only ever point backwards, so the result cannot have a
 /// cycle -- which matters, because F* modules may not be mutually recursive
@@ -11513,7 +15497,7 @@ fn into_modules(
     let chunks = merged;
 
     let mut owner: HashMap<String, String> = HashMap::new();
-    // What each module already opens, so that opening it brings those along.
+    // What each module's public surface opens.
     // F* `open` is not transitive, and a record literal names its labels
     // without naming its type: `{ fld_lo = 1ul }` for a `struct pair` nested
     // inside a `struct pairs` mentions nothing the scan below can see. Taking
@@ -11521,48 +15505,20 @@ fn into_modules(
     let mut deps: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut out: Vec<PalowModule> = Vec::new();
     for ch in chunks {
-        // A name the chunk defines itself is its own, even when an earlier
-        // module defines the same one: each function that shares a literal
-        // declares its own `acquire_literal_<n>`, and resolving those to the
-        // first module that happened to use the name would make every later
-        // one open it, and everything it opens.
-        let own: HashSet<String> = defined_names(&ch.code).into_iter().collect();
-        let mut opens: BTreeSet<String> = BTreeSet::new();
-        let mut word = String::new();
-        for c in ch.code.chars().chain(std::iter::once(' ')) {
-            if c.is_alphanumeric() || c == '_' || c == '\'' {
-                word.push(c);
-                continue;
-            }
-            if !word.is_empty() {
-                if let Some(m) = owner.get(&word).filter(|_| !own.contains(&word)) {
-                    if *m != ch.module {
-                        opens.insert(m.clone());
-                    }
-                }
-                word.clear();
-            }
-        }
-        let mut queue: Vec<String> = opens.iter().cloned().collect();
-        while let Some(m) = queue.pop() {
-            for d in deps.get(&m).into_iter().flatten() {
-                if *d != ch.module && opens.insert(d.clone()) {
-                    queue.push(d.clone());
-                }
-            }
-        }
-        deps.insert(ch.module.clone(), opens.clone());
+        let public = ifaces.get(&ch.module);
+        let opens = module_opens(&ch.module, &ch.code, &owner, &deps);
+        let public_opens = public
+            .map(|code| module_opens(&ch.module, code, &owner, &deps))
+            .unwrap_or_else(|| opens.clone());
+        deps.insert(ch.module.clone(), public_opens.clone());
 
-        // The interface repeats the implementation's preamble verbatim,
-        // including its `open`s. They are computed from the body, so an
-        // interface may open a module its own text does not name -- harmless,
-        // and the alternative is a second scan that could disagree with the
-        // first about which module a name belongs to.
-        let preamble = {
+        // A caller sees the interface, not its implementation dependencies.
+        // Scan both with the same name owners and public dependency graph.
+        let preamble = |opens: &BTreeSet<String>| {
             let mut p = format!("module {}\n", ch.module);
             p += HEADER;
             p += PREAMBLE;
-            for m in &opens {
+            for m in opens {
                 p += &format!("open {}\n", m);
             }
             if !opens.is_empty() {
@@ -11570,13 +15526,11 @@ fn into_modules(
             }
             p
         };
-        let iface = ifaces
-            .get(&ch.module)
-            .map(|body| format!("{}{}", preamble, body));
-        let mut code = preamble;
+        let iface = public.map(|body| format!("{}{}", preamble(&public_opens), body));
+        let mut code = preamble(&opens);
         code += target.unwrap_or_default();
         code += &ch.code;
-        for n in defined_names(&ch.code) {
+        for n in defined_names(public.unwrap_or(&ch.code)) {
             owner.insert(n, ch.module.clone());
         }
         out.push(PalowModule {
@@ -11587,6 +15541,62 @@ fn into_modules(
         });
     }
     out
+}
+
+#[cfg(test)]
+mod module_import_tests {
+    use super::*;
+
+    fn chunk(module: &str, code: &str) -> Chunk {
+        Chunk {
+            module: module.to_owned(),
+            code: code.to_owned(),
+            origin: None,
+        }
+    }
+
+    #[test]
+    fn interfaces_hide_body_dependencies_but_keep_nested_types() {
+        let chunks = vec![
+            chunk("Inner", "type inner = { fld_item: UInt32.t }\n"),
+            chunk("Outer", "type outer = { fld_inner: inner }\n"),
+            chunk("Helper", "fn helper () { () }\n"),
+            chunk("Callee", "fn callee (x: outer) { helper () }\n"),
+            chunk("Caller", "fn caller (x: outer) { callee x }\n"),
+        ];
+        let ifaces = HashMap::from([
+            ("Helper".to_owned(), "fn helper ()\n".to_owned()),
+            ("Callee".to_owned(), "fn callee (x: outer)\n".to_owned()),
+            ("Caller".to_owned(), "fn caller (x: outer)\n".to_owned()),
+        ]);
+        let modules = into_modules(chunks, &ifaces, None);
+        let callee = &modules[3];
+        let caller = &modules[4];
+        assert!(callee.code.contains("open Helper\n"));
+        assert!(!callee.iface.as_ref().unwrap().contains("open Helper\n"));
+        assert!(!caller.code.contains("open Helper\n"));
+        assert!(caller.code.contains("open Callee\n"));
+        for module in [callee, caller] {
+            for text in [&module.code, module.iface.as_ref().unwrap()] {
+                assert!(text.contains("open Inner\n"));
+                assert!(text.contains("open Outer\n"));
+            }
+        }
+    }
+
+    #[test]
+    fn implementation_private_names_do_not_own_caller_locals() {
+        let chunks = vec![
+            chunk("Private", "let helper_value = 1ul\nfn callee () { () }\n"),
+            chunk(
+                "Unrelated",
+                "fn unrelated () {\n  let helper_value = 2ul;\n  ()\n}\n",
+            ),
+        ];
+        let ifaces = HashMap::from([("Private".to_owned(), "fn callee ()\n".to_owned())]);
+        let modules = into_modules(chunks, &ifaces, None);
+        assert!(!modules[1].code.contains("open Private\n"));
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -11885,6 +15895,12 @@ struct Callee {
     /// were not its specification says only what memory comes back, and a
     /// caller that has a contract of its own has nothing to prove it with.
     contract: bool,
+    /// Whether the callee's `rewrites_to` names a postcondition witness. See
+    /// `Body::store`.
+    determined_by_witness: bool,
+    /// Whether a call to this function may stand in a specification. See
+    /// `Body::inline`.
+    spec_call: bool,
     /// Whether a `__fp` wrapper was emitted, so the function can be decayed
     /// to a code pointer.
     fp: bool,
@@ -11909,6 +15925,9 @@ struct Callee {
     /// Which parameters are `_array`s, and so want a whole sequence's
     /// ownership rather than a single pointee's.
     arr_args: Vec<bool>,
+    /// The element type of each pointer parameter, by position: an `_array`
+    /// argument of another one-byte type is lent at this one.
+    arr_elems: Vec<Option<String>>,
     /// Which parameters are `_arrayptr`s. In Palow such a parameter owns
     /// nothing, so the argument is wanted for its address alone: a name that
     /// stands for an array element must not hand over the element's
@@ -11917,6 +15936,19 @@ struct Callee {
     /// Which parameters are `_consumes`, by position. The argument's ownership
     /// does not come back, so the caller stops accounting for it.
     consumes: Vec<bool>,
+    /// Which parameters are `_nullable`, by position. The callee states their
+    /// ownership under `unless_null`, which the caller opens again where it
+    /// knows which side of the test its argument is on.
+    nullables: Vec<bool>,
+    /// Whether the callee's contract carries ownership written by hand. A
+    /// local whose address it is handed may come back pointing at memory
+    /// that only those words describe; see `Body::author_slots`.
+    spliced_own: bool,
+    /// For each optional input whose guarded resource a declining call site
+    /// can write down outright, that resource at a null pointer.
+    null_inputs: Vec<Option<String>>,
+    /// Which parameters point at a refined struct; see `refined_pointee`.
+    refined_pointees: Vec<bool>,
     /// What the call hands the caller, when the return type grants a block.
     /// The caller has to start tracking it or the ownership the `ensures` just
     /// granted would be left over.
@@ -11927,6 +15959,10 @@ struct Callee {
 struct OwnPath {
     root: Rc<Expr>,
     root_sn: String,
+    /// For ownership held through an overlay union's `_owning` member, the
+    /// union and the member: `root` is then the union, and `root_sn` the
+    /// member's struct.
+    union: Option<(String, String)>,
     fields: Vec<(String, String)>,
 }
 
@@ -11940,7 +15976,27 @@ impl OwnPath {
 struct OwnRoot {
     at: Option<String>,
     sn: String,
+    union: Option<(String, String)>,
     value: String,
+}
+
+impl OwnRoot {
+    /// The points-to the root's value is read off.
+    fn pts_to(&self) -> String {
+        match &self.union {
+            Some((u, _)) => format!("union_{}_pts_to", u),
+            None => format!("struct_{}_pts_to", self.sn),
+        }
+    }
+
+    /// The root struct's value, given the root's: the owning member's view
+    /// when the root is an overlay union.
+    fn struct_value(&self, v: &str) -> String {
+        match &self.union {
+            Some((u, arm)) => format!("(union_{}_get_{} ({}))", u, arm, v),
+            None => v.to_string(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -11948,6 +16004,8 @@ struct OpenOwn {
     root: Rc<OwnRoot>,
     fields: Vec<String>,
     sn: String,
+    /// The union's own ownership, scattered into its member's.
+    union_level: bool,
 }
 
 /// Cloneable so that a speculative attempt can be rolled back *in full*
@@ -11998,6 +16056,12 @@ struct Body<'a> {
     keep_reads: bool,
     /// The C objects this body's ghost statements name.
     ghost_names: HashSet<String>,
+    /// Locals whose address was handed to a callee whose contract carries
+    /// hand-written ownership. What such a local points at afterwards is
+    /// what the callee's words say, which the emitter cannot read, so a
+    /// dereference through it is left to slprop matching, as for a local a
+    /// ghost statement names.
+    author_slots: HashSet<String>,
     /// Whether that branch is the tail of the function -- the shape an
     /// early `return` is lowered into, where each arm is everything that
     /// is left and nothing follows the `if` at all. There is no join to
@@ -12037,6 +16101,9 @@ struct Body<'a> {
     /// The function's parameters, by C name. Ownership of what a pointer points
     /// to is granted by the contract, and the contract only names parameters.
     params: HashSet<String>,
+    /// The function's `_ghost_arg`s, by C name. Each is an erased value with
+    /// no storage, so a path into one is a projection and never a read.
+    ghost_args: HashSet<String>,
     /// The parameters that `_old(p)` can name inside the body: `var_p` is the
     /// value the call passed in for the whole body, since assigning to `p`
     /// gives it a slot of its own, unless a local declared under the same name
@@ -12096,6 +16163,11 @@ struct Body<'a> {
     consumed_freed: HashSet<String>,
     /// Parameters whose ownership does not come back. See `FnSurface`.
     consumed: &'a HashSet<String>,
+    /// `_cursor_from` seeds, each with the cursor it seeds.
+    seeds: HashMap<String, String>,
+    /// Seeded cursors whose slot is still `null_or` the seed: no test of
+    /// the seed has decided yet whether the slot holds the cursor.
+    seed_pending: HashSet<String>,
     /// Addresses whose validity this body has seeded and not yet put down,
     /// with the pre and post it was seeded at. Both are needed to put it down
     /// again: a contract may hold a second, weaker validity for the same
@@ -12106,11 +16178,21 @@ struct Body<'a> {
     /// the value the callee's postcondition binds, so the term that was
     /// seeded is no longer the term to put down.
     laundered: HashSet<String>,
+    /// The temporaries bound to the results of calls whose `rewrites_to`
+    /// names a postcondition witness. See `store`.
+    witness_results: HashSet<String>,
     /// The functions whose validity this function's `ensures` hands on. One of
     /// these is not the body's to put down on the way out.
     post_valid: &'a HashSet<String>,
     /// Whether the return's ownership is spliced; see `FnSurface`.
     ret_spliced: bool,
+    /// Whether the function hands its caller an `_allocated _nullable
+    /// _array` block, which leaves in the initialised view.
+    ret_array: bool,
+    /// Set by `call` when the call was a `memcpy` into a heap block, whose
+    /// value is the destination pointer itself: binding it to a fresh name
+    /// would hide from Pulse that a `return memcpy(d, ...)` returns `d`.
+    copied_call: bool,
     /// The labels in scope, innermost last, each with the statements that run
     /// when control reaches it. A `goto` is translated by translating its
     /// label's continuation there and then: Pulse has no jump, and every path
@@ -12154,6 +16236,12 @@ struct Body<'a> {
     /// per statement rather than per function is what keeps every branch,
     /// loop and call seeing the same shape.
     own_open: Vec<OpenOwn>,
+    /// Set while a call argument for a `const` parameter is focused: the
+    /// callee cannot store through it.
+    const_lend: bool,
+    /// Set while a call argument for any other parameter is focused: the
+    /// callee may store through it, so what encloses it comes back changed.
+    mut_lend: bool,
     /// How many slots existed when the enclosing loop's body began. A `break`
     /// or `continue` past a slot allocated since then would skip its release.
     loop_mark: Option<usize>,
@@ -12176,6 +16264,13 @@ struct Body<'a> {
     break_flag: Option<String>,
     /// The slots the last `frame` gave a binder to, in order.
     frame_slots: Vec<String>,
+    /// While framing the join of an `if` with a pure `_ensures`: the names
+    /// its arms may write. Every other slot keeps the value it holds at the
+    /// `if`, bound by a `with` just before it.
+    join_written: Option<HashSet<String>>,
+    /// While reading through a walked pointer whose pointee is the element
+    /// type at the other signedness (`walk_sign_view`).
+    sign_view: bool,
     /// Functions already known to be divergent. Calling one makes this body
     /// divergent too, which is why the whole set is reached by a fixpoint
     /// rather than in one pass.
@@ -12188,8 +16283,15 @@ struct Body<'a> {
     /// Local pointers that stand for a place rather than for storage. See
     /// `alias_map`.
     aliases: HashMap<String, Rc<Expr>>,
+    /// The pointers each alias's place loads, with the locals holding their
+    /// values from when it was bound (see `snapshot_alias_loads`).
+    alias_snaps: AliasSnaps,
     /// Fixed aliases whose local pointer cell is named by a contract.
     stored_aliases: HashSet<String>,
+    /// Aliases bound by a getter that may return `NULL`
+    /// (`returned_place_k`). Their value is read from their slot, and every
+    /// other use is preceded by a check that it is not `NULL`.
+    nullable_aliases: HashSet<String>,
     /// Local pointers loaded once out of memory, with what they were loaded
     /// from. See `ptr_source_map`.
     ptr_src: HashMap<String, Rc<Expr>>,
@@ -12207,6 +16309,11 @@ struct Body<'a> {
     /// Locals that are another name for an array: `T *p = a;`. A subscript of
     /// one is a subscript of the array it names. See `array_alias_map`.
     array_aliases: HashMap<String, String>,
+    /// Pointers the body moves through an array parameter, and which one.
+    /// See `walk_map`.
+    walks: HashMap<String, Result<String, String>>,
+    /// Walked pointers that always hold their array's base. See `base_copies`.
+    bases: HashSet<String>,
     /// Which member of a union at a given address is live, where the emitter
     /// knows. C's rule is that reading a member other than the one last
     /// written is not reading what you wrote, and Palow says the same thing by
@@ -12225,6 +16332,13 @@ struct Body<'a> {
     /// the contract is the other place besides a write in this body where
     /// that can be known.
     live_arms: Vec<(Rc<Expr>, String)>,
+}
+
+/// How far a walked pointer steps: a constant number of its elements, or
+/// the `size_t` term an index evaluated to.
+enum Step {
+    Const(u64),
+    Index(String),
 }
 
 /// What a subscript through an array parameter needs: the element's Palow type
@@ -12301,10 +16415,18 @@ impl<'a> Body<'a> {
     }
 
     fn ty_of(&self, e: &Expr) -> Result<Rc<Type>, String> {
-        self.env
+        let t = self
+            .env
             .infer_expr(e)
             .map(|t| t.to_rc())
-            .map_err(|_| "the type of a subexpression could not be inferred".to_string())
+            .map_err(|_| "the type of a subexpression could not be inferred".to_string())?;
+        if let ExprT::Member(b, f) = &e.val
+            && let Ok(bt) = self.ty_of(b)
+            && let Some(it) = island_field(self.tds, &bt, &f.val)
+        {
+            return Ok(it);
+        }
+        Ok(t)
     }
 
     /// Make a union arm the live one, leaving its storage uninitialised.
@@ -12742,9 +16864,8 @@ impl<'a> Body<'a> {
         }
     }
 
-    /// The constant an lvalue reads, as an F\* term, when there is one. Only a
-    /// scalar qualifies: an aggregate has no literal to fold to, and falls
-    /// through to the ordinary access.
+    /// The constant an lvalue reads, as an F\* term, when its initializer is
+    /// representable as a closed value.
     fn const_read(&self, e: &Expr) -> Option<String> {
         let (ty, init) = self.const_path(e)?;
         match init {
@@ -12779,7 +16900,10 @@ impl<'a> Body<'a> {
                     return Some(format!("var_{}", v.val));
                 }
                 let v = v.val.to_string();
-                if !self.params.contains(&v) {
+                // A ghost argument is the same kind of value, only erased: it
+                // must never be copied into storage, which a ghost value
+                // cannot be.
+                if !self.params.contains(&v) && !self.ghost_args.contains(&v) {
                     return None;
                 }
                 if self.slots.iter().any(|s| s.name == v)
@@ -12877,12 +17001,177 @@ impl<'a> Body<'a> {
     }
 
     /// What a struct's `_own` predicate covers, by C struct name.
+    /// For each pointer of struct `sn` that owns a single object directly,
+    /// the lemma call that says the pointer, read off the struct value
+    /// `value`, is not null.
+    fn owned_targets_not_null(&self, sn: &str, value: &str) -> Vec<String> {
+        let Some(si) = self.tds.structs.get(sn) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for item in &si.own {
+            if item.embedded
+                || item.esize.is_some()
+                || item.at != format!("((x).fld_{})", item.name)
+            {
+                continue;
+            }
+            let Some(f) = si.fields.iter().find(|f| f.name == item.name) else {
+                continue;
+            };
+            if let Some(to) = owned_pointer(self.tds, &f.ty)
+                && let Some(l) = not_null_lemma(self.tds, to, false)
+            {
+                out.push(format!("{} (({}).fld_{});", l, value, item.name));
+            }
+        }
+        out
+    }
+
     fn own_items_of(&self, sn: &str) -> Vec<OwnItem> {
         self.tds
             .structs
             .get(sn)
             .map(|si| si.own.clone())
             .unwrap_or_default()
+    }
+
+    /// `(*p).m`, where `p` is an owned parameter pointing at an overlay union
+    /// whose `_owning` member is `m`: the root of the ownership `m` holds.
+    fn own_union_root(&self, base: &Expr, m: &str, sn: &str) -> Option<OwnPath> {
+        let ty = self.ty_of(base).ok()?;
+        let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(self.tds, &ty).val else {
+            return None;
+        };
+        let own = self.tds.unions.get(&*u.val)?.own.as_ref()?;
+        if own.arm != m || own.sn != sn {
+            return None;
+        }
+        let ExprT::Deref(root) = &strip_vattr(base).val else {
+            return None;
+        };
+        let ExprT::Var(v) = &strip_vattr(root).val else {
+            return None;
+        };
+        let p = v.val.to_string();
+        if !self.params.contains(&p) || !self.owned_here(&p) {
+            return None;
+        }
+        Some(OwnPath {
+            root: Rc::new(base.clone()),
+            root_sn: sn.to_string(),
+            union: Some((u.val.to_string(), m.to_string())),
+            fields: Vec::new(),
+        })
+    }
+
+    /// A store through an overlay union whose ownership is held through its
+    /// `_owning` member. When the bytes stored to are none of the ones that
+    /// ownership reads, it is the same ownership afterwards and `follow_own`
+    /// moves it to the new value; when they are, it stays where it was.
+    fn union_own_before_write(&mut self, lhs: &Expr) -> Option<(String, String, String)> {
+        let lhs = &*self.unalias_place(lhs);
+        let ty = self.ty_of(lhs).ok()?;
+        let leaf = palow_name(self.tds, &ty).and_then(|pn| ov_leaf(self.tds, &pn));
+        // An island is stored whole, as bytes, like a scalar (`overlay_leaf`).
+        let island = match &peel(self.tds, &ty).val {
+            TypeT::TypeRef(TypeRefKind::Union(u)) => u
+                .val
+                .strip_suffix("__island")
+                .filter(|o| island_member(self.tds, o).is_some())
+                .map(|o| self.tds.unions[o].size),
+            _ => None,
+        };
+        let n = match (&leaf, island) {
+            (Some(l), _) => l.size,
+            (None, Some(n)) => n,
+            (None, None) => palow_sizeof(self.tds, &ty)?,
+        };
+        let (mut root, mut uname, o) = overlay_path(self.tds, &|x| self.ty_of(x).ok(), lhs)
+            .ok()?
+            .root?;
+        // `(&r->m)->...`, as a macro handed `&r->m` writes: the overlay root
+        // is `m`'s union, but the ownership may be held by `r`'s, of which `m`
+        // is a member at byte 0.
+        while self.tds.unions.get(&uname)?.own.is_none() {
+            let ExprT::Deref(a) = &strip_vattr(&root).val else {
+                return None;
+            };
+            let ExprT::Ref(m) = &strip_vattr(a).val else {
+                return None;
+            };
+            let ExprT::Member(b, _) = &strip_vattr(m).val else {
+                return None;
+            };
+            let bt = self.ty_of(b).ok()?;
+            let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(self.tds, &bt).val else {
+                return None;
+            };
+            if !is_overlay(self.tds, &u.val) {
+                return None;
+            }
+            uname = u.val.to_string();
+            root = (**b).clone();
+        }
+        let own = self.tds.unions.get(&uname)?.own.as_ref()?;
+        if own.reads.iter().any(|&(a, b)| o < b && a < o + n) {
+            return None;
+        }
+        // A scalar is stored into the union's bytes; anything larger goes
+        // through a focus on its member, which only the owning member's view
+        // can say leaves the owned pointers alone.
+        let follow = if leaf.is_some() || island.is_some() {
+            "own_follow"
+        } else {
+            let mut e = strip_vattr(lhs);
+            let mut arm = None;
+            loop {
+                match &e.val {
+                    ExprT::Member(b, f) => {
+                        arm = Some(f.val.to_string());
+                        e = strip_vattr(b);
+                    }
+                    // `(&x)->f`, as a store through a pointer to a member
+                    // reads once its alias is substituted, is `x.f`.
+                    ExprT::Deref(a) if matches!(strip_vattr(a).val, ExprT::Ref(_)) => {
+                        let ExprT::Ref(x) = &strip_vattr(a).val else {
+                            unreachable!()
+                        };
+                        e = strip_vattr(x);
+                    }
+                    _ => break,
+                }
+            }
+            if arm.as_deref() != Some(own.arm.as_str()) {
+                return None;
+            }
+            "own_follow_view"
+        };
+        let ExprT::Deref(r) = &strip_vattr(&root).val else {
+            return None;
+        };
+        let ExprT::Var(v) = &strip_vattr(r).val else {
+            return None;
+        };
+        let p = v.val.to_string();
+        if !self.owned_here(&p) || !self.params.contains(&p) {
+            return None;
+        }
+        let at = format!("var_{}", p);
+        if self
+            .own_open
+            .iter()
+            .any(|o| o.root.at.as_deref() == Some(at.as_str()))
+        {
+            return None;
+        }
+        let un = format!("union_{}", uname);
+        let w = self.fresh("own_value");
+        self.lines.push(format!(
+            "with {}. assert ({}_pts_to {} _ {});",
+            w, un, at, w
+        ));
+        Some((format!("{}_{}", un, follow), at, w))
     }
 
     /// Owned containers from a parameter down through its embedded structs.
@@ -12907,15 +17196,20 @@ impl<'a> Body<'a> {
                 Some(OwnPath {
                     root: Rc::new(e.clone()),
                     root_sn: sn,
+                    union: None,
                     fields: Vec::new(),
                 })
             }
             ExprT::Var(v) if self.params.contains(&*v.val.to_string()) => Some(OwnPath {
                 root: Rc::new(e.clone()),
                 root_sn: sn,
+                union: None,
                 fields: Vec::new(),
             }),
             ExprT::Member(base, f) => {
+                if let Some(p) = self.own_union_root(base, &f.val, &sn) {
+                    return Some(p);
+                }
                 let mut path = self.own_path(base)?;
                 self.own_items_of(path.struct_name())
                     .iter()
@@ -12935,6 +17229,9 @@ impl<'a> Body<'a> {
     /// the ownership does read is not followed, since the ownership then
     /// really is about something else.
     fn own_before_write(&mut self, lhs: &Expr) -> Option<(String, String, String)> {
+        if let Some(b) = self.union_own_before_write(lhs) {
+            return Some(b);
+        }
         let ExprT::Member(base, f) = &strip_vattr(lhs).val else {
             return None;
         };
@@ -12973,12 +17270,12 @@ impl<'a> Body<'a> {
             "with {}. assert ({}_pts_to {} _ {});",
             w, sn, at, w
         ));
-        Some((sn, at, w))
+        Some((format!("{}_own_follow", sn), at, w))
     }
 
     fn follow_own(&mut self, before: Option<(String, String, String)>) {
         if let Some((sn, at, w)) = before {
-            self.lines.push(format!("{}_own_follow {} {};", sn, at, w));
+            self.lines.push(format!("{} {} {};", sn, at, w));
         }
     }
 
@@ -13019,6 +17316,7 @@ impl<'a> Body<'a> {
         };
         let root = match self.own_open.iter().find(|o| {
             o.root.sn == path.root_sn
+                && o.root.union == path.union
                 && o.root.at == at
                 && value.as_ref().is_none_or(|v| o.root.value == *v)
         }) {
@@ -13028,10 +17326,14 @@ impl<'a> Body<'a> {
                     Some(v) => v,
                     None => {
                         let v = self.fresh("own_value");
+                        let pts = match &path.union {
+                            Some((u, _)) => format!("union_{}", u),
+                            None => format!("struct_{}", path.root_sn),
+                        };
                         self.lines.push(format!(
-                            "with {}. assert (struct_{}_pts_to {} _ {});",
+                            "with {}. assert ({}_pts_to {} _ {});",
                             v,
-                            path.root_sn,
+                            pts,
                             at.as_ref().unwrap(),
                             v
                         ));
@@ -13041,12 +17343,28 @@ impl<'a> Body<'a> {
                 Rc::new(OwnRoot {
                     at,
                     sn: path.root_sn.clone(),
+                    union: path.union.clone(),
                     value,
                 })
             }
         };
         let mut fields = Vec::new();
-        let mut value = root.value.clone();
+        if let Some((u, _)) = &root.union
+            && !self
+                .own_open
+                .iter()
+                .any(|o| Rc::ptr_eq(&o.root, &root) && o.union_level)
+        {
+            self.lines
+                .push(format!("union_{}_own_scatter {};", u, root.value));
+            self.own_open.push(OpenOwn {
+                root: root.clone(),
+                fields: Vec::new(),
+                sn: u.clone(),
+                union_level: true,
+            });
+        }
+        let mut value = root.struct_value(&root.value);
         for (field, sn) in std::iter::once((None, &path.root_sn))
             .chain(path.fields.iter().map(|(f, sn)| (Some(f), sn)))
         {
@@ -13057,16 +17375,24 @@ impl<'a> Body<'a> {
             if self
                 .own_open
                 .iter()
-                .any(|o| Rc::ptr_eq(&o.root, &root) && o.fields == fields)
+                .any(|o| Rc::ptr_eq(&o.root, &root) && o.fields == fields && !o.union_level)
             {
                 continue;
             }
             self.lines
                 .push(format!("struct_{}_own_scatter {};", sn, value));
+            // What a pointer of the struct owns is now a points-to of its own,
+            // and a points-to says its address is a real one. Pulse does not
+            // draw that out by itself, and without it `&p->ctx->f` is not
+            // known to be non-null.
+            for l in self.owned_targets_not_null(sn, &value) {
+                self.lines.push(l);
+            }
             self.own_open.push(OpenOwn {
                 root: root.clone(),
                 fields: fields.clone(),
                 sn: sn.clone(),
+                union_level: false,
             });
         }
         Ok(())
@@ -13086,8 +17412,11 @@ impl<'a> Body<'a> {
                         Some(at) => {
                             let v = self.fresh("own_value");
                             self.lines.push(format!(
-                                "with {}. assert (struct_{}_pts_to {} _ {});",
-                                v, o.root.sn, at, v
+                                "with {}. assert ({} {} _ {});",
+                                v,
+                                o.root.pts_to(),
+                                at,
+                                v
                             ));
                             v
                         }
@@ -13097,6 +17426,12 @@ impl<'a> Body<'a> {
                     v
                 }
             };
+            if o.union_level {
+                self.lines
+                    .push(format!("union_{}_own_gather {};", o.sn, value));
+                continue;
+            }
+            value = o.root.struct_value(&value);
             for f in &o.fields {
                 value = format!("(({}).fld_{})", value, f);
             }
@@ -13335,6 +17670,7 @@ impl<'a> Body<'a> {
                 // slprop matching, on the same terms a spliced contract gets.
                 ExprT::Var(v)
                     if self.ghost_names.contains(&*v.val.to_string())
+                        || self.author_slots.contains(&*v.val.to_string())
                         || self.params.contains(&*v.val.to_string()) =>
                 {
                     self.rvalue(inner)
@@ -13666,6 +18002,11 @@ impl<'a> Body<'a> {
             return Ok(focus);
         }
         match &strip_vattr(e).val {
+            ExprT::Member(base, f) if writing && self.overlay_of(base).is_some() => Err(format!(
+                "a store of the whole member `{}` of an overlay union: C leaves the bytes of \
+                 every other member unspecified after one (C11 6.2.6.1p7), so store its fields instead",
+                f.val
+            )),
             ExprT::Member(base, f) if self.union_of(base).is_some() => {
                 self.union_member(base, f, writing)
             }
@@ -13745,6 +18086,9 @@ impl<'a> Body<'a> {
     /// one. Taking an address never puns -- what it hands out is ownership of
     /// the member it names, and that member is not there.
     fn access(&mut self, e: &Expr, writing: bool) -> Result<Focus, String> {
+        if let Some(f) = self.overlay_leaf(e, writing)? {
+            return Ok(f);
+        }
         if let Some(f) = self.byte_pun(e, writing) {
             return Ok(f);
         }
@@ -13763,6 +18107,121 @@ impl<'a> Body<'a> {
             return Err(format!("a field of {}", describe(self.tds.resolve(&bty))));
         }
         Ok((format!("struct_{}", sname.val), bty.clone()))
+    }
+
+    /// The `_overlay` union a member belongs to, by its C name.
+    fn overlay_of(&self, base: &Expr) -> Option<String> {
+        let bty = self.ty_of(base).ok()?;
+        let TypeT::TypeRef(TypeRefKind::Union(uname)) = &peel(self.tds, &bty).val else {
+            return None;
+        };
+        is_overlay(self.tds, &uname.val).then(|| uname.val.to_string())
+    }
+
+    /// An integer reached through a member of an `_overlay` union: read or
+    /// written at its constant byte offset in the outermost overlay union on
+    /// the path, by that union's own `_<int>_read`/`_write`. Whatever members
+    /// and fields the path names, this is the access: these bytes and no
+    /// others, so every field of any member that does not overlap them keeps
+    /// its value -- which is the guarantee the pattern rests on.
+    ///
+    /// `None` when the path is not of that shape -- no overlay union on it, a
+    /// subscript that is not a constant, a bit-field, a pointer -- and the
+    /// ordinary path then focuses member by member, which needs each arm it
+    /// passes through to be readable.
+    fn overlay_leaf(&mut self, e: &Expr, writing: bool) -> Result<Option<Focus>, String> {
+        // `q->f`, with `q` an alias of `&r->m`, is `r->m.f`: the bytes of
+        // `r`'s overlay union, wherever the alias is in the path.
+        let e = (*self.unalias_place(e)).clone();
+        if !matches!(strip_vattr(&e).val, ExprT::Member(..) | ExprT::Index(..)) {
+            return Ok(None);
+        }
+        let Ok(ety) = self.ty_of(&e) else {
+            return Ok(None);
+        };
+        let Some(pn) = palow_name(self.tds, &ety) else {
+            return Ok(None);
+        };
+        // An island is loaded and stored whole, aligned as its union is.
+        let island = match &peel(self.tds, &ety).val {
+            TypeT::TypeRef(TypeRefKind::Union(u)) => u
+                .val
+                .strip_suffix("__island")
+                .filter(|o| island_member(self.tds, o).is_some())
+                .map(|o| o.to_string()),
+            _ => None,
+        };
+        let (n, al) = match (&island, ov_leaf(self.tds, &pn)) {
+            (Some(o), _) => (
+                self.tds.unions[o.as_str()].size,
+                self.tds.unions[o.as_str()].align,
+            ),
+            (None, Some(OvLeaf { size, .. })) => (size, size),
+            (None, None) => return Ok(None),
+        };
+        let root = overlay_path(self.tds, &|x| self.ty_of(x).ok(), &e)?.root;
+        let Some((root, uname, o)) = root else {
+            return Ok(None);
+        };
+        let ui = &self.tds.unions[&uname];
+        let known = match &island {
+            Some(i) => ui.islands.contains(i),
+            None => ui.ints.contains(&pn),
+        };
+        if !known || o % al != 0 || o + n > ui.size {
+            return Err(format!(
+                "a {} at byte {} of the overlay union `{}`, which it has no aligned access for",
+                pn, o, uname
+            ));
+        }
+        let un = format!("union_{}", uname);
+        // A load of a pointer the union's `_owning` member owns comes back as
+        // the term its ownership is at, which needs that ownership open.
+        if !writing
+            && island.is_none()
+            && pn == "ptr"
+            && let Some(own) = &ui.own
+            && own.ptrs.iter().any(|(at, _)| *at == o)
+            && let Some(path) = {
+                let mut base = &e;
+                while let ExprT::Member(b, _) = &strip_vattr(base).val {
+                    if same_lvalue(b, &root) {
+                        break;
+                    }
+                    base = b;
+                }
+                match &strip_vattr(base).val {
+                    ExprT::Member(b, m) => self.own_union_root(b, &m.val, &own.sn),
+                    _ => None,
+                }
+            }
+        {
+            self.open_own_path(&path)?;
+            let (a, close_read, close_write) = self.base_addr(&root, writing)?;
+            return Ok(Some(Focus {
+                at: a,
+                pn: format!("{}_own_at_{}", un, o),
+                bits: None,
+                write_fn: String::new(),
+                unaligned: false,
+                open_read: Vec::new(),
+                open_write: Vec::new(),
+                close_read,
+                close_write,
+            }));
+        }
+        let (a, close_read, close_write) = self.base_addr(&root, writing)?;
+        Ok(Some(Focus {
+            at: format!("{} {}sz", a, o),
+            pn: format!("{}_{}", un, pn),
+            bits: None,
+            write_fn: format!("{}_{}_write", un, pn),
+            unaligned: false,
+            open_read: Vec::new(),
+            open_write: Vec::new(),
+            close_read,
+            close_write,
+        }))
     }
 
     /// The union a member belongs to, if the emitter generated a type for it.
@@ -13785,6 +18244,11 @@ impl<'a> Body<'a> {
         let un = self
             .union_of(e)
             .ok_or_else(|| "a whole-value read of a union with no Palow type".to_string())?;
+        if self.overlay_of(e).is_some() {
+            return Err(format!(
+                "a whole-value read of the overlay union {un}; read the fields it is used for"
+            ));
+        }
         if let Some(value) = self.union_values.get(a).cloned() {
             self.lines
                 .push(format!("assert ({}_pts_to {} 1.0R {});", un, a, value));
@@ -13834,6 +18298,47 @@ impl<'a> Body<'a> {
             .union_of(base)
             .ok_or_else(|| "a member of a union with no Palow type".to_string())?;
         let fty = self.field_ty(base, f)?;
+        // An overlay union has no live member to track: focusing one asks F*
+        // that its bytes are readable as it, and lending one for a callee to
+        // fill hands over its storage, keeping every byte past it.
+        if self.overlay_of(base).is_some() {
+            let pn = palow_name(self.tds, &fty).ok_or_else(|| {
+                format!(
+                    "a union member of type {}",
+                    describe(self.tds.resolve(&fty))
+                )
+            })?;
+            let (a, base_close_read, base_close_write) = self.base_addr(base, writing)?;
+            // A nested overlay union lent to a callee that cannot store
+            // through it comes back as the very bytes it was, so the union
+            // keeps its value term, and what is keyed on it -- its ownership
+            // -- still matches.
+            let rd = if self.const_lend
+                && matches!(
+                    peel(self.tds, &fty).val,
+                    TypeT::TypeRef(TypeRefKind::Union(_))
+                ) {
+                "_read"
+            } else {
+                ""
+            };
+            let close = |sfx: &str, mut base: Vec<String>| {
+                let mut v = vec![format!("{}_unfocus{}_{} {};", un, sfx, f.val, a)];
+                v.append(&mut base);
+                v
+            };
+            return Ok(Focus {
+                bits: None,
+                write_fn: format!("{}_write", pn),
+                pn,
+                unaligned: false,
+                at: a.clone(),
+                open_read: vec![format!("{}_focus{}_{} {};", un, rd, f.val, a)],
+                open_write: vec![format!("{}_switch_{} {};", un, f.val, a)],
+                close_read: close(rd, base_close_read),
+                close_write: close("", base_close_write),
+            });
+        }
         // An array arm has no single Palow name -- its ownership is the array
         // combinator applied to its element's -- so the whole shape is what
         // the focus has to be spelled with.
@@ -13848,7 +18353,11 @@ impl<'a> Body<'a> {
             ));
         };
         let pn = shape.pn().to_string();
-        let (a, base_close_read, base_close_write) = self.base_addr(base, writing)?;
+        let (a, mut base_close_read, base_close_write) =
+            self.base_addr(base, writing || self.mut_lend)?;
+        if self.mut_lend {
+            base_close_read = base_close_write.clone();
+        }
         if !writing
             && (self.active.get(&a).map(String::as_str) != Some(&*f.val.to_string())
                 || !base_close_read.is_empty())
@@ -14623,6 +19132,7 @@ impl<'a> Body<'a> {
         // ownership, which must not escape an unsuccessful activation probe.
         if let ExprT::Member(b2, f2) = &strip_vattr(base).val
             && let Some(un) = self.union_of(b2)
+            && self.overlay_of(b2).is_none()
         {
             let mut probe = self.clone();
             if let Ok(a) = probe.addr(b2) {
@@ -14671,6 +19181,29 @@ impl<'a> Body<'a> {
                 ),
                 false => e,
             })?;
+            // Reading through a struct arm of an overlay union lends it for
+            // reading only, so the union comes back with the very bytes it
+            // had: a `preserves` of it is kept, padding and all.
+            if !writing
+                && self.overlay_of(b2).is_some()
+                && matches!(
+                    &peel(self.tds, &*self.field_ty(b2, f2)?).val,
+                    TypeT::TypeRef(TypeRefKind::Struct(_))
+                )
+            {
+                let un = self.union_of(b2).unwrap_or_default();
+                let read = |s: &String, op: &str| {
+                    let plain = format!("{}_{}_{} {};", un, op, f2.val, f.at);
+                    match *s == plain {
+                        true => format!("{}_{}_read_{} {};", un, op, f2.val, f.at),
+                        false => s.clone(),
+                    }
+                };
+                self.lines
+                    .extend(f.open_read.iter().map(|s| read(s, "focus")));
+                let close: Vec<String> = f.close_read.iter().map(|s| read(s, "unfocus")).collect();
+                return Ok((f.at, close.clone(), close));
+            }
             self.lines.extend(f.open_read.iter().cloned());
             return Ok((f.at, f.close_read, f.close_write));
         }
@@ -14709,7 +19242,7 @@ impl<'a> Body<'a> {
         // focus would be applied to the array itself.
         if let ExprT::Deref(inner) = &strip_vattr(base).val
             && let ExprT::Var(v) = &strip_vattr(inner).val
-            && self.arrays.contains_key(&v.val.to_string())
+            && (self.arrays.contains_key(&v.val.to_string()) || self.walk_owner(&v.val).is_some())
         {
             let inner = inner.clone();
             let f = self.focus_elem(&inner, None, false)?;
@@ -14771,6 +19304,448 @@ impl<'a> Body<'a> {
             .any(|b| b.var == v && b.checked && !b.freed && b.array.is_some())
             || self.slots.iter().any(|s| s.name == v && s.array.is_some())
             || self.arrays.contains_key(&v)
+            || self.walk_owner(&v).is_some()
+    }
+
+    /// The array parameter a pointer slot has been walked through, when the
+    /// body moves it (or copies it) from one. `Err` is a walked pointer whose
+    /// array cannot be pinned down, which is reported at the access. A
+    /// parameter the body never reassigns has no slot and is not a walk: it
+    /// is its own array's base. See `walk_map`.
+    fn walk_owner(&self, v: &str) -> Option<Result<String, String>> {
+        let s = self.slots.iter().rev().find(|s| s.name == v)?;
+        if s.array.is_some() || s.global {
+            return None;
+        }
+        match self.walks.get(v)? {
+            Ok(o)
+                if self.arrays.get(o).is_some_and(|a| !a.maybe) && !self.out_params.contains(o) =>
+            {
+                Some(Ok(o.clone()))
+            }
+            Ok(_) => None,
+            Err(e) => Some(Err(e.clone())),
+        }
+    }
+
+    /// Whether an arm writes an element through a walked pointer. What the
+    /// arm leaves is then the array updated at the pointer's position, and
+    /// that term is only well typed where the arm's facts about the
+    /// position are known -- not at a join Pulse computes after the `if`.
+    fn writes_walked(&self, body: &Stmts) -> bool {
+        body.iter().any(|s| match &s.val {
+            StmtT::Assign(l, _) => match &strip_vattr(l).val {
+                ExprT::Deref(x) | ExprT::Index(x, _) => {
+                    self.walk_root(x).is_some()
+                        || matches!(&strip_vattr(x).val,
+                            ExprT::Var(v) if v.val.starts_with("__pal_cur_"))
+                }
+                _ => false,
+            },
+            StmtT::If {
+                then_branch,
+                else_branch,
+                ..
+            } => self.writes_walked(then_branch) || self.writes_walked(else_branch),
+            _ => false,
+        })
+    }
+
+    /// The walked pointer a pointer expression steps from, when it is one
+    /// moved by `++`/`--` or offset by an integer: `*p++` and `*(p + 1)`
+    /// are accesses through `p`'s array as much as `*p` is.
+    fn walk_root(&self, e: &Expr) -> Option<String> {
+        match &strip_vattr(e).val {
+            ExprT::Var(v) => self.walk_owner(&v.val).map(|_| v.val.to_string()),
+            ExprT::PreIncr(x) | ExprT::PostIncr(x) | ExprT::PreDecr(x) | ExprT::PostDecr(x) => {
+                match &strip_vattr(x).val {
+                    ExprT::Var(_) => self.walk_root(x),
+                    _ => None,
+                }
+            }
+            ExprT::BinOp(BinOp::Add | BinOp::Sub, l, r) => {
+                let rt = self.ty_of(r).ok()?;
+                if pointee(self.tds, peel(self.tds, &rt)).is_some() {
+                    return None;
+                }
+                self.walk_root(l)
+            }
+            // `*(uint32_t *)(p + 4)`: a word of the byte array `p` walks
+            // through. Only a cast to a word type is seen through; a cast to
+            // the other signedness of the element type is a different access
+            // (see `rvalue`).
+            ExprT::Cast(x, ty) if self.word_ty(ty).is_some() => self.walk_root(x),
+            _ => None,
+        }
+    }
+
+    /// The pointee of a pointer to an unsigned integer type wider than a
+    /// byte, and its size as a `SizeT.t` term: what a word access through a
+    /// byte array reads.
+    fn word_ty(&self, ty: &Type) -> Option<(String, &'static str)> {
+        let elem = pointee(self.tds, peel(self.tds, ty))?;
+        let wpn = palow_name(self.tds, elem)?;
+        let w = match &*wpn {
+            "uint16_t" => "2sz",
+            "uint32_t" => "4sz",
+            "uint64_t" => "8sz",
+            "size_t" => "size_t_sizeof",
+            _ => return None,
+        };
+        Some((wpn, w))
+    }
+
+    /// A word access: `*w` where `w` walks through an array of one-byte
+    /// elements but points to an unsigned integer type of `W` bytes, as the
+    /// word loop of a fast `strlen` or `memchr` does after `w = (const void
+    /// *)s`. The access is to the `W` elements at `w`'s position, read as one
+    /// integer (`Pulse.Lib.C.Palow.Word`): the owner, the word type, and its
+    /// size.
+    fn word_walk(&self, e: &Expr) -> Option<(String, String, &'static str)> {
+        let v = self.walk_root(e)?;
+        let owner = self.walk_owner(&v)?.ok()?;
+        let ap = self.arrays.get(&owner)?;
+        if ap.maybe || !matches!(&*ap.pn, "uint8_t" | "int8_t") {
+            return None;
+        }
+        let (wpn, w) = self.word_ty(&*self.ty_of(e).ok()?)?;
+        Some((owner, wpn, w))
+    }
+
+    /// Whether the pointer a word access steps from was declared
+    /// `_pal_overread`. Only that variable's reads are trusted to overrun.
+    fn overreads(&self, e: &Expr) -> bool {
+        let Some(v) = self.walk_root(e) else {
+            return false;
+        };
+        let Some(ty) = self.env.local_type(&v) else {
+            return false;
+        };
+        let mut ty: &Type = &ty;
+        loop {
+            ty = match &self.tds.resolve(ty).val {
+                TypeT::Overread(_) => return true,
+                TypeT::Refine(t, _)
+                | TypeT::RefineAlways(t, _)
+                | TypeT::RefineUninit(t, _)
+                | TypeT::RefineValue(t, ..)
+                | TypeT::Plain(t)
+                | TypeT::Nullable(t) => t,
+                _ => return false,
+            };
+        }
+    }
+
+    /// The arguments every word operation takes: the element type's byte
+    /// view, the array, and the word's address and size.
+    fn word_args(&mut self, e: &Expr, owner: &str, w: &str) -> Result<(String, String), String> {
+        let ap = self.arrays[owner].clone();
+        if !ap.known_len && !self.requires_ok {
+            return Err(
+                "a word access through a walked pointer, whose bounds obligation needs a \
+                 `_requires` that is not translated"
+                    .to_string(),
+            );
+        }
+        let cur = self.rvalue(e)?;
+        let cur = if cur.contains(' ') && !cur.starts_with('(') {
+            format!("({})", cur)
+        } else {
+            cur
+        };
+        let pn = &ap.pn;
+        let args = format!(
+            "{pn}_repr {pn}_byte {pn}_of_byte {pn}_bytelike {} {} {pn}_alignof {} {}",
+            ap.addr, ap.esize, cur, w
+        );
+        Ok((args, cur))
+    }
+
+    /// `*w` for a word access: the word's own points-to, focused out of the
+    /// array and put back as its bytes.
+    fn focus_word(&mut self, e: &Expr, owner: &str, wpn: &str, w: &str) -> Result<Focus, String> {
+        let (args, at) = self.word_args(e, owner, w)?;
+        self.lines
+            .push(format!("array_word_focus_{} {};", wpn, args));
+        Ok(Focus {
+            bits: None,
+            at,
+            write_fn: format!("{}_write", wpn),
+            unaligned: false,
+            pn: wpn.to_string(),
+            open_read: Vec::new(),
+            open_write: Vec::new(),
+            close_read: vec![format!("array_word_unfocus_read_{} {};", wpn, args)],
+            close_write: vec![format!("array_word_unfocus_{} {};", wpn, args)],
+        })
+    }
+
+    /// `*p` where `p` is, or walks through, an array parameter: `p[0]`.
+    fn read_elem(&mut self, p: &Expr) -> Result<String, String> {
+        // A word read through a `_pal_overread` pointer need only start
+        // inside the array; what it returns is known only for the bytes that
+        // are.
+        if let Some((owner, wpn, w)) = self.word_walk(p)
+            && self.overreads(p)
+        {
+            let (args, _) = self.word_args(p, &owner, w)?;
+            let t = self.fresh("word");
+            self.lines.push(format!(
+                "let {} = Pulse.Lib.C.Palow.Overread.array_overread_{} {};",
+                t, wpn, args
+            ));
+            return Ok(t);
+        }
+        let f = self.focus_elem(p, None, false)?;
+        self.lines.extend(f.open_read.iter().cloned());
+        let t = self.fresh("elem");
+        self.lines
+            .push(format!("let {} = {} {};", t, f.read_fn(), f.at));
+        self.lines.extend(f.close_read);
+        Ok(t)
+    }
+
+    /// A pointer walked through an array of integers at the other signedness
+    /// of its element type, as `const unsigned char *l = (void *)_l` walks a
+    /// `char` array: the element type and the pointee. A read through it is
+    /// the element read and converted, which on a two's-complement target is
+    /// the stored bits at the new type (C11 6.5p7).
+    fn walk_sign_view(&self, p: &Expr) -> Option<(Rc<Type>, Rc<Type>)> {
+        let v = self.walk_root(p)?;
+        let owner = self.walk_owner(&v)?.ok()?;
+        let ot = self.env.local_type(&owner)?;
+        let oel = pointee(self.tds, peel(self.tds, &ot))?.clone();
+        let pt = self.ty_of(p).ok()?;
+        let pel = pointee(self.tds, peel(self.tds, &pt))?.clone();
+        match (&self.tds.resolve(&oel).val, &self.tds.resolve(&pel).val) {
+            (
+                TypeT::Int {
+                    width: a,
+                    signed: x,
+                },
+                TypeT::Int {
+                    width: b,
+                    signed: y,
+                },
+            ) if a == b && x != y => Some((oel.into(), pel.into())),
+            _ => None,
+        }
+    }
+
+    /// An element access -- `*p` or `p[i]` -- through a pointer that views
+    /// an array of integers at the other signedness of its element type: a
+    /// walked pointer (`walk_sign_view`), or a local that is another name for
+    /// the array (`const unsigned char *l = (const void *)l0;`). The element
+    /// type and the type the access is at. The access focuses the array at
+    /// its own type and converts what it reads or writes, which is the same
+    /// byte at the other type (`int8_as_uint8_repr`).
+    fn place_sign_view(&self, e: &Expr) -> Option<(Rc<Type>, Rc<Type>)> {
+        let p = match &strip_vattr(e).val {
+            ExprT::Deref(p) | ExprT::Index(p, _) => p,
+            _ => return None,
+        };
+        if let Some(v) = self.walk_sign_view(p) {
+            return Some(v);
+        }
+        let ExprT::Var(v) = &strip_vattr(p).val else {
+            return None;
+        };
+        if !self.is_array_alias(&v.val) {
+            return None;
+        }
+        let owner = self.array_alias(&v.val);
+        let ot = self.env.local_type(&owner)?;
+        let oel = pointee(self.tds, peel(self.tds, &ot))?.clone();
+        let pt = self.ty_of(p).ok()?;
+        let pel = pointee(self.tds, peel(self.tds, &pt))?.clone();
+        match (&self.tds.resolve(&oel).val, &self.tds.resolve(&pel).val) {
+            (
+                TypeT::Int {
+                    width: a,
+                    signed: x,
+                },
+                TypeT::Int {
+                    width: b,
+                    signed: y,
+                },
+            ) if a == b && x != y => Some((oel.into(), pel.into())),
+            _ => None,
+        }
+    }
+
+    /// The array an argument for an `_array` parameter is the rest of: a
+    /// pointer walked through it, or the array plus an offset. The array
+    /// itself is passed whole, and is not one of these.
+    fn lent_owner(&self, a: &Expr) -> Result<Option<String>, String> {
+        let orig = a;
+        let mut a = strip_vattr(a);
+        // `p + i` passed to an array parameter arrives converted to the
+        // parameter's array view; the conversion does not move the pointer.
+        while let ExprT::Cast(inner, to) = &a.val
+            && matches!(self.tds.resolve(to).val, TypeT::Pointer(..))
+        {
+            a = strip_vattr(inner);
+        }
+        let owner = match self.walk_root(a) {
+            Some(v) => match self.walk_owner(&v) {
+                Some(Ok(o)) => o,
+                Some(Err(e)) => return Err(e),
+                None => return Ok(None),
+            },
+            None => match &a.val {
+                ExprT::BinOp(BinOp::Add, l, r)
+                    if self.ty_of(r).is_ok_and(|t| {
+                        matches!(peel(self.tds, &t).val, TypeT::Int { .. } | TypeT::SizeT)
+                    }) =>
+                {
+                    match &strip_vattr(l).val {
+                        ExprT::Var(x)
+                            if self.arrays.contains_key(&*x.val)
+                                && !self.walks.contains_key(&*x.val)
+                                && !self.out_params.contains(&x.val.to_string())
+                                && self.arrays.get(&*x.val).is_some_and(|ap| !ap.maybe) =>
+                        {
+                            x.val.to_string()
+                        }
+                        _ => return Ok(None),
+                    }
+                }
+                _ => return Ok(None),
+            },
+        };
+        let ap = &self.arrays[&owner];
+        let elem_ok = |e: &Expr, bytes: bool| -> Result<bool, String> {
+            let ty = self.ty_of(e)?;
+            let elem = pointee(self.tds, peel(self.tds, &ty))
+                .ok_or_else(|| "an array argument that is not a pointer".to_string())?;
+            let name = palow_name(self.tds, elem);
+            // A `char` array may be lent as the `unsigned char` array a
+            // `void *` parameter is; the call converts it (`array_int8_as_uint8`).
+            Ok(name.as_deref() == Some(&*ap.pn)
+                || (bytes && ap.pn == "int8_t" && name.as_deref() == Some("uint8_t")))
+        };
+        if !elem_ok(a, false)? || !elem_ok(orig, true)? {
+            return Err(format!(
+                "an array argument walked through `{}` at a type other than its element type",
+                owner
+            ));
+        }
+        if !ap.known_len && !self.requires_ok {
+            return Err(
+                "an array argument inside an array parameter, whose bounds obligation needs a \
+                 `_requires` that is not translated"
+                    .to_string(),
+            );
+        }
+        Ok(Some(owner))
+    }
+
+    /// A step forward of the walked pointer `x`, from `old`, by `count`
+    /// elements of `pelem` bytes each (`off` is the byte offset as emitted):
+    /// where it stays within the array, it is a walk to that position. Stated
+    /// from the array's ownership (`array_walk_next`) rather than left to the
+    /// solver, which would have to multiply the position by the element size
+    /// to see that the new address does not wrap. Skipped while the array is
+    /// split for an access or a call, which would have to be closed first.
+    fn walk_next(&mut self, x: &Expr, old: &str, pelem: u64, count: Step, off: &str) {
+        let owner = match &strip_vattr(x).val {
+            ExprT::Var(v) => match self.walk_owner(&v.val) {
+                Some(Ok(owner)) => owner,
+                _ => return,
+            },
+            // `(*p)++` on a `_cursor`: a walk through the array it owns.
+            ExprT::Deref(c) => match &strip_vattr(c).val {
+                ExprT::Var(v)
+                    if self
+                        .arrays
+                        .get(&format!("{}__arr", v.val))
+                        .is_some_and(|a| !a.maybe) =>
+                {
+                    format!("{}__arr", v.val)
+                }
+                _ => return,
+            },
+            _ => return,
+        };
+        let ap = &self.arrays[&owner];
+        let Some(esize) = ap
+            .esize
+            .strip_suffix("sz")
+            .and_then(|d| d.parse::<u64>().ok())
+        else {
+            return;
+        };
+        if esize == 0 {
+            return;
+        }
+        // The step in elements of the array, which may be narrower than the
+        // pointer's own (a word walking a byte array).
+        let (k, scaled) = match count {
+            Step::Const(c) if (pelem * c) % esize == 0 => {
+                (format!("{}sz", pelem * c / esize), false)
+            }
+            Step::Index(i) if pelem == esize => (i, esize != 1),
+            _ => return,
+        };
+        let used = format!(" {} ", ap.addr);
+        if self.pending_close.iter().any(|l| l.contains(&used)) {
+            return;
+        }
+        // A variable step over elements wider than a byte is `esize * k`
+        // bytes, which the walk states itself (`array_walk_next_mul`).
+        self.lines.push(if scaled {
+            format!(
+                "array_walk_next_mul {}_repr {} {} {}_alignof {} {};",
+                ap.pn, ap.addr, ap.esize, ap.pn, old, k
+            )
+        } else {
+            format!(
+                "array_walk_next {}_repr {} {} {}_alignof {} {} {};",
+                ap.pn, ap.addr, ap.esize, ap.pn, old, k, off
+            )
+        });
+    }
+
+    /// That `q` points into array parameter `owner`, at an element boundary.
+    fn walk_ok(&self, owner: &str, q: &str) -> String {
+        let a = &self.arrays[owner];
+        format!("pure (walk_ok (SizeT.v {}) {} {})", a.esize, a.addr, q)
+    }
+
+    /// An access through a walked pointer: the ownership is at the array's
+    /// base, and the pointer says where in it.
+    fn walk_place(&mut self, e: &Expr, owner: &str) -> Result<ArrayPlace, String> {
+        let ap = self.arrays[owner].clone();
+        if !ap.known_len && !self.requires_ok {
+            return Err(
+                "a dereference of a walked pointer, whose bounds obligation needs a `_requires` \
+                 that is not translated"
+                    .to_string(),
+            );
+        }
+        let ty = self.ty_of(e)?;
+        let elem = pointee(self.tds, peel(self.tds, &ty))
+            .ok_or_else(|| "a dereference of a walked non-pointer".to_string())?;
+        if palow_name(self.tds, elem).as_deref() != Some(&*ap.pn)
+            && !(self.sign_view && self.walk_sign_view(e).is_some())
+        {
+            return Err(format!(
+                "a dereference of a pointer walked through `{}` at {}, which is not its element type",
+                owner,
+                describe(elem)
+            ));
+        }
+        let cur = self.rvalue(e)?;
+        Ok(ArrayPlace {
+            addr: ap.addr,
+            pn: ap.pn,
+            esize: ap.esize,
+            base: 0,
+            close_read: Vec::new(),
+            close_write: Vec::new(),
+            maybe: ap.maybe,
+            walk: Some(cur),
+        })
     }
 
     /// The array a local is another name for, or the name itself.
@@ -14828,6 +19803,12 @@ impl<'a> Body<'a> {
     /// its sequence outright, or a fixed-size array field, which has to be
     /// focused out of its struct first.
     fn array_place(&mut self, e: &Expr) -> Result<ArrayPlace, String> {
+        if !matches!(strip_vattr(e).val, ExprT::Var(_))
+            && let Some(v) = self.walk_root(e)
+        {
+            let owner = self.walk_owner(&v).unwrap()?;
+            return self.walk_place(e, &owner);
+        }
         match &strip_vattr(e).val {
             ExprT::Var(v) => {
                 // A local that is another name for an array is that array:
@@ -14852,7 +19833,16 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: true,
+                        walk: None,
                     });
+                }
+                if let Some(w) = self.walk_owner(&v) {
+                    let owner = w?;
+                    if let ExprT::Var(n) = &strip_vattr(e).val
+                        && *n.val == *v
+                    {
+                        return self.walk_place(e, &owner);
+                    }
                 }
                 // A local array's elements are `option`s; a parameter's are
                 // not, because the caller has already initialised them.
@@ -14872,6 +19862,7 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: esize.1,
+                        walk: None,
                     });
                 }
                 let Some(ap) = self.arrays.get(&v) else {
@@ -14900,6 +19891,7 @@ impl<'a> Body<'a> {
                     close_read: Vec::new(),
                     close_write: Vec::new(),
                     maybe: ap.maybe,
+                    walk: None,
                 })
             }
             // An array arm of a union. The arm has to be the live one
@@ -14929,6 +19921,7 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: true,
+                        walk: None,
                     });
                 }
                 let fty = self.field_ty(b2, f)?;
@@ -14950,6 +19943,7 @@ impl<'a> Body<'a> {
                     close_read: uf.close_read,
                     close_write: uf.close_write,
                     maybe: false,
+                    walk: None,
                     base: 0,
                 })
             }
@@ -14975,6 +19969,7 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: true,
+                        walk: None,
                     });
                 }
                 // An `_array` field holds a pointer, not the elements, so its
@@ -14997,6 +19992,7 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: false,
+                        walk: None,
                     });
                 }
                 // The flexible tail of a block that is still in pieces is
@@ -15020,6 +20016,7 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write: Vec::new(),
                         maybe: !b.scattered.contains(&fx.field),
+                        walk: None,
                     });
                 }
                 let (pn, esize) = match field_shape(self.tds, &fty) {
@@ -15052,6 +20049,7 @@ impl<'a> Body<'a> {
                     close_read,
                     close_write,
                     maybe: false,
+                    walk: None,
                 })
             }
             // `m->arr[2][3]`: the outer subscript of a multidimensional array
@@ -15108,6 +20106,7 @@ impl<'a> Body<'a> {
                         close_read: Vec::new(),
                         close_write,
                         maybe,
+                        walk: None,
                     });
                 }
             }
@@ -15145,6 +20144,7 @@ impl<'a> Body<'a> {
             close_read: Vec::new(),
             close_write: Vec::new(),
             maybe: storage.is_some(),
+            walk: None,
         })
     }
 
@@ -15174,6 +20174,15 @@ impl<'a> Body<'a> {
                     .to_string(),
             );
         }
+        if let Some((owner, wpn, w)) = self.word_walk(base) {
+            if idx.is_some() {
+                return Err(format!(
+                    "a subscript of a {} pointer walked through `{}`; a word is accessed only as `*p`",
+                    wpn, owner
+                ));
+            }
+            return self.focus_word(base, &owner, &wpn, w);
+        }
         let ArrayPlace {
             addr: arr,
             pn,
@@ -15181,6 +20190,7 @@ impl<'a> Body<'a> {
             close_read: cl_read,
             close_write: cl_write,
             maybe,
+            walk,
             base: elem_base,
         } = self.array_place(base)?;
         let i = match idx {
@@ -15204,7 +20214,19 @@ impl<'a> Body<'a> {
             }
         };
         let off = format!("({} `SizeT.mul` {})", esize, i);
-        let at = format!("({} +! {})", arr, off);
+        // A walked pointer is focused where it points, but the ownership is
+        // the array's, so the element is found relative to the base.
+        let (at, cur, at_sfx) = match &walk {
+            // At the walked pointer itself the position is stated without
+            // the `+ 0`, so it matches a contract's index term.
+            Some(cur) if i == "0sz" => (
+                format!("({} +! {})", cur, off),
+                format!(" {}", cur),
+                "_here",
+            ),
+            Some(cur) => (format!("({} +! {})", cur, off), format!(" {}", cur), "_at"),
+            None => (format!("({} +! {})", arr, off), String::new(), ""),
+        };
         let repr = if maybe {
             format!("(maybe_repr {}_repr (SizeT.v {}))", pn, esize)
         } else {
@@ -15214,23 +20236,29 @@ impl<'a> Body<'a> {
             s.array_value = None;
         }
         self.lines.push(format!(
-            "array_offset_fits {} {} {} {}_alignof {};",
-            repr, arr, esize, pn, i
+            "array_offset_fits{} {} {} {} {}_alignof{} {};",
+            if at_sfx.is_empty() { "" } else { "_at" },
+            repr,
+            arr,
+            esize,
+            pn,
+            cur,
+            i
         ));
         self.lines.push(format!(
-            "array_focus {} {} {} {}_alignof {} {};",
-            repr, arr, esize, pn, i, off
+            "array_focus{} {} {} {} {}_alignof{} {} {};",
+            at_sfx, repr, arr, esize, pn, cur, i, off
         ));
-        let common = format!("{} {} {}_alignof {} {}", arr, esize, pn, i, off);
+        let common = format!("{} {} {}_alignof{} {} {}", arr, esize, pn, cur, i, off);
         if !maybe {
             self.lines.push(format!("{}_of_elem {};", pn, at));
             let mut close_read = vec![
                 format!("{}_to_elem {};", pn, at),
-                format!("array_unfocus_read {} {};", repr, common),
+                format!("array_unfocus_read{} {} {};", at_sfx, repr, common),
             ];
             let mut close_write = vec![
                 format!("{}_to_elem {};", pn, at),
-                format!("array_unfocus {} {};", repr, common),
+                format!("array_unfocus{} {} {};", at_sfx, repr, common),
             ];
             close_read.extend(cl_read);
             close_write.extend(cl_write);
@@ -15264,7 +20292,7 @@ impl<'a> Body<'a> {
         let mut both = vec![
             format!("{}_to_elem {};", pn, at),
             format!("elem_maybe_put {}_repr {} {};", pn, esize, at),
-            format!("array_unfocus {} {};", repr, common),
+            format!("array_unfocus{} {} {};", at_sfx, repr, common),
         ];
         let mut close_write = both.clone();
         let mut close_read = both;
@@ -15331,6 +20359,11 @@ impl<'a> Body<'a> {
     /// `rewrites_to`, which is exactly what lets Pulse use it in a
     /// specification; an ordinary call has no such postcondition, and putting
     /// one in an `assert` is refused with "cannot find rewrites_to in post".
+    /// The exception is a call whose contract determines its result
+    /// (`_ensures(return == E)`, emitted as `rewrites_to`) and has no
+    /// `_requires`: Pulse reads such a call in a specification as `E`, without
+    /// running it, and with no precondition to skip that is exactly what the
+    /// source means by naming the call.
     ///
     /// Nor may the call be lifted out and the name used instead. An `_assert`
     /// is a specification: it does not run, and it must not make the program
@@ -15390,10 +20423,17 @@ impl<'a> Body<'a> {
             let Some((n, d)) = rest.split_once(" = ") else {
                 return Ok(v);
             };
+            let head = d.split_whitespace().next().unwrap_or("");
             let inlinable = self.in_guard
-                || d.split_whitespace()
-                    .next()
-                    .is_some_and(|h| h.ends_with("_read"));
+                || head.ends_with("_read")
+                // A ghost statement keeps its loads as statements, and this
+                // one must not run.
+                || !self.keep_reads
+                    && head
+                    .trim_start_matches('(')
+                    .strip_prefix("func_")
+                    .and_then(|f| self.callees.get(f))
+                    .is_some_and(|c| c.spec_call);
             bound.push((n.to_string(), format!("({})", d), inlinable));
         }
         for i in (0..bound.len()).rev() {
@@ -15522,8 +20562,9 @@ impl<'a> Body<'a> {
     }
 
     /// An assertion can expose partial ownership behind a pointer stored in
-    /// an aggregate, rather than a named parameter. It only selects direct
-    /// field access: Pulse still checks the assertion and every accessed cell.
+    /// an aggregate, rather than a named parameter, or close that loan by
+    /// asserting the whole points-to. This only selects field access:
+    /// Pulse still checks the assertion and every accessed cell.
     fn note_pieces_assertion(&mut self, code: &InlinePulseCode) {
         let mut predicate = String::new();
         for token in &code.tokens {
@@ -15539,11 +20580,11 @@ impl<'a> Body<'a> {
             {
                 return;
             }
-            let Some((sn, _)) = predicate
-                .rsplit('.')
-                .next()
-                .and_then(|p| p.split_once("_hole_"))
-            else {
+            let Some((sn, partial)) = predicate.rsplit('.').next().and_then(|p| {
+                p.split_once("_hole_")
+                    .map(|(sn, _)| (sn, true))
+                    .or_else(|| p.strip_suffix("_pts_to").map(|sn| (sn, false)))
+            }) else {
                 return;
             };
             let place = match token {
@@ -15554,7 +20595,11 @@ impl<'a> Body<'a> {
             if self.struct_of(&place).is_ok_and(|(actual, _)| actual == sn)
                 && let Some(key) = self.place_path(&place)
             {
-                self.asserted_pieces.insert(key);
+                if partial {
+                    self.asserted_pieces.insert(key);
+                } else {
+                    self.asserted_pieces.remove(&key);
+                }
             }
             return;
         }
@@ -15568,6 +20613,84 @@ impl<'a> Body<'a> {
                 Some(format!("var_{}", v.val))
             }
             _ => None,
+        }
+    }
+
+    /// An assertion in statement position -- an `_assert`, or a label's
+    /// `_ensures` checked at a `goto` -- read off the current state where it
+    /// can be, and as a contract over the frame where it needs binders (a
+    /// quantifier over memory, `_length`, `_old(p[k])`).
+    fn stmt_assertion(&mut self, e: &Rc<Expr>) -> Result<String, String> {
+        let mark = self.lines.len();
+        let p = match self.assertion(e) {
+            Ok(p) => p,
+            // An `_old` of a parameter a local shadows is refused
+            // either way; one the frame can read (`_old(d[k])`)
+            // falls back to the contract reading below.
+            Err(why)
+                if why.starts_with("`_old`") && {
+                    let shadowed: HashSet<String> = self
+                        .params
+                        .iter()
+                        .filter(|p| !self.old_params.contains(*p))
+                        .cloned()
+                        .collect();
+                    old_mentions(e, &shadowed, false)
+                } =>
+            {
+                return Err(why);
+            }
+            Err(why) => {
+                self.lines.truncate(mark);
+                self.spec_assertion(e).map_err(|_| why)?
+            }
+        };
+        Ok(p)
+    }
+
+    /// Where an iteration falls through to the closing brace, each
+    /// conjunct of the invariant asserted on its own, in order, before Pulse
+    /// checks the invariant as a whole. Each is then a query of its own,
+    /// with the conjuncts before it in hand: a failure names the clause, and
+    /// the solver is not handed every clause of a long invariant at once.
+    /// The whole check that follows finds every conjunct already proved. A
+    /// conjunct this cannot state as an assertion ends the list, since the
+    /// ones after it may need it to be well defined; nothing is lost by
+    /// that, as the invariant itself is still checked.
+    fn assert_invariant_clauses(&mut self, inv: &Exprs) {
+        fn conjuncts<'a>(e: &'a Rc<Expr>, out: &mut Vec<&'a Rc<Expr>>) {
+            match &e.val {
+                ExprT::BinOp(BinOp::LogAnd, a, b) => {
+                    conjuncts(a, out);
+                    conjuncts(b, out);
+                }
+                // A clause is a condition, converted to `_Bool` as a whole.
+                ExprT::Cast(a, _) if matches!(a.val, ExprT::BinOp(BinOp::LogAnd, ..)) => {
+                    conjuncts(a, out)
+                }
+                _ => out.push(e),
+            }
+        }
+        let mut parts = Vec::new();
+        for e in inv.iter() {
+            conjuncts(e, &mut parts);
+        }
+        if parts.len() < 2 {
+            return;
+        }
+        for e in parts {
+            let mark = self.lines.len();
+            match self.stmt_assertion(e) {
+                Ok(p) if p.starts_with("pure (") => {
+                    self.lines.push(format!("assert ({});", p));
+                }
+                // Ownership (`_live(*a)`) is the invariant's own business.
+                Ok(_) => self.lines.truncate(mark),
+                Err(_) => {
+                    self.lines.truncate(mark);
+                    return;
+                }
+            }
         }
     }
 
@@ -15643,6 +20766,9 @@ impl<'a> Body<'a> {
                     vp, vu, un, a, vp, vu
                 ));
                 self.lines.extend(close_read);
+                if is_overlay(self.tds, &uname) {
+                    return Ok(format!("(union_{}_active_{} {})", uname, m.val, vu));
+                }
                 Ok(format!("(Union_{}_{}? {})", uname, m.val, vu))
             }
             ExprT::VAttr(_, inner) => self.prop(inner),
@@ -15660,7 +20786,7 @@ impl<'a> Body<'a> {
             // quantified assertion is translated only when its body turns out
             // to need no memory at all, and the check is made after the fact by
             // seeing whether anything was emitted.
-            ExprT::Forall(v, ty, body) | ExprT::Exists(v, ty, body) => {
+            ExprT::Forall(v, ty, trigs, body) | ExprT::Exists(v, ty, trigs, body) => {
                 let all = matches!(&e.val, ExprT::Forall(..));
                 let fty = fstar_type(self.tds, ty).ok_or_else(|| {
                     format!("a quantifier over {}", describe(self.tds.resolve(ty)))
@@ -15673,6 +20799,25 @@ impl<'a> Body<'a> {
                 let before = self.lines.len();
                 let r = self.prop(body);
                 let emitted = self.lines.len() != before;
+                let mark = self.lines.len();
+                let pattern = match &r {
+                    Ok(_) => trigger_pattern(v, &bound, trigs, |t| self.inline(t)),
+                    Err(_) => Ok(String::new()),
+                };
+                let trigger_reads = self.lines.len() != mark;
+                // As for a contract: the witness is used only when `v == w`
+                // reads `v` as just its value.
+                let witness = match (all, &r) {
+                    (false, Ok(_)) => exists_witness(v, body).and_then(|(vs, wt)| {
+                        let pd = self.has_ptr_diff(vs) || self.has_ptr_diff(wt);
+                        let side = if pd { self.pos_num(vs) } else { self.num(vs) };
+                        let plain = ExprT::Var(v.clone()).with_loc(v.loc.clone());
+                        let exact = matches!((side, self.num(&plain)),
+                            (Ok(a), Ok(b)) if unparen(&a) == unparen(&b));
+                        exact.then_some((pd, wt))
+                    }),
+                    _ => None,
+                };
                 self.lines.truncate(before);
                 self.env = saved_env;
                 match shadowed {
@@ -15680,14 +20825,25 @@ impl<'a> Body<'a> {
                     None => self.spec_binders.remove(v.val.as_ref()),
                 };
                 let p = r?;
+                let pattern = pattern?;
                 if emitted {
                     return Err("a quantified assertion whose body reads memory".to_string());
                 }
+                if trigger_reads {
+                    return Err("a `_trigger` that reads memory".to_string());
+                }
+                if let Some((pd, wt)) = witness {
+                    let wv = if pd { self.pos_num(wt)? } else { self.num(wt)? };
+                    if let Some(f) = witness_let(self.tds, ty, &bound, &wv, &p) {
+                        return Ok(f);
+                    }
+                }
                 Ok(format!(
-                    "({} ({}: {}). {})",
+                    "({} ({}: {}). {}{})",
                     if all { "forall" } else { "exists" },
                     bound,
                     fty,
+                    pattern,
                     p
                 ))
             }
@@ -15710,6 +20866,36 @@ impl<'a> Body<'a> {
                     return Ok(format!("({} {} {})", a, o, b));
                 }
                 let ty = self.ty_of(l)?;
+                // `s <= p` orders pointers by where they point: by position,
+                // which is only defined within one array.
+                let is_ptr = |x: &Expr| {
+                    self.ty_of(x)
+                        .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
+                };
+                if matches!(op, BinOp::Lt | BinOp::LEq) && is_ptr(l) && is_ptr(r) {
+                    let err = || {
+                        "an assertion that compares pointers not known to be into one array"
+                            .to_string()
+                    };
+                    let (ol, pl) = self.body_ptr_pos(l).ok_or_else(err)??;
+                    let (or, pr) = self.body_ptr_pos(r).ok_or_else(err)??;
+                    if ol != or {
+                        return Err(err());
+                    }
+                    let o = if matches!(op, BinOp::Lt) { "<" } else { "<=" };
+                    return Ok(format!("({} {} {})", pl, o, pr));
+                }
+                if self.has_ptr_diff(l) || self.has_ptr_diff(r) {
+                    let o = match op {
+                        BinOp::Eq => "==",
+                        BinOp::Lt => "<",
+                        BinOp::LEq => "<=",
+                        _ => return Err("an unsupported operator in an assertion".to_string()),
+                    };
+                    let a = self.pos_num(l)?;
+                    let b = self.pos_num(r)?;
+                    return Ok(format!("({} {} {})", a, o, b));
+                }
                 if matches!(op, BinOp::Eq) {
                     if matches!(self.tds.resolve(&ty).val, TypeT::Bool) {
                         let a = self.prop(l)?;
@@ -15749,6 +20935,16 @@ impl<'a> Body<'a> {
 
     /// A specification expression inside a body, as a mathematical integer.
     fn num(&mut self, e: &Expr) -> Result<String, String> {
+        if let Some(d) = self.pos_diff(e) {
+            return d;
+        }
+        if let ExprT::BinOp(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), l, r) = &strip_vattr(e).val
+            && self.has_ptr_diff(e)
+        {
+            let a = self.pos_num(l)?;
+            let b = self.pos_num(r)?;
+            return Ok(format!("({} {} {})", a, op.to_str(), b));
+        }
         // `p._length` is how the source asks how long an array is. For a block
         // this body allocated the answer is the count it asked for -- the
         // sequence it was claimed at has exactly that length -- so the question
@@ -15808,6 +21004,152 @@ impl<'a> Body<'a> {
         match int_module(self.tds, &ty) {
             Some(m) => Ok(format!("({}.v {})", m, self.inline(e)?)),
             None => self.inline(e),
+        }
+    }
+
+    fn has_ptr_diff(&self, e: &Expr) -> bool {
+        has_ptr_diff(self.tds, e, &|x| {
+            self.ty_of(x)
+                .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
+        })
+    }
+
+    /// An operand next to a distance between pointers, as a number.
+    fn pos_num(&mut self, e: &Expr) -> Result<String, String> {
+        let ty_of = |x: &Expr| self.ty_of(x).ok();
+        match ptrdiff_conv(self.tds, e, &ty_of) {
+            Some(inner) => self.num(inner),
+            None => self.num(e),
+        }
+    }
+
+    /// `p - q` in an assertion, between pointers into one array parameter:
+    /// the number of elements between them, as in a contract.
+    fn pos_diff(&mut self, e: &Expr) -> Option<Result<String, String>> {
+        let ExprT::BinOp(BinOp::Sub, l, r) = &keeps_diff(self.tds, e).val else {
+            return None;
+        };
+        let is_ptr = |x: &Expr| {
+            self.ty_of(x)
+                .is_ok_and(|t| pointee(self.tds, peel(self.tds, &t)).is_some())
+        };
+        if !is_ptr(l) || !is_ptr(r) {
+            return None;
+        }
+        let unknown =
+            || "an assertion that subtracts pointers not known to be into one array".to_string();
+        let (ol, pl) = match self.body_ptr_pos(l) {
+            Some(Ok(x)) => x,
+            Some(Err(e)) => return Some(Err(e)),
+            None => return Some(Err(unknown())),
+        };
+        let (or, pr) = match self.body_ptr_pos(r) {
+            Some(Ok(x)) => x,
+            Some(Err(e)) => return Some(Err(e)),
+            None => return Some(Err(unknown())),
+        };
+        if ol != or {
+            return Some(Err(
+                "an assertion that subtracts pointers into different arrays".to_string(),
+            ));
+        }
+        // As in a contract: positions count the array's elements, C's
+        // difference those of the pointers' own type.
+        let lt = self.ty_of(l).ok()?;
+        let lsz = palow_sizeof(self.tds, pointee(self.tds, peel(self.tds, &lt))?);
+        if lsz != self.owner_esize(&ol) {
+            return Some(Err(diff_at_other_size()));
+        }
+        Some(Ok(pos_op(&pl, BinOp::Sub, &pr)))
+    }
+
+    /// The element size of the array parameter `owner`, in bytes.
+    fn owner_esize(&self, owner: &str) -> Option<u64> {
+        self.arrays
+            .get(owner)?
+            .esize
+            .strip_suffix("sz")?
+            .parse()
+            .ok()
+    }
+
+    /// Where a pointer into an array parameter points, as an element index
+    /// from the array's base, and which array that is.
+    fn body_ptr_pos(&mut self, e: &Expr) -> Option<Result<(String, String), String>> {
+        match &strip_vattr(e).val {
+            ExprT::Old(inner) => {
+                let ExprT::Var(v) = &strip_vattr(inner).val else {
+                    return None;
+                };
+                let a = self.arrays.get(&*v.val)?;
+                (!a.maybe).then(|| Ok((v.val.to_string(), "0".to_string())))
+            }
+            ExprT::Var(v) => {
+                let owner = match self.walk_owner(&v.val) {
+                    Some(Ok(o)) => o,
+                    Some(Err(e)) => return Some(Err(e)),
+                    None if self.arrays.get(&*v.val).is_some_and(|a| !a.maybe) => v.val.to_string(),
+                    None => return None,
+                };
+                let (esize, addr) = {
+                    let a = &self.arrays[&owner];
+                    (a.esize.clone(), a.addr.clone())
+                };
+                Some(self.inline(e).map(|cur| {
+                    (
+                        owner,
+                        walk_pos(&format!("(SizeT.v {})", esize), &addr, &cur),
+                    )
+                }))
+            }
+            ExprT::BinOp(op @ (BinOp::Add | BinOp::Sub), l, r) => {
+                let rt = self.ty_of(r).ok()?;
+                if pointee(self.tds, peel(self.tds, &rt)).is_some() {
+                    return None;
+                }
+                let (owner, pos) = match self.body_ptr_pos(l)? {
+                    Ok(x) => x,
+                    Err(e) => return Some(Err(e)),
+                };
+                // A step of a pointer to something wider (a word through a
+                // byte array) is that many of the array's elements.
+                let lt = self.ty_of(l).ok()?;
+                let lsz = palow_sizeof(self.tds, pointee(self.tds, peel(self.tds, &lt))?)?;
+                let osz = self.owner_esize(&owner)?;
+                if osz == 0 || lsz % osz != 0 {
+                    return None;
+                }
+                Some(self.num(r).map(|n| {
+                    let n = match lsz / osz {
+                        1 => n,
+                        k => format!("({} * {})", k, n),
+                    };
+                    (owner, pos_op(&pos, *op, &n))
+                }))
+            }
+            ExprT::Cast(inner, to) => {
+                let it = self.ty_of(inner).ok()?;
+                let from = pointee(self.tds, peel(self.tds, &it))?;
+                let to = pointee(self.tds, peel(self.tds, to))?;
+                let to = palow_name(self.tds, to)?;
+                if palow_name(self.tds, from)? == to {
+                    return self.body_ptr_pos(inner);
+                }
+                // A walked view at another element type, `(char *)wd`, back at
+                // its array's own: the position of a variable is already
+                // counted in that array's elements.
+                if !matches!(strip_vattr(inner).val, ExprT::Var(_)) {
+                    return None;
+                }
+                let r = self.body_ptr_pos(inner)?;
+                if let Ok((owner, _)) = &r
+                    && self.arrays.get(owner).is_none_or(|a| a.pn != to)
+                {
+                    return None;
+                }
+                Some(r)
+            }
+            _ => None,
         }
     }
 
@@ -16140,6 +21482,24 @@ impl<'a> Body<'a> {
         })
     }
 
+    /// `p + e` on a walked pointer `p` whose value is `a`, `off` being the
+    /// byte offset `byte_offset` made of `e`: see `walk_next`. The index is
+    /// taken from `off` rather than evaluated again.
+    fn walk_step(&mut self, p: &Expr, a: &str, n: u64, e: &Expr, off: &str) {
+        let count = match const_index(&strip_vattr(e).val) {
+            Some(c) => Step::Const(c),
+            None if n == 1 => Step::Index(off.to_string()),
+            None => match off
+                .strip_prefix(&format!("({}sz `SizeT.mul` ", n))
+                .and_then(|i| i.strip_suffix(')'))
+            {
+                Some(i) => Step::Index(i.to_string()),
+                None => return,
+            },
+        };
+        self.walk_next(p, a, n, count, off);
+    }
+
     /// A pointer read purely for its address: compared, subtracted or offset.
     fn ptr_val(&mut self, e: &Expr) -> Result<String, String> {
         let ty = self.ty_of(strip_casts(e))?;
@@ -16185,6 +21545,7 @@ impl<'a> Body<'a> {
             (BinOp::Add, Some(n), None) => {
                 let a = self.ptr_val(l)?;
                 let off = self.byte_offset(n, r)?;
+                self.walk_step(l, &a, n, r, &off);
                 Ok(Some(format!("({} +! {})", a, off)))
             }
             // `n + p` is `p + n`; C says so, and neither side has an effect
@@ -16192,6 +21553,7 @@ impl<'a> Body<'a> {
             (BinOp::Add, None, Some(n)) => {
                 let b = self.ptr_val(r)?;
                 let off = self.byte_offset(n, l)?;
+                self.walk_step(r, &b, n, l, &off);
                 Ok(Some(format!("({} +! {})", b, off)))
             }
             (BinOp::Sub, Some(n), None) => {
@@ -16314,9 +21676,32 @@ impl<'a> Body<'a> {
         let r = self.cond_arm(e);
         self.unguarded.pop();
         let (mut lines, v) = r?;
-        lines.insert(0, format!("elim_unless_null var_{} ({});", p, payload));
+        lines.splice(0..0, self.open_guard(&p, &payload));
         lines.push(format!("intro_unless_null var_{} ({});", p, payload));
         Ok((lines, v))
+    }
+
+    /// The lines that open a `_nullable` parameter's guard on its live
+    /// side. An array behind the guard gets there the layout facts an
+    /// unconditionally owned one has from the start, which is what lets a
+    /// pointer walked through it be in bounds.
+    fn open_guard(&self, p: &str, payload: &str) -> Vec<String> {
+        let mut out = vec![format!("elim_unless_null var_{} ({});", p, payload)];
+        if let Some(a) = self.arrays.get(p) {
+            let esize = a.esize.trim_end_matches("sz");
+            let repr = if a.maybe {
+                format!("(maybe_repr {}_repr {})", a.pn, esize)
+            } else {
+                format!("{}_repr", a.pn)
+            };
+            for f in ["array_fits", "array_walk_base"] {
+                out.push(format!(
+                    "{} {} {} {} {}_alignof;",
+                    f, repr, a.addr, a.esize, a.pn
+                ));
+            }
+        }
+        out
     }
 
     /// Translate one arm of a conditional expression into its own lines.
@@ -16331,10 +21716,17 @@ impl<'a> Body<'a> {
         let nslots = self.slots.len();
         let blocks: Vec<(bool, bool)> = self.blocks.iter().map(|b| (b.freed, b.checked)).collect();
         let outer = std::mem::take(&mut self.lines);
+        let active = self.active.clone();
+        let union_values = self.union_values.clone();
         let v = self.rvalue(e);
         let close = std::mem::take(&mut self.pending_close);
         self.lines.extend(close);
         self.close_own();
+        // The arm may not run, so what it learns about live members does not
+        // hold after the join; only what held before it and still does.
+        self.active.retain(|a, m| active.get(a) == Some(m));
+        self.union_values
+            .retain(|a, v| union_values.get(a) == Some(v));
         let lines = std::mem::replace(&mut self.lines, outer);
         let v = v?;
         let now: Vec<bool> = self.slots.iter().map(|s| s.init).collect();
@@ -16366,7 +21758,9 @@ impl<'a> Body<'a> {
             // one and no focus is opened, so handing it out costs nothing.
             // Whoever accesses through it still has to have the ownership,
             // which is where the obligation belongs.
-            if let Some(place) = self.aliases.get(&v).cloned() {
+            if let Some(place) = self.aliases.get(&v).cloned()
+                && !self.nullable_aliases.contains(&v)
+            {
                 self.uses.insert(v.clone());
                 return self.addr_only(&place);
             }
@@ -16415,6 +21809,14 @@ impl<'a> Body<'a> {
                     if self.union_of(e).is_some() {
                         return self.read_union_value(e, &a, &v.val);
                     }
+                    if let Some(value) = self.union_values.get(&a).cloned()
+                        && let Some(pn) = palow_name(self.tds, &ty)
+                        && pn.starts_with("struct_")
+                    {
+                        self.lines
+                            .push(format!("assert ({}_pts_to {} 1.0R {});", pn, a, value));
+                        return Ok(value);
+                    }
                     if !readable_field(self.tds, &ty) {
                         return Err(format!(
                             "a whole-value read of `{}`, which is {}",
@@ -16427,6 +21829,12 @@ impl<'a> Body<'a> {
                     let t = self.fresh(&v.val);
                     self.lines.push(format!("let {} = {}_read {};", t, pn, a));
                     Ok(t)
+                } else if self.is_array_alias(&v.val) {
+                    // A second name for an array has no storage of its own:
+                    // its value is the array's.
+                    let target: Rc<IdentT> = Rc::from(self.array_alias(&v.val).as_str());
+                    let target = ExprT::Var(target.with_loc(e.loc.clone())).with_loc(e.loc.clone());
+                    self.rvalue(&target)
                 } else if self.env.lookup_var(v).is_some() {
                     Ok(format!("var_{}", v.val))
                 } else if let Some(value) = self.global_value(v) {
@@ -16443,6 +21851,20 @@ impl<'a> Body<'a> {
                     Err(format!("`{}` is not in scope", v.val))
                 }
             }
+            ExprT::Deref(_) | ExprT::Index(..)
+                if !self.sign_view
+                    && let Some((oel, pel)) = self.place_sign_view(e) =>
+            {
+                self.sign_view = true;
+                let t = self.rvalue(e);
+                self.sign_view = false;
+                convert(
+                    peel(self.tds, &oel),
+                    peel(self.tds, &pel),
+                    &t?,
+                    self.tds.ptr_bytes,
+                )
+            }
             ExprT::Deref(inner) => {
                 if let ExprT::Var(v) = &inner.val {
                     if self.out_params.iter().any(|n| *n == *v.val) {
@@ -16450,15 +21872,32 @@ impl<'a> Body<'a> {
                     }
                     // `*p` on an array parameter is `p[0]`: the ownership is a
                     // sequence either way, so the access has to be focused.
-                    if self.arrays.contains_key(&*v.val.to_string()) {
-                        let f = self.focus_elem(inner, None, false)?;
-                        self.lines.extend(f.open_read.iter().cloned());
-                        let t = self.fresh("elem");
-                        self.lines
-                            .push(format!("let {} = {} {};", t, f.read_fn(), f.at));
-                        self.lines.extend(f.close_read);
-                        return Ok(t);
+                    if self.arrays.contains_key(&*v.val.to_string())
+                        || self.walk_owner(&v.val).is_some()
+                    {
+                        return self.read_elem(inner);
                     }
+                }
+                if self.walk_root(inner).is_some() {
+                    return self.read_elem(inner);
+                }
+                // `*(unsigned char *)p` on an array of `char`: C lets an
+                // object be read through the other-signedness version of its
+                // type (C11 6.5p7), and the value read is the stored bits at
+                // the new type -- the conversion, on a two's-complement target.
+                if let ExprT::Cast(x, to) = &strip_vattr(inner).val
+                    && let Some(to_el) = pointee(self.tds, peel(self.tds, to))
+                    && let TypeT::Int { width: tw, .. } = self.tds.resolve(to_el).val
+                    && let Ok(xty) = self.ty_of(x)
+                    && let Some(x_el) = pointee(self.tds, peel(self.tds, &xty))
+                    && let TypeT::Int { width: xw, .. } = self.tds.resolve(x_el).val
+                    && tw == xw
+                    && (self.walk_root(x).is_some()
+                        || matches!(&strip_vattr(x).val, ExprT::Var(v) if self.arrays.contains_key(&*v.val.to_string())))
+                {
+                    let read = ExprT::Deref(x.clone()).with_loc(e.loc.clone());
+                    let conv = ExprT::Cast(read, to_el.clone()).with_loc(e.loc.clone());
+                    return self.rvalue(&conv);
                 }
                 let ty = self.ty_of(e)?;
                 if self.union_of(e).is_some() {
@@ -16590,7 +22029,7 @@ impl<'a> Body<'a> {
                 };
                 let f = self.access(e, false)?;
                 self.lines.extend(f.open_read.iter().cloned());
-                let t = if self.union_of(e).is_some() {
+                let t = if self.union_of(e).is_some() && !f.pn.ends_with("__island") {
                     self.read_union_value(e, &f.at, &hint)?
                 } else {
                     let t = self.fresh(&hint);
@@ -16652,6 +22091,19 @@ impl<'a> Body<'a> {
             ExprT::FloatLit(text, ty) => float_literal(self.tds, text, ty),
             ExprT::Cast(inner, to) => {
                 let from = self.ty_of(inner)?;
+                // Integer promotion followed by a truth test is the original
+                // Boolean, including when evaluating it transfers ownership.
+                if self.inlining == 0
+                    && matches!(peel(self.tds, to).val, TypeT::Bool)
+                    && matches!(
+                        peel(self.tds, &from).val,
+                        TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT
+                    )
+                    && let ExprT::Cast(value, _) = &strip_vattr(inner).val
+                    && matches!(peel(self.tds, self.ty_of(value)?.as_ref()).val, TypeT::Bool)
+                {
+                    return self.rvalue(value);
+                }
                 // An array in an rvalue context is its first element's
                 // address: C's decay, which clang has already made explicit as
                 // this cast. What the address carries is the other half. A
@@ -16714,6 +22166,27 @@ impl<'a> Body<'a> {
                         .push(format!("let {} = ptr_to_uintptr {};", t, v));
                     let sz: Rc<Type> = TypeT::SizeT.with_loc(e.loc.clone());
                     return convert(&sz, peel(self.tds, to), &t, self.tds.ptr_bytes);
+                }
+                // An inline Boolean conversion leaves refined machine literals
+                // inside stored values. A later Pulse join cannot re-elaborate
+                // that conditional reliably; give the result a typed name.
+                if self.inlining == 0 && matches!(peel(self.tds, &from).val, TypeT::Bool) {
+                    let suffix = match &peel(self.tds, to).val {
+                        TypeT::Int { signed, width } => Some(int_suffix(*signed, *width)?),
+                        TypeT::SizeT => Some("sz"),
+                        TypeT::PtrdiffT => Some(int_suffix(true, 8 * self.tds.ptr_bytes as u32)?),
+                        _ => None,
+                    };
+                    if let Some(suffix) = suffix {
+                        let fty = fstar_type(self.tds, to)
+                            .ok_or_else(|| format!("a Boolean conversion to {}", describe(to)))?;
+                        let t = self.fresh("cast");
+                        self.lines.push(format!(
+                            "let {} : {} = if ({}) {{ 1{} }} else {{ 0{} }};",
+                            t, fty, v, suffix, suffix
+                        ));
+                        return Ok(t);
+                    }
                 }
                 // `peel`, not `resolve`: a `_plain int32_t *` is a pointer as
                 // far as a conversion is concerned, and the annotation
@@ -16831,7 +22304,15 @@ impl<'a> Body<'a> {
                     self.lines.push("};".to_string());
                     return Ok(t);
                 }
-                let b = self.rvalue(r)?;
+                let b = match matches!(op, BinOp::Shl | BinOp::Shr)
+                    .then(|| wide_shift_count(self.tds, |x| self.ty_of(x).ok(), r))
+                    .flatten()
+                {
+                    Some((inner, m)) => {
+                        format!("(FStar.UInt32.uint_to_t ({}.v {}))", m, self.rvalue(inner)?)
+                    }
+                    None => self.rvalue(r)?,
+                };
                 Ok(format!("({} {} {})", a, opstr, b))
             }
             // `x++` is a read, an add and a write. The old value has to be
@@ -16855,6 +22336,10 @@ impl<'a> Body<'a> {
                         BinOp::Add => format!("({} +! {}sz)", old, esize),
                         _ => format!("({} -! {}sz)", old, esize),
                     };
+                    if op == BinOp::Add {
+                        let off = format!("{}sz", esize);
+                        self.walk_next(x, &old, esize, Step::Const(1), &off);
+                    }
                     self.store(x, "ptr", &new)?;
                     return Ok(if post { old } else { new });
                 }
@@ -17001,7 +22486,19 @@ impl<'a> Body<'a> {
                 let outer_close = std::mem::take(&mut self.pending_close);
                 let outer_own = std::mem::take(&mut self.own_open);
                 let call = self.call(name, args)?;
-                self.lines.push(format!("let {} = {};", t, call));
+                let t = if std::mem::take(&mut self.copied_call) {
+                    call
+                } else {
+                    self.lines.push(format!("let {} = {};", t, call));
+                    t
+                };
+                if self
+                    .callees
+                    .get(&*name.val.to_string())
+                    .is_some_and(|c| c.determined_by_witness)
+                {
+                    self.witness_results.insert(t.clone());
+                }
                 // A validity seeded while evaluating the arguments was seeded
                 // for this call. The callee hands it back -- it is a fact, not
                 // a resource anyone consumes -- so it has to be put down here
@@ -17272,6 +22769,74 @@ impl<'a> Body<'a> {
 
     /// The F* application for a call to an already-emitted function. Every
     /// argument is translated first, since translating one may emit reads.
+    /// `memcpy(d, s, n)` into a heap array that has not been filled yet --
+    /// `d = malloc(n); memcpy(d, s, n);`, the body of every `strdup`. A
+    /// callee's `_array` parameter wants an initialised array, which fresh
+    /// storage is not, so the call cannot go through `memcpy`'s contract.
+    /// `memcpy` is a reserved name whose meaning C fixes, as `malloc`'s is,
+    /// and that meaning is a byte copy: `array_copy_maybe` performs it with
+    /// the machine `memcpy` and leaves the copied cells holding the source's
+    /// values. Only byte-sized elements of the same type, so that the byte
+    /// count is the element count; anything else takes the ordinary path.
+    /// `wmemcpy(d, s, n)` is the same copy counted in `wchar_t`s: `n`
+    /// elements of the source's type, `n * sizeof(wchar_t)` bytes.
+    fn copy_into_block(&mut self, name: &Ident, args: &Exprs) -> Result<Option<String>, String> {
+        let wide = match &*name.val.to_string() {
+            "memcpy" => false,
+            "wmemcpy" => true,
+            _ => return Ok(None),
+        };
+        if args.len() != 3 {
+            return Ok(None);
+        }
+        let ExprT::Var(d) = &strip_casts(&args[0]).val else {
+            return Ok(None);
+        };
+        let d = self.array_alias(&d.val.to_string());
+        if !self.blocks.iter().any(|b| {
+            b.var == d && b.checked && !b.freed && b.array.as_ref().is_some_and(|a| !a.filled)
+        }) {
+            return Ok(None);
+        }
+        let dst = self.array_place(strip_casts(&args[0]))?;
+        let src = self.array_place(strip_casts(&args[1]))?;
+        if (!wide && (dst.esize != "1sz" || src.esize != "1sz"))
+            || dst.esize != src.esize
+            || dst.pn != src.pn
+            || src.maybe
+            || dst.walk.is_some()
+            || src.walk.is_some()
+            || dst.base != 0
+            || src.base != 0
+            || !dst.close_read.is_empty()
+            || !src.close_read.is_empty()
+        {
+            return Err(if wide {
+                "a `wmemcpy` into an unfilled heap array from anything but an array of the \
+                 same type"
+            } else {
+                "a `memcpy` into an unfilled heap array from anything but an array of the \
+                 same byte-sized type"
+            }
+            .to_string());
+        }
+        let n = self.rvalue(&args[2])?;
+        let nbytes = if wide {
+            format!("({n}) `SizeT.mul` {}", dst.esize)
+        } else {
+            n.clone()
+        };
+        self.lines.push(format!(
+            "array_copy_maybe {pn}_repr {} {} {es} {pn}_alignof ({n}) ({nbytes});",
+            dst.addr,
+            src.addr,
+            pn = dst.pn,
+            es = dst.esize,
+        ));
+        self.copied_call = true;
+        Ok(Some(dst.addr))
+    }
+
     fn call(&mut self, name: &Ident, args: &Exprs) -> Result<String, String> {
         let c = self
             .callees
@@ -17281,6 +22846,9 @@ impl<'a> Body<'a> {
             && self.self_rec.as_deref() != Some(&*name.val.to_string())
         {
             return Err(format!("`{}`, which is recursive", name.val));
+        }
+        if let Some(v) = self.copy_into_block(name, args)? {
+            return Ok(v);
         }
         self.uses.insert(name.val.to_string());
         // Divergence is contagious: calling a function that may not terminate
@@ -17299,8 +22867,13 @@ impl<'a> Body<'a> {
         let plain_ptrs = c.plain_ptrs.clone();
         let const_args = c.const_args.clone();
         let arr_args = c.arr_args.clone();
+        let arr_elems = c.arr_elems.clone();
         let arrayptr_args = c.arrayptr_args.clone();
         let consumes = c.consumes.clone();
+        let nullables = c.nullables.clone();
+        let callee_spliced = c.spliced_own;
+        let null_inputs = c.null_inputs.clone();
+        let refined_pointees = c.refined_pointees.clone();
         let (implicits, ghost_args) = (c.implicits.clone(), c.ghost_args.clone());
         // A `$witness` before a direct call names the callee's `_ghost_arg`s,
         // which appear only inside `pure`s and so cannot be read off the
@@ -17331,6 +22904,19 @@ impl<'a> Body<'a> {
                 values.insert(i, self.arg_value(a)?);
             }
         }
+        // A read-only callee leaves the union as it was, and the ownership
+        // with it; only a callee that may store needs the follow.
+        let mut follows: Vec<(String, String, String)> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            if consts.get(i) != Some(&true)
+                && let ExprT::Ref(lv) = &strip_vattr(a).val
+                && let Some(f) = self.union_own_before_lend(lv)
+                && !follows.iter().any(|g| g.1 == f.1)
+            {
+                follows.push(f);
+            }
+        }
+        let field_close = self.pending_close.len();
         let opened = self.field_args(args, &outs, &consts, |i| {
             !(arr_args.get(i) == Some(&true)
                 || arrayptr_args.get(i) == Some(&true)
@@ -17344,6 +22930,15 @@ impl<'a> Body<'a> {
             }
             if let Some(at) = opened.get(&i) {
                 out += &format!(" {}", at);
+                if nullables.get(i) == Some(&true) && refined_pointees.get(i) != Some(&true) {
+                    self.take_back_nullable(
+                        a,
+                        at,
+                        outs.get(i) == Some(&true),
+                        None,
+                        Some(field_close),
+                    );
+                }
                 continue;
             }
             // A literal's address carries no writable ownership. A const
@@ -17467,6 +23062,7 @@ impl<'a> Body<'a> {
                 out += &format!(" {}", fo.at);
                 continue;
             }
+            let close_mark = self.pending_close.len();
             let v = if outs.get(i) == Some(&true) {
                 self.out_arg(a)?
             } else if is_literal(a)
@@ -17491,11 +23087,103 @@ impl<'a> Body<'a> {
             if consumes.get(i) == Some(&true) {
                 self.give_away(a)?;
             }
+            if callee_spliced
+                && let ExprT::Ref(inner) = &strip_casts(a).val
+                && let ExprT::Var(x) = &strip_vattr(inner).val
+                && self.slots.iter().any(|s| s.name == *x.val)
+            {
+                self.author_slots.insert(x.val.to_string());
+            }
+            if nullables.get(i) == Some(&true)
+                && refined_pointees.get(i) != Some(&true)
+                && arr_args.get(i) != Some(&true)
+                && arrayptr_args.get(i) != Some(&true)
+                && plain_ptrs.get(i) != Some(&true)
+                && consumes.get(i) != Some(&true)
+            {
+                // `&s->f` handed to an `_out` is a field `out_arg` opened
+                // for the call, the same as one `field_args` opened.
+                let out = outs.get(i) == Some(&true);
+                let field = out
+                    && matches!(&strip_casts(a).val, ExprT::Ref(inner)
+                        if matches!(strip_vattr(inner).val, ExprT::Member(..)));
+                self.take_back_nullable(
+                    a,
+                    &v,
+                    out,
+                    null_inputs.get(i).cloned().flatten(),
+                    field.then_some(close_mark),
+                );
+            }
             // Passing the address of an object that holds a code pointer
             // hands the validity along with it.
             if let Some(slot) = self.slots.iter().find(|s| s.addr == v) {
                 let held: Vec<String> = slot.holds_fn.values().cloned().collect();
                 self.laundered.extend(held);
+            }
+            // A pointer into one of this function's arrays, not at its base,
+            // lends the callee the rest of the array for the call: the
+            // prefix stays here, and the two are joined again afterwards.
+            let mut retype_from: Option<String> = None;
+            let v = if arr_args.get(i) == Some(&true)
+                && arrayptr_args.get(i) != Some(&true)
+                && outs.get(i) != Some(&true)
+                && let Some(owner) = self.lent_owner(a)?
+            {
+                let ap = self.arrays[&owner].clone();
+                let q = self.fresh("lent");
+                self.lines.push(format!("let {} = {};", q, v));
+                let common = format!(
+                    "{}_repr {} {} {}_alignof {}",
+                    ap.pn, ap.addr, ap.esize, ap.pn, q
+                );
+                // A read-only callee hands its part back unchanged, so the
+                // array is whole again at its old value.
+                let (lend, back) = if consts.get(i) == Some(&true) {
+                    ("array_lend_whole_at", "array_return_whole_at")
+                } else {
+                    ("array_lend_at", "array_return_at")
+                };
+                self.lines.push(format!("{} {};", lend, common));
+                self.pending_close.push(format!("{} {};", back, common));
+                retype_from = Some(ap.pn.clone());
+                q
+            } else {
+                if arr_args.get(i) == Some(&true)
+                    && let ExprT::Var(x) = &strip_casts(a).val
+                    && let Some(ap) = self.arrays.get(&*x.val)
+                {
+                    retype_from = Some(ap.pn.clone());
+                }
+                v
+            };
+            // A `char` array passed for an array of `unsigned char` (a
+            // `void *` one) is the same bytes at the other type, converted
+            // for the call and back after it -- before the lent suffix, if
+            // any, rejoins its prefix.
+            let mut retyped = false;
+            if let Some(from) = retype_from
+                && let Some(Some(to)) = arr_elems.get(i)
+                && from != *to
+            {
+                if from == "int8_t" && to == "uint8_t" {
+                    self.lines.push(format!("array_int8_as_uint8 {};", v));
+                    let back = format!("array_uint8_as_int8 {};", v);
+                    match self.pending_close.iter().rposition(|l| {
+                        (l.starts_with("array_return_at ")
+                            || l.starts_with("array_return_whole_at "))
+                            && l.ends_with(&format!(" {};", v))
+                    }) {
+                        Some(at) => self.pending_close.insert(at, back),
+                        None => self.pending_close.push(back),
+                    }
+                    retyped = true;
+                } else {
+                    return Err(format!(
+                        "an array of {} passed for an array of {}",
+                        from, to
+                    ));
+                }
             }
             if arr_args.get(i) == Some(&true)
                 && let Some(slot) = self.slots.iter().find(|s| s.addr == v)
@@ -17504,7 +23192,14 @@ impl<'a> Body<'a> {
                 if const_args.get(i) == Some(&true) {
                     implicit_args.push("#1.0R".to_string());
                 }
-                implicit_args.push(format!("#(hide {})", value));
+                if retyped {
+                    implicit_args.push(format!(
+                        "#(hide (seq_map FStar.Int.Cast.int8_to_uint8 {}))",
+                        value
+                    ));
+                } else {
+                    implicit_args.push(format!("#(hide {})", value));
+                }
             }
             out += &format!(" {}", v);
         }
@@ -17552,7 +23247,145 @@ impl<'a> Body<'a> {
         // arguments are set up, since they are evaluated before the call.
         self.active.clear();
         self.union_values.clear();
+        for (f, at, w) in follows {
+            self.pending_close.push(format!("{} {} {};", f, at, w));
+        }
         Ok(format!("({})", out))
+    }
+
+    /// A callee handed another member of an overlay union whose ownership is
+    /// held through its `_owning` member may store anywhere in that member,
+    /// so the ownership follows the call only as far as the callee promises
+    /// the bytes it is keyed on `_unchanged`; `own_follow` asks for exactly
+    /// that. Name the union's value before the member is lent.
+    fn union_own_before_lend(&mut self, lv: &Expr) -> Option<(String, String, String)> {
+        let (root, uname, _) = overlay_path(self.tds, &|x| self.ty_of(x).ok(), lv)
+            .ok()?
+            .root?;
+        let own = self.tds.unions.get(&uname)?.own.as_ref()?;
+        let mut e = strip_vattr(lv);
+        let mut arm = None;
+        while let ExprT::Member(b, f) = &e.val {
+            arm = Some(f.val.to_string());
+            e = strip_vattr(b);
+        }
+        if arm.is_none() || arm.as_deref() == Some(own.arm.as_str()) {
+            return None;
+        }
+        let ExprT::Deref(r) = &strip_vattr(&root).val else {
+            return None;
+        };
+        let ExprT::Var(v) = &strip_vattr(r).val else {
+            return None;
+        };
+        let p = v.val.to_string();
+        if !self.owned_here(&p) || !self.params.contains(&p) {
+            return None;
+        }
+        let at = format!("var_{}", p);
+        if self
+            .own_open
+            .iter()
+            .any(|o| o.root.at.as_deref() == Some(at.as_str()))
+        {
+            return None;
+        }
+        let un = format!("union_{}", uname);
+        let w = self.fresh("own_value");
+        self.lines.push(format!(
+            "with {}. assert ({}_pts_to {} _ {});",
+            w, un, at, w
+        ));
+        Some((format!("{}_own_follow", un), at, w))
+    }
+
+    /// A callee states an optional parameter's ownership under a guard, which
+    /// is right for it and wrong for a caller that knows which side of the
+    /// test its own argument is on. A declined output gives back a guard over
+    /// nothing, which is discarded. A supplied argument whose ownership this
+    /// function holds gets its resource back out of the guard; eliminating the
+    /// guard needs the pointer to be non-null, and the only evidence of that
+    /// is the resource itself, so the fact is established before the call
+    /// while the resource is still in the open. An `_out` callee is handed
+    /// storage, anything else an initialized object, which decides the lemma.
+    ///
+    /// A field of an object this function holds, opened for the call by
+    /// `field_args`, counts as held too. A declined input is handed a guard
+    /// over a resource written down outright (see `null_input`).
+    ///
+    /// Anything else is left alone: a caller's own `_nullable` parameter is
+    /// forwarded with its guard untouched, ownership a hand-written contract
+    /// supplies is the author's to open, and so is a pointee whose refinement
+    /// is a guard of its own (see `refined_pointee`).
+    fn take_back_nullable(
+        &mut self,
+        a: &Expr,
+        v: &str,
+        out: bool,
+        null_input: Option<String>,
+        field_close: Option<usize>,
+    ) {
+        if is_zero(strip_casts(a)) {
+            // An output's guarded storage needs no witness to introduce; an
+            // input's pointee value does, which `null_input` supplies where
+            // it can. Any other is left to the caller to name.
+            if v == "null" {
+                if let Some(r) = null_input.filter(|_| !out) {
+                    self.lines
+                        .push(format!("intro_unless_null_null null ({});", r));
+                } else if !out {
+                    return;
+                }
+                self.pending_close
+                    .push("elim_unless_null_null null _;".to_string());
+            }
+            return;
+        }
+        let held = field_close.is_some()
+            || match &strip_casts(a).val {
+                ExprT::Ref(inner) => match &strip_vattr(inner).val {
+                    ExprT::Var(x) => self
+                        .slots
+                        .iter()
+                        .rev()
+                        .find(|s| s.name == *x.val)
+                        .is_some_and(|s| s.addr == v && s.array.is_none()),
+                    _ => false,
+                },
+                ExprT::Var(x) => {
+                    let x = x.val.to_string();
+                    v == format!("var_{}", x)
+                        && (!self.guarded.contains(&x) || self.unguarded.contains(&x))
+                        && (self.owned.iter().any(|o| o.base == x)
+                            || self.outs.iter().any(|o| o.base == x)
+                            || self.out_params.contains(&x)
+                            || self.unguarded.contains(&x))
+                }
+                _ => false,
+            };
+        if !held {
+            return;
+        }
+        let Some(pn) = self
+            .ty_of(a)
+            .ok()
+            .and_then(|t| match &peel(self.tds, &t).val {
+                TypeT::Pointer(pt, _) if extent(self.tds, &t) == Some(Extent::One) => {
+                    not_null_lemma(self.tds, pt, out)
+                }
+                _ => None,
+            })
+        else {
+            return;
+        };
+        self.lines.push(format!("{} {};", pn, v));
+        // A field opened for the call is closed again by `field_args`, and
+        // its resource has to be out of the guard before that.
+        let close = format!("elim_unless_null {} _;", v);
+        match field_close {
+            Some(at) => self.pending_close.insert(at, close),
+            None => self.pending_close.push(close),
+        }
     }
 
     /// Open the fields whose addresses a call's arguments are, for the length
@@ -17583,12 +23416,26 @@ impl<'a> Body<'a> {
             if !out && !owns_one(i) {
                 continue;
             }
-            let ExprT::Ref(inner) = &strip_vattr(a).val else {
-                continue;
+            // A pointer standing for a member, `p = &u->m` or one a getter
+            // returned, hands the callee that member just as `&u->m` does;
+            // the arm or field still has to be focused for it.
+            let aliased = lvalue_name(a)
+                .filter(|v| !self.nullable_aliases.contains(v))
+                .and_then(|v| self.aliases.get(&v).cloned())
+                .filter(|p| matches!(&strip_vattr(p).val, ExprT::Member(..)));
+            let inner: &Expr = match (&strip_vattr(a).val, &aliased) {
+                (ExprT::Ref(inner), _) => inner,
+                (_, Some(p)) => p,
+                _ => continue,
             };
             let ExprT::Member(base, f) = &strip_vattr(inner).val else {
                 continue;
             };
+            if let Some(v) = lvalue_name(a)
+                && aliased.is_some()
+            {
+                self.uses.insert(v);
+            }
             if let Ok((sn, _)) = self.struct_of(base)
                 && self.unaligned_field(&sn, &f.val)
             {
@@ -17605,11 +23452,23 @@ impl<'a> Body<'a> {
                     .ty_of(inner)
                     .is_ok_and(|t| matches!(peel(self.tds, &t).val, TypeT::FixedArray(..)))
             {
-                let fo = self.union_member(base, f, out)?;
+                self.const_lend = !out && consts.get(i) == Some(&true);
+                self.mut_lend = !out && !self.const_lend;
+                let fo = self.union_member(base, f, out);
+                self.const_lend = false;
+                self.mut_lend = false;
+                let fo = fo?;
                 self.lines.extend(match out {
                     true => fo.open_write.iter().cloned(),
                     false => fo.open_read.iter().cloned(),
                 });
+                // A flexible struct member is held at its sized copy, and
+                // the callee takes the struct itself.
+                if !out && let Some(fs) = flex_fill_view(self.tds, &fo.pn) {
+                    self.lines.push(format!("{}_to_flex {};", fs, fo.at));
+                    self.pending_close
+                        .push(format!("{}_of_flex {};", fs, fo.at));
+                }
                 self.pending_close.extend(match out {
                     true => fo.close_write,
                     false => fo.close_read,
@@ -17635,9 +23494,37 @@ impl<'a> Body<'a> {
                 self.open_own_path(&path)?;
             }
             let mark = self.lines.len();
+            let (closes, opens) = (self.pending_close.len(), self.own_open.len());
             let key = self.addr_only(base);
             if self.lines.len() != mark {
                 self.lines.truncate(mark);
+                self.pending_close.truncate(closes);
+                self.own_open.truncate(opens);
+                // The place is reached through a pointer read out of memory,
+                // `&p->ctx->f`: it has no fixed key to group by, so it is
+                // opened on its own, the way a read of it would be -- the
+                // ownership the pointer is read out of is scattered, the
+                // pointee focused down to the field, and both closed after
+                // the call. Storage the callee is to fill is not handled.
+                if out {
+                    continue;
+                }
+                let read_only = consts.get(i) == Some(&true);
+                let fo = self.place(inner, !read_only)?;
+                if fo.bits.is_some() {
+                    return Err(format!("the address of bit-field `{}`", f.val));
+                }
+                self.lines.extend(if read_only {
+                    fo.open_read.iter().cloned()
+                } else {
+                    fo.open_write.iter().cloned()
+                });
+                self.pending_close.extend(if read_only {
+                    fo.close_read
+                } else {
+                    fo.close_write
+                });
+                opened.insert(i, fo.at);
                 continue;
             }
             let Ok(key) = key else {
@@ -17805,9 +23692,18 @@ impl<'a> Body<'a> {
         if is_zero(strip_casts(a)) {
             return Ok("null".to_string());
         }
-        if let ExprT::Ref(inner) = &strip_vattr(a).val
+        // A cast on the address is looked through only when the storage it
+        // claims is the slot's own: `(void const **)&typed_ptr` hands over a
+        // pointer slot as a pointer slot, which under Palow is one type.
+        if let ExprT::Ref(inner) = &strip_casts(a).val
             && let ExprT::Var(v) = &strip_vattr(inner).val
             && let Some(i) = self.slots.iter().rposition(|s| s.name == *v.val)
+            && (matches!(strip_vattr(a).val, ExprT::Ref(..))
+                || self.slots[i].array.is_none()
+                    && self.ty_of(a).ok().is_some_and(|t| {
+                        matches!(&peel(self.tds, &t).val, TypeT::Pointer(pt, _)
+                        if palow_name(self.tds, pt).as_deref() == Some(&*self.slots[i].palow_ty))
+                    }))
         {
             // C's `_out` says the callee writes the object, not that the
             // object was never written before. Palow's contract asks for the
@@ -18295,6 +24191,13 @@ impl<'a> Body<'a> {
         let Some(rb) = self.allocating_call(init) else {
             return Ok(());
         };
+        if rb.array {
+            return Err(
+                "a call returning an `_allocated` array, which a caller cannot take \
+                        over yet"
+                    .to_string(),
+            );
+        }
         if self.in_branch && !self.tail_branch {
             return Err("a call returning a block inside a branch".to_string());
         }
@@ -18770,6 +24673,44 @@ impl<'a> Body<'a> {
     /// the guard is closed again (see `unguarded`). The null arm has `emp`
     /// behind the guard, including when an output's payload changes.
     fn param_null_test(&self, cond: &Expr) -> Option<(String, bool)> {
+        let (v, null_when_true) = Self::null_tested(cond)?;
+        // A `_cursor_from` seed, null or not, tests the cursor's array: when
+        // it is not null it is that array's base (`param_null_cond`).
+        if let Some(c) = self.seeds.get(&v) {
+            let o = format!("{}__arr", c);
+            if self.null_payload.contains_key(&o) && !self.unguarded.contains(&o) {
+                return Some((o, null_when_true));
+            }
+            return None;
+        }
+        if Self::null_test_assigns(cond) {
+            return None;
+        }
+        // A local that is another name for the array tests the array.
+        let name = self.array_alias(&v);
+        // A pointer read out of a `_cursor` parameter tests the array the
+        // contract owns behind it; that it is that array's base is checked
+        // where the test is emitted (`param_null_cond`).
+        if !self.params.contains(&*name)
+            && let Some(Ok(o)) = self.walk_owner(&name)
+            && !self.params.contains(&o)
+            && self.null_payload.contains_key(&o)
+            && !self.unguarded.contains(&o)
+        {
+            return Some((o, null_when_true));
+        }
+        if !self.params.contains(&*name)
+            || !self.null_payload.contains_key(&name)
+            || self.unguarded.contains(&name)
+        {
+            return None;
+        }
+        Some((name, null_when_true))
+    }
+
+    /// The variable a null test tests, and whether the test is true when
+    /// it is null.
+    fn null_tested(cond: &Expr) -> Option<(String, bool)> {
         fn peel(e: &Expr) -> &Expr {
             match &strip_vattr(e).val {
                 ExprT::Cast(inner, _) => peel(inner),
@@ -18782,25 +24723,102 @@ impl<'a> Body<'a> {
         };
         let is_zero = |e: &Expr| matches!(&peel(e).val, ExprT::IntLit(n, _) if **n == BigInt::ZERO);
         let (var, null_when_true) = match &cond.val {
-            ExprT::Var(_) => (cond, negated),
+            ExprT::Var(_) | ExprT::AssignExpr(..) => (cond, negated),
             ExprT::BinOp(BinOp::Eq, a, b) if is_zero(b) => (peel(a), !negated),
             ExprT::BinOp(BinOp::Eq, a, b) if is_zero(a) => (peel(b), !negated),
             _ => return None,
         };
+        let var = match &var.val {
+            ExprT::AssignExpr(l, _) => peel(l),
+            _ => var,
+        };
         let ExprT::Var(v) = &var.val else {
             return None;
         };
-        let name = v.val.to_string();
-        if !self.params.contains(&*name)
-            || !self.null_payload.contains_key(&name)
-            || self.unguarded.contains(&name)
-        {
-            return None;
+        Some((v.val.to_string(), null_when_true))
+    }
+
+    /// A test of a `_cursor_from` seed whose cursor's slot is still
+    /// `null_or` the seed: the seed and the cursor. Its arms settle what the
+    /// slot is -- the cursor where the seed is null, storage where it is not.
+    fn seed_split(&self, cond: &Expr) -> Option<(String, String)> {
+        let (v, _) = Self::null_tested(cond)?;
+        let c = self.seeds.get(&v)?;
+        (self.seed_pending.contains(c) && !Self::null_test_assigns(cond))
+            .then(|| (v.clone(), c.clone()))
+    }
+
+    /// The line that settles a seeded cursor's slot on one side of the seed
+    /// test, `live` being the side where the seed is not null.
+    fn seed_elim(seed: &str, c: &str, live: bool) -> String {
+        format!(
+            "{} var_{} (ptr_pts_to var_{} 1.0R var_{}__arr) (ptr_pts_to_uninit var_{});",
+            if live {
+                "elim_null_or"
+            } else {
+                "elim_null_or_null"
+            },
+            seed,
+            c,
+            c,
+            c
+        )
+    }
+
+    /// The operand a null test evaluates: the variable, or an assignment to
+    /// it (`!(s = *p)`).
+    fn null_operand(cond: &Expr) -> Option<&Expr> {
+        fn peel(e: &Expr) -> &Expr {
+            match &strip_vattr(e).val {
+                ExprT::Cast(inner, _) => peel(inner),
+                _ => strip_vattr(e),
+            }
         }
-        Some((name, null_when_true))
+        let cond = match &peel(cond).val {
+            ExprT::UnOp(UnOp::Not, inner) => peel(inner),
+            _ => peel(cond),
+        };
+        let is_zero = |e: &Expr| matches!(&peel(e).val, ExprT::IntLit(n, _) if **n == BigInt::ZERO);
+        Some(match &cond.val {
+            ExprT::BinOp(BinOp::Eq, a, b) if is_zero(b) => peel(a),
+            ExprT::BinOp(BinOp::Eq, a, b) if is_zero(a) => peel(b),
+            _ => cond,
+        })
+    }
+
+    /// Whether a null test assigns the variable it tests.
+    fn null_test_assigns(cond: &Expr) -> bool {
+        Self::null_operand(cond).is_some_and(|e| matches!(e.val, ExprT::AssignExpr(..)))
     }
 
     fn param_null_cond(&mut self, cond: &Expr, p: &str, when: bool) -> Result<String, String> {
+        // A `_cursor`'s array has no address the code can test: it is the
+        // ghost value of `*p`. The pointer the source tests is, and it has
+        // to be that address for the guard to be the one it opens.
+        if !self.params.contains(p)
+            && let Some((v, _)) = Self::null_tested(cond)
+            && self.seeds.contains_key(&v)
+        {
+            // A seed is the array's base only when it is not null: when it
+            // is, the array is the incoming `*p`, null or not.
+            let operand = Rc::new(Self::null_operand(cond).unwrap().clone());
+            let current = self.rvalue(&operand)?;
+            self.lines.push(format!(
+                "assert (pure (not (is_null {}) ==> {} == reveal var_{}));",
+                current, current, p
+            ));
+            return Ok(Self::null_cond(&current, when));
+        }
+        if !self.params.contains(p)
+            && let Some((v, _)) = Self::null_tested(cond)
+        {
+            let name: Rc<IdentT> = Rc::from(v.as_str());
+            let e = ExprT::Var(name.with_loc(cond.loc.clone())).with_loc(cond.loc.clone());
+            let current = self.rvalue(&e)?;
+            self.lines
+                .push(format!("assert (pure ({} == reveal var_{}));", current, p));
+            return Ok(Self::null_cond(&current, when));
+        }
         let name: Rc<IdentT> = Rc::from(p);
         let e = ExprT::Var(name.with_loc(cond.loc.clone())).with_loc(cond.loc.clone());
         // An addressable parameter may have changed. Use its incoming address
@@ -19141,11 +25159,45 @@ impl<'a> Body<'a> {
     /// Store into an lvalue, choosing the initialising store when the target
     /// is a slot that has not been written yet.
     fn store(&mut self, lhs: &Expr, pn: &str, value: &str) -> Result<(), String> {
+        // A call whose `rewrites_to` names its postcondition's witnesses
+        // returns a value that is a term over them. Stored as it is, the
+        // memory's points-to would mention those witnesses too, and when the
+        // store sits in one arm of an `if` Pulse's join abstracts the
+        // witnesses apart from the ownership they also index -- the object's
+        // points-to and its deep ownership come out at two different values.
+        // A copy under a fresh name, equal by an ordinary `pure`, keeps the
+        // stored value out of that.
+        if self.inlining == 0
+            && value
+                .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
+                .any(|w| self.witness_results.contains(w))
+        {
+            let t = self.fresh("copy");
+            self.lines
+                .push(format!("let {} = value_copy {};", t, value));
+            return self.store(lhs, pn, &t);
+        }
         if !matches!(lhs.val, ExprT::Var(_)) {
             self.union_values.clear();
         }
         if let Some(p) = self.unalias(lhs) {
             return self.store(&p, pn, value);
+        }
+        if !self.sign_view
+            && let Some((oel, pel)) = self.place_sign_view(lhs)
+        {
+            let v = convert(
+                peel(self.tds, &pel),
+                peel(self.tds, &oel),
+                value,
+                self.tds.ptr_bytes,
+            )?;
+            let opn = palow_name(self.tds, &oel)
+                .ok_or_else(|| format!("a store of {}", describe(&oel)))?;
+            self.sign_view = true;
+            let r = self.store(lhs, &opn, &v);
+            self.sign_view = false;
+            return r;
         }
         // Whatever was known about the code pointers here is stale now; the
         // caller re-establishes it if the store was a decay.
@@ -19179,6 +25231,40 @@ impl<'a> Body<'a> {
                 self.slots[i].init = true;
                 let a = self.slots[i].addr.clone();
                 self.union_values.remove(&a);
+                // A struct whose reader is guarded by union arm choices reads
+                // back only through the first arm of each union. Remembering
+                // the stored value lets a whole-value read forward it instead,
+                // whichever arms it has.
+                let guarded = !self.slots[i].global
+                    && self.inlining == 0
+                    && !value.is_empty()
+                    && pn.starts_with("struct_")
+                    && self.ty_of(lhs).ok().is_some_and(|ty| {
+                        value_read_guard(self.tds, &ty, "x").is_some()
+                            && fstar_type(self.tds, &ty).is_some()
+                    });
+                if guarded {
+                    let value = if value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                        value.to_string()
+                    } else {
+                        let ty = self.ty_of(lhs)?;
+                        let t = self.fresh("stored");
+                        self.lines.push(format!(
+                            "let {} : {} = {};",
+                            t,
+                            fstar_type(self.tds, &ty).unwrap(),
+                            value
+                        ));
+                        t
+                    };
+                    self.union_values.insert(a.clone(), value.clone());
+                    self.lines.push(format!("{}_{} {} {};", pn, op, a, value));
+                    if let Some(gm) = self.mirrors.get(&v.val.to_string()).cloned() {
+                        self.lines
+                            .push(format!("Pulse.Lib.GhostReference.write {} {};", gm, value));
+                    }
+                    return Ok(());
+                }
                 if pn.starts_with("union_") {
                     self.active.remove(&a);
                     if !self.slots[i].global
@@ -19219,8 +25305,10 @@ impl<'a> Body<'a> {
             }
         }
         if let ExprT::Deref(inner) = &lhs.val {
-            if let ExprT::Var(v) = &inner.val {
-                if self.arrays.contains_key(&*v.val.to_string()) {
+            if self.walk_root(inner).is_some()
+                || matches!(&inner.val, ExprT::Var(v) if self.arrays.contains_key(&*v.val.to_string()))
+            {
+                {
                     let f = self.focus_elem(inner, None, true)?;
                     self.lines.extend(f.open_write.iter().cloned());
                     self.lines
@@ -19380,6 +25468,7 @@ impl<'a> Body<'a> {
         let mut mentioned = Touched::default();
         touch_exprs(&named, &mut mentioned);
         let mut deref_slots: Vec<(String, String)> = Vec::new();
+        let mut walks: HashMap<String, (String, String, String)> = HashMap::new();
         for (i, s) in self.slots.clone().into_iter().enumerate() {
             let s = &s;
             // A struct `_out` parameter's slot is named `*p`; the body
@@ -19432,6 +25521,48 @@ impl<'a> Body<'a> {
             if !s.init {
                 return Err(format!("{} with `{}` not yet written", what, s.name));
             }
+            // A pointer walked through an array parameter is only somewhere
+            // in that array if the invariant says so, and saying that much is
+            // the emitter's job: it is true by construction, and without it
+            // no access through the pointer can be focused. A walked pointer
+            // the loop does not move keeps the value it came in with.
+            let walk = match self.walk_owner(&s.name) {
+                Some(Ok(o)) => Some(o),
+                _ => None,
+            };
+            if let Some(o) = &walk {
+                let a = &self.arrays[o];
+                walks.insert(
+                    s.name.clone(),
+                    (o.clone(), format!("(SizeT.v {})", a.esize), a.addr.clone()),
+                );
+            }
+            // A copy of the array's base (`wchar_t *a = d;` before `d`
+            // moves) is stated to hold that base itself, so that positions
+            // through it are the plain indices a contract's are: a quantified
+            // fact about `a[k]` is then the same term as the `_ensures`' `d[k]`.
+            if let Some(o) = &walk
+                && self.bases.contains(&s.name)
+            {
+                let addr = self.arrays[o].addr.clone();
+                owns.push(s.pts_to(&addr));
+                owns.push(self.walk_ok(o, &addr));
+                locals.insert(s.name.clone(), addr);
+                continue;
+            }
+            if let Some(o) = &walk
+                && body_touches.as_ref().is_some_and(|t| {
+                    !t.written.contains(&s.name) && !t.rebound.contains_key(&s.name)
+                })
+            {
+                let value = self.fresh("loop_ptr");
+                self.lines
+                    .push(format!("let {} = {}_read {};", value, s.palow_ty, s.addr));
+                owns.push(s.pts_to(&value));
+                owns.push(self.walk_ok(o, &value));
+                locals.insert(s.name.clone(), value);
+                continue;
+            }
             // Element writes do not change an addressable array parameter.
             if self.params.contains(&s.name)
                 && self.arrays.contains_key(&s.name)
@@ -19446,9 +25577,25 @@ impl<'a> Body<'a> {
                 locals.insert(s.name.clone(), value);
                 continue;
             }
+            // A slot the arms of an `if` leave alone holds the same value
+            // after it, and naming that value keeps what is known about it.
+            if let Some(w) = &self.join_written
+                && !w.contains(touch)
+                && !w.contains(&s.name)
+            {
+                let value = self.fresh("join");
+                self.lines
+                    .push(format!("with {}. assert ({});", value, s.pts_to(&value)));
+                owns.push(s.pts_to(&value));
+                locals.insert(s.name.clone(), value);
+                continue;
+            }
             let b = format!("inv_{}", touch);
             binders.push(format!("({}: {})", b, s.fstar_ty));
             owns.push(s.pts_to(&b));
+            if let Some(o) = &walk {
+                owns.push(self.walk_ok(o, &b));
+            }
             bound.push(s.name.clone());
             if touch != s.name {
                 deref_slots.push((touch.to_string(), b.clone()));
@@ -19500,20 +25647,78 @@ impl<'a> Body<'a> {
             .map(|n| (n.clone(), format!("var_{}", n)))
             .collect();
         let mut arrays: HashSet<String> = self.arrays.keys().cloned().collect();
+        let mut maybes: HashSet<String> = HashSet::new();
         for s in &self.slots {
             if s.global && s.array.is_some() {
                 let b = format!("inv_{}", s.name);
                 pointees.insert(s.name.clone(), (Some(b.clone()), Some(b)));
                 arrays.insert(s.name.clone());
+            } else if s.array.is_some()
+                && let Some(b) = locals.get(&s.name)
+            {
+                // A local array is its contents, as an array parameter is:
+                // `bs[i]` in an invariant reads the sequence the frame
+                // binds for the array's current value.
+                // One declared without an initializer is held in the
+                // `option` view until it is handed off whole, and a clause
+                // reading a cell of it claims the cell was written.
+                pointees.insert(s.name.clone(), (Some(b.clone()), Some(b.clone())));
+                arrays.insert(s.name.clone());
+                if s.array.as_ref().is_some_and(|a| a.1) {
+                    maybes.insert(s.name.clone());
+                }
             }
         }
+        let mut deep: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
         for o in self.owned {
             if stated.contains(&o.base) {
+                continue;
+            }
+            // A `const` pointee is held at a fraction the body cannot write
+            // with, so it is still what it was on entry.
+            if o.fixed {
+                owns.push(format!("{}{}", o.pre, o.entry));
+                if let Some(d) = &o.own {
+                    owns.push(format!("{}_own {} {} {}", d.sn, o.entry, d.perm, d.entry));
+                    deep.insert(
+                        o.entry.clone(),
+                        (Some(d.entry.clone()), Some(d.entry.clone())),
+                    );
+                }
+                pointees.insert(
+                    o.base.clone(),
+                    (Some(o.entry.clone()), Some(o.entry.clone())),
+                );
+                olds.insert(o.base.clone(), o.entry.clone());
                 continue;
             }
             let b = format!("inv_val_{}", o.base);
             binders.push(format!("({}: {})", b, o.vty));
             owns.push(format!("{}{}", o.pre, b));
+            // `_own` is about the value, so a fresh value needs a fresh
+            // record: the one the body has now, at whatever the value is now.
+            if let Some(d) = &o.own {
+                let ob = format!("inv_own_{}", o.base);
+                binders.push(format!("({}: {})", ob, d.osty));
+                owns.push(format!("{}_own {} {} {}", d.sn, b, d.perm, ob));
+                deep.insert(b.clone(), (Some(ob.clone()), Some(ob)));
+                deep.insert(
+                    o.entry.clone(),
+                    (Some(d.entry.clone()), Some(d.entry.clone())),
+                );
+            }
+            if let Some(r) = &o.elem_refine {
+                owns.push(format!("pure (seq_forall {} {})", r, b));
+            }
+            // A write through the model replaces an element and never the
+            // length, so an array a loop only writes to keeps the length it
+            // had on entry. A call could hand back a sequence of any length
+            // its contract allows, so a loop that makes one says this itself.
+            if self.arrays.contains_key(&o.base)
+                && body_touches.as_ref().is_some_and(|t| t.calls.is_empty())
+            {
+                owns.push(format!("pure (Seq.length {} == Seq.length {})", b, o.entry));
+            }
             // `_old` is the function's entry state, not this iteration's, so
             // it gets the signature's ghost binder rather than the invariant's.
             pointees.insert(o.base.clone(), (Some(b.clone()), Some(b)));
@@ -19554,7 +25759,6 @@ impl<'a> Body<'a> {
         // binds is the `option` view: a cell the loop has not written yet
         // holds `None`, and a clause that reads a cell claims it is written.
         // The length is the caller's, and does not change.
-        let mut maybes: HashSet<String> = HashSet::new();
         let mut out_arrays: Vec<(String, ArrayParam)> = self
             .arrays
             .iter()
@@ -19593,10 +25797,9 @@ impl<'a> Body<'a> {
             arrays,
             olens: self.olens.clone(),
             // A loop invariant binds a fresh value for every struct it
-            // carries, and the deep ownership of a fresh value is not
-            // something the invariant has a name for yet, so a clause that
-            // reaches into one is dropped with its own reason.
-            owns: HashMap::new(),
+            // carries, and a fresh ownership record with it, so a clause can
+            // reach through the struct's owned pointers.
+            owns: deep,
             // An ownership clause in a body-level annotation is written about
             // the objects in scope there, and a local in scope there is a
             // slot: `$&(x)` has to be the slot's address, not a parameter's.
@@ -19614,6 +25817,7 @@ impl<'a> Body<'a> {
             valued: RefCell::new(Vec::new()),
             maybes,
             defined: RefCell::new(Vec::new()),
+            walks,
         };
         for e in own_clauses.iter() {
             let ExprT::InlinePulse(code, _) = &strip_vattr(e).val else {
@@ -19633,7 +25837,7 @@ impl<'a> Body<'a> {
         for e in prop_clauses.iter() {
             spec.guards.borrow_mut().clear();
             let p = spec.prop(e, When::Pre)?;
-            let guards = spec.guards.borrow();
+            let guards = needed_guards(&spec.guards.borrow());
             // `_live` clauses translate to `True`: the frame has already
             // claimed the storage. Dropping them keeps the invariant readable.
             if p == "True" && guards.is_empty() {
@@ -19642,7 +25846,7 @@ impl<'a> Body<'a> {
             props.push(if guards.is_empty() {
                 p
             } else {
-                format!(r"({} /\ {})", guards.join(r" /\ "), p)
+                format!(r"({} /\ {})", guards, p)
             });
         }
         let mut groups: Vec<String> = Vec::new();
@@ -19654,11 +25858,11 @@ impl<'a> Body<'a> {
                 }
                 spec.guards.borrow_mut().clear();
                 let p = spec.prop(e, When::Pre)?;
-                let guards = spec.guards.borrow();
+                let guards = needed_guards(&spec.guards.borrow());
                 ps.push(if guards.is_empty() {
                     p
                 } else {
-                    format!(r"({} /\ {})", guards.join(r" /\ "), p)
+                    format!(r"({} /\ {})", guards, p)
                 });
             }
             groups.push(if ps.is_empty() {
@@ -19670,6 +25874,40 @@ impl<'a> Body<'a> {
         self.uses.extend(spec.uses.borrow().iter().cloned());
         self.frame_slots = bound;
         Ok((binders, owns, props, storage, groups))
+    }
+
+    /// An `_assert` the body cannot evaluate by loading what it mentions --
+    /// a quantifier whose body reads an array, or `a._length` -- read the way
+    /// a loop invariant is, against the current values: each is bound from
+    /// the ownership held at this point, and the proposition is stated over
+    /// the binders.
+    fn spec_assertion(&mut self, e: &Rc<Expr>) -> Result<String, String> {
+        if is_slprop_clause(self.tds, e) {
+            return Err("an ownership clause".to_string());
+        }
+        let clause: Exprs = vec![e.clone()];
+        let (binders, owns, props, storage) =
+            self.frame(&clause, "an assertion", Some(&Vec::new()))?;
+        self.frame_slots.clear();
+        if !storage.is_empty() {
+            return Err("an assertion about storage not yet written".to_string());
+        }
+        let held: Vec<String> = owns
+            .into_iter()
+            .filter(|o| !o.starts_with("pure "))
+            .collect();
+        if !binders.is_empty() {
+            self.lines.push(format!(
+                "with {}. assert ({});",
+                binders.join(" "),
+                held.join(" ** ")
+            ));
+        }
+        Ok(if props.is_empty() {
+            "pure True".to_string()
+        } else {
+            format!("pure ({})", props.join(r" /\ "))
+        })
     }
 
     /// The same frame, written out as one slprop.
@@ -19721,10 +25959,18 @@ impl<'a> Body<'a> {
         // either the condition is false and the `_requires` holds or the loop
         // broke out with the `_ensures`.
         let contract = !requires.is_empty();
+        // The condition runs on every iteration too, and `while (*d++ = *s++)`
+        // moves its pointers there: what it writes is as much the loop's as
+        // what the body writes.
+        let mut iteration = body.clone();
+        iteration.push(Rc::new(Stmt {
+            val: StmtT::Call(Rc::new(cond.clone())),
+            loc: cond.loc.clone(),
+        }));
         let (binders, mut owns, mut props, storage, groups) = if contract {
-            self.frame_ext(inv, &[requires, ensures], "a loop", Some(body))?
+            self.frame_ext(inv, &[requires, ensures], "a loop", Some(&iteration))?
         } else {
-            let (b, o, p, st) = self.frame(inv, "a loop", Some(body))?;
+            let (b, o, p, st) = self.frame(inv, "a loop", Some(&iteration))?;
             (b, o, p, st, Vec::new())
         };
         let mut binders = binders;
@@ -19840,10 +26086,27 @@ impl<'a> Body<'a> {
         let outer_prescattered = self.prescattered.clone();
         let mark = self.slots.len();
         let r = (|| -> Result<(), String> {
-            for s in body.iter() {
+            let folded = fold_exits(body);
+            // Where the body ends in an `if` one arm of which leaves, the
+            // start of its lines and whether `then` is the arm that falls
+            // through to the closing brace.
+            let mut tail_if = None;
+            for (k, s) in folded.iter().enumerate() {
                 if matches!(s.val, StmtT::Goto(_)) {
                     self.rest(std::slice::from_ref(s))?;
                     break;
+                }
+                if k + 1 == folded.len()
+                    && let StmtT::If {
+                        then_branch,
+                        else_branch,
+                        ensures,
+                        ..
+                    } = &s.val
+                    && ensures.is_empty()
+                    && exits(then_branch) != exits(else_branch)
+                {
+                    tail_if = Some((self.lines.len(), !exits(then_branch)));
                 }
                 self.env.push_stmt(s);
                 self.stmt(s)?;
@@ -19852,8 +26115,38 @@ impl<'a> Body<'a> {
             // invariant has to hold at the closing brace without it: Pulse
             // would otherwise be asked to carry a local across an edge where C
             // says its lifetime has ended.
+            let released = self.lines.len();
             self.release_from(mark);
             self.forget_loop_storage()?;
+            if SPLIT_INVARIANTS.load(std::sync::atomic::Ordering::Relaxed)
+                && !contract
+                && !self.diverged
+                && !exits(&folded)
+            {
+                // Read at the loop head's scope, as the invariant is: the
+                // body's declarations are over, and one may shadow a name a
+                // clause uses or a quantifier binds.
+                let body_env = std::mem::replace(&mut self.env, outer_env.clone());
+                let body_slots = self.slots.split_off(mark);
+                self.assert_invariant_clauses(inv);
+                self.slots.extend(body_slots);
+                self.env = body_env;
+            }
+            // The arm that leaves has released all of this already, so it
+            // goes at the end of the other arm. The `if` is then the body's
+            // last statement, which Pulse checks arm by arm against the
+            // invariant, instead of joining the arms first and forgetting
+            // what the arm that falls through knew (`if (!c) return 0;`
+            // followed by an `if` that writes a local).
+            if let Some((start, then_falls)) = tail_if
+                && released < self.lines.len()
+                && self.lines[..released].last().map(String::as_str) == Some("};")
+                && let Some(mid) = (start..released).rfind(|&j| self.lines[j] == "} else {")
+            {
+                let cleanup = self.lines.split_off(released);
+                let at = if then_falls { mid } else { released - 1 };
+                self.lines.splice(at..at, cleanup.iter().map(|l| indent(l)));
+            }
             for &i in &self.loop_storage {
                 self.slots[i].init = false;
                 self.slots[i].holds_fn.clear();
@@ -20205,6 +26498,13 @@ impl<'a> Body<'a> {
         if let Some(s2) = self.split_byte_field(s)? {
             return self.stmt(&s2);
         }
+        if let Some(parts) = self.split_overlay_init(s)? {
+            for p in &parts {
+                self.stmt(p)?;
+            }
+            return Ok(());
+        }
+        self.check_alias_snaps(s)?;
         let r = self.stmt_inner(s);
         let close = std::mem::take(&mut self.pending_close);
         let open = std::mem::take(&mut self.own_open);
@@ -20216,6 +26516,294 @@ impl<'a> Body<'a> {
         self.own_open = open;
         self.close_own();
         Ok(())
+    }
+
+    /// Before `_assert(p != NULL)`, the fact that `p` is not null, from the
+    /// points-to of a parameter whose pointee the contract grants whole: Pulse
+    /// does not derive it from the resource by itself.
+    fn not_null_facts(&mut self, e: &Expr) {
+        fn tested(e: &Expr, out: &mut Vec<String>) {
+            match &strip_vattr(strip_casts(e)).val {
+                ExprT::BinOp(BinOp::LogAnd, a, b) => {
+                    tested(a, out);
+                    tested(b, out);
+                }
+                ExprT::UnOp(UnOp::Not, x) => {
+                    if let ExprT::BinOp(BinOp::Eq, a, b) = &strip_vattr(strip_casts(x)).val {
+                        for (v, z) in [(a, b), (b, a)] {
+                            if is_zero(strip_casts(z))
+                                && let ExprT::Var(x) = &strip_vattr(strip_casts(v)).val
+                            {
+                                out.push(x.val.to_string());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut vs = Vec::new();
+        tested(e, &mut vs);
+        for x in vs {
+            if !self.params.contains(&x)
+                || !self.granted.contains(&x)
+                || self.pieces.contains(&x)
+                || (self.guarded.contains(&x) && !self.unguarded.contains(&x))
+                || self.slots.iter().any(|s| s.name == x)
+            {
+                continue;
+            }
+            let Ok(t) = self.ty_of(
+                &ExprT::Var(Rc::<str>::from(x.as_str()).with_loc(e.loc.clone()))
+                    .with_loc(e.loc.clone()),
+            ) else {
+                continue;
+            };
+            if let TypeT::Pointer(pt, _) = &peel(self.tds, &t).val
+                && extent(self.tds, &t) == Some(Extent::One)
+                && let Some(l) = not_null_lemma(self.tds, pt, false)
+            {
+                self.lines.push(format!("{} var_{};", l, x));
+            }
+        }
+    }
+
+    /// `x = (T){...}` for a `T` with an overlay union in it, one field at a
+    /// time. Such a value is bytes and has no whole-value writer (see
+    /// `holds_overlay`), so the literal is taken apart into a store per
+    /// field, and an overlay union's literal into a store to the arm it
+    /// initializes. `None` when the statement is not one of these.
+    ///
+    /// C leaves the bytes of a union outside the member a literal initializes
+    /// unspecified -- an omitted union's first member included -- so a store
+    /// to that member alone, which keeps the old bytes, is the C store only
+    /// when the member is every byte of the union. Any other is refused.
+    fn split_overlay_init(&self, s: &Stmt) -> Result<Option<Vec<Rc<Stmt>>>, String> {
+        fn go(
+            b: &Body,
+            lhs: &Rc<Expr>,
+            rhs: &Rc<Expr>,
+            loc: &Rc<SourceInfo>,
+            in_arm: bool,
+            out: &mut Vec<Rc<Stmt>>,
+        ) -> Result<bool, String> {
+            // Inside an arm of an overlay union a struct is taken apart too:
+            // a store of a whole member is refused there (C11 6.2.6.1p7).
+            let whole = in_arm || b.ty_of(lhs).is_ok_and(|t| holds_overlay(b.tds, &t));
+            match &strip_vattr(rhs).val {
+                ExprT::StructInit(n, fs) if whole => {
+                    let Some(si) = b.tds.structs.get(&*n.val) else {
+                        return Ok(false);
+                    };
+                    for f in &si.fields {
+                        let name = Rc::<str>::from(f.name.as_str()).with_loc(lhs.loc.clone());
+                        let m = ExprT::Member(lhs.clone(), name).with_loc(lhs.loc.clone());
+                        // C zeroes the fields an initialiser leaves out.
+                        let e = match fs.iter().find(|(i, _)| *i.val == *f.name) {
+                            Some((_, e)) => e.clone(),
+                            None => match zero_expr(b.tds, &f.ty, &lhs.loc) {
+                                Some(z) => z,
+                                None => return Ok(false),
+                            },
+                        };
+                        if !go(b, &m, &e, loc, in_arm, out)? {
+                            return Ok(false);
+                        }
+                    }
+                }
+                ExprT::UnionInit(n, arm, e) if whole => {
+                    let m = ExprT::Member(lhs.clone(), arm.clone()).with_loc(lhs.loc.clone());
+                    let ui = b.tds.unions.get(&*n.val);
+                    let overlay = ui.is_some_and(|u| u.overlay);
+                    if let Some(ui) = ui
+                        && overlay
+                        && !ui.members.iter().any(|x| {
+                            *x.name == *arm.val && x.size == ui.size && fills(b.tds, &x.ty)
+                        })
+                    {
+                        return Err(format!(
+                            "a literal that initializes `.{}` of union `{}`, which leaves bytes of the union unspecified",
+                            arm.val, n.val
+                        ));
+                    }
+                    return go(b, &m, e, loc, in_arm || overlay, out);
+                }
+                _ => out.push(StmtT::Assign(lhs.clone(), rhs.clone()).with_loc(loc.clone())),
+            }
+            Ok(true)
+        }
+        // Whether a store of every scalar in a value of `ty` writes all of its
+        // bytes: no padding, no bit-fields.
+        fn fills(tds: &Typedefs, ty: &Rc<Type>) -> bool {
+            match &peel(tds, ty).val {
+                TypeT::Int { .. }
+                | TypeT::Bool
+                | TypeT::SizeT
+                | TypeT::PtrdiffT
+                | TypeT::Pointer(..)
+                | TypeT::FnPtr { .. } => true,
+                TypeT::FixedArray(t, _) => fills(tds, t),
+                TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+                    let Some(si) = tds.structs.get(&*n.val) else {
+                        return false;
+                    };
+                    let mut at = 0;
+                    for f in &si.fields {
+                        if f.offset != at || !fills(tds, &f.ty) {
+                            return false;
+                        }
+                        at += f.size;
+                    }
+                    si.bitfields.is_empty() && at == si.size
+                }
+                // A union member is stored through one of its own arms,
+                // which is checked when it is.
+                TypeT::TypeRef(TypeRefKind::Union(n)) => tds.unions.contains_key(&*n.val),
+                _ => false,
+            }
+        }
+        let StmtT::Assign(lhs, rhs) = &s.val else {
+            return Ok(None);
+        };
+        if !matches!(
+            &strip_vattr(rhs).val,
+            ExprT::StructInit(..) | ExprT::UnionInit(..)
+        ) || !self.ty_of(lhs).is_ok_and(|t| holds_overlay(self.tds, &t))
+        {
+            return Ok(None);
+        }
+        let mut out = Vec::new();
+        Ok(go(self, lhs, rhs, &s.loc, false, &mut out)?.then_some(out))
+    }
+
+    /// Prove, before a statement that uses an alias, that each pointer its
+    /// place loads still holds what it held when the alias was bound. Only
+    /// then is re-evaluating the place the same as reading C's pointer.
+    fn check_alias_snaps(&mut self, s: &Stmt) -> Result<(), String> {
+        if self.alias_snaps.is_empty() {
+            return Ok(());
+        }
+        let exprs: Vec<&Rc<Expr>> = match &s.val {
+            // Binding the alias is not a use of it, but a getter's arguments
+            // are read before the call that binds it.
+            StmtT::Assign(lhs, rhs)
+                if lvalue_name(lhs).is_some_and(|q| self.aliases.contains_key(&q)) =>
+            {
+                if matches!(&strip_casts(rhs).val, ExprT::FnCall(..)) {
+                    vec![rhs]
+                } else {
+                    vec![]
+                }
+            }
+            StmtT::Call(e) | StmtT::Let(_, _, e) | StmtT::Return(Some(e)) => vec![e],
+            StmtT::Assign(l, r) => vec![l, r],
+            StmtT::If { cond, .. } => vec![cond],
+            StmtT::Match { scrutinee, .. } => vec![scrutinee],
+            StmtT::DeclStackArray { size, .. } => vec![size],
+            // A specification reads the place as much as code does.
+            StmtT::Assert(e) => vec![e],
+            StmtT::GhostStmt(code) => code
+                .tokens
+                .iter()
+                .filter_map(|t| match t {
+                    InlinePulseToken::RValueAntiquot { expr, .. }
+                    | InlinePulseToken::LValueAntiquot { expr, .. } => Some(expr),
+                    _ => None,
+                })
+                .collect(),
+            // The condition is evaluated again after every iteration, where
+            // nothing here could check it.
+            StmtT::While { cond, .. } => {
+                if let Some(q) = self.snapped_alias_in(cond).into_iter().next() {
+                    return Err(format!(
+                        "a loop condition using `{}`, whose place reads a pointer that may change",
+                        q
+                    ));
+                }
+                vec![]
+            }
+            _ => vec![],
+        };
+        // The check covers the state before the statement. A call evaluated
+        // ahead of the alias's use would come between, so the only call a
+        // statement using one may make is a single outermost call, whose
+        // arguments are all read before it runs. `*q = f(h)` was split by
+        // `split_alias_stores` and does not get here.
+        if let Some(q) = exprs
+            .iter()
+            .find_map(|e| self.snapped_alias_in(e).into_iter().next())
+        {
+            let single = |e: &Rc<Expr>| match &strip_casts(e).val {
+                ExprT::FnCall(_, args) => !args.iter().any(has_call),
+                ExprT::FnPtrCall(f, args) => !has_call(f) && !args.iter().any(has_call),
+                _ => !has_call(e),
+            };
+            let ordered = match &s.val {
+                // A call in a specification is to a pure function: it changes
+                // nothing the check covers.
+                StmtT::Assert(_) | StmtT::GhostStmt(_) => true,
+                StmtT::Assign(l, r)
+                    if lvalue_name(l).is_some_and(|q| self.aliases.contains_key(&q)) =>
+                {
+                    single(r)
+                }
+                StmtT::Assign(l, r) => {
+                    !has_call(l)
+                        && single(r)
+                        && !(has_call(r) && mentions_snapped(l, &self.alias_snaps))
+                }
+                _ => exprs.iter().all(|e| single(e)),
+            };
+            if !ordered {
+                return Err(format!(
+                    "a statement that calls a function and uses `{}`, whose place reads a pointer the call may change",
+                    q
+                ));
+            }
+        }
+        // What the checks open is closed again before the statement: they
+        // leave only pure facts, and a call in the statement opens what its
+        // arguments need out of sight of anything opened here.
+        let outer_close = std::mem::take(&mut self.pending_close);
+        let outer_own = std::mem::take(&mut self.own_open);
+        let mut done: Vec<Rc<Ident>> = Vec::new();
+        for e in exprs {
+            for q in self.snapped_alias_in(e) {
+                for (l, id) in self.alias_snaps[&q].clone() {
+                    if done.contains(&id) {
+                        continue;
+                    }
+                    done.push(id.clone());
+                    let cur = self.rvalue(&l)?;
+                    let at = self.rvalue(&ExprT::Var(id.clone()).with_loc(l.loc.clone()))?;
+                    self.lines
+                        .push(format!("assert (pure ({} == {}));", cur, at));
+                }
+            }
+        }
+        self.lines.append(&mut self.pending_close);
+        self.close_own();
+        self.pending_close = outer_close;
+        self.own_open = outer_own;
+        Ok(())
+    }
+
+    /// The aliases with snapshots that an expression mentions, in order.
+    fn snapped_alias_in(&self, e: &Rc<Expr>) -> Vec<String> {
+        fn go(e: &Rc<Expr>, snaps: &AliasSnaps, out: &mut Vec<String>) {
+            if let ExprT::Var(v) = &e.val {
+                let v = v.val.to_string();
+                if snaps.contains_key(&v) && !out.contains(&v) {
+                    out.push(v);
+                }
+            }
+            for x in expr_operands(e) {
+                go(x, snaps, out);
+            }
+        }
+        let mut out = Vec::new();
+        go(e, &self.alias_snaps, &mut out);
+        out
     }
 
     fn stmt_inner(&mut self, s: &Stmt) -> Result<(), String> {
@@ -20325,12 +26913,40 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Assign(lhs, rhs) => {
+                // A getter that may return `NULL`: its result is stored like
+                // any pointer's, and is either `NULL` or the place's address.
+                if let Some(v) = lvalue_name(lhs)
+                    && self.nullable_aliases.contains(&v)
+                    && matches!(&strip_casts(rhs).val, ExprT::FnCall(..))
+                    && let Some(place) = self.aliases.get(&v).cloned()
+                {
+                    self.nullable_aliases.remove(&v);
+                    let stored = self.stmt_inner(s);
+                    self.nullable_aliases.insert(v.clone());
+                    stored?;
+                    let at = self.rvalue(&ExprT::Ref(place).with_loc(rhs.loc.clone()))?;
+                    let q = self.rvalue(lhs)?;
+                    self.lines.push(format!(
+                        "assert (pure ({} == null \\/ {} == {}));",
+                        q, q, at
+                    ));
+                    return Ok(());
+                }
                 // Only contracts that name the pointer cell need its storage;
                 // dereferences still follow the fixed place.
                 if let Some(v) = lvalue_name(lhs) {
                     if (self.aliases.contains_key(&v) && !self.stored_aliases.contains(&v))
                         || self.is_array_alias(&v)
                     {
+                        // An alias bound to a call's result: the call still
+                        // runs, and its result has to be the place's address.
+                        if matches!(&strip_casts(rhs).val, ExprT::FnCall(..))
+                            && let Some(place) = self.aliases.get(&v).cloned()
+                        {
+                            let r = self.rvalue(rhs)?;
+                            let at = self.rvalue(&ExprT::Ref(place).with_loc(rhs.loc.clone()))?;
+                            self.lines.push(format!("assert (pure ({} == {}));", r, at));
+                        }
                         return Ok(());
                     }
                 }
@@ -20577,7 +27193,8 @@ impl<'a> Body<'a> {
                 Ok(())
             }
             StmtT::Assert(e) => {
-                let p = self.assertion(e)?;
+                self.not_null_facts(e);
+                let p = self.stmt_assertion(e)?;
                 self.lines.push(format!("assert ({});", p));
                 if is_false_lit(e) {
                     // The assertion is still proved, never assumed. No state
@@ -20756,6 +27373,9 @@ impl<'a> Body<'a> {
                     let void = callee.is_some_and(|c| c.void);
                     let noreturn = callee.is_some_and(|c| c.noreturn);
                     let call = self.call(name, args)?;
+                    if std::mem::take(&mut self.copied_call) {
+                        return Ok(());
+                    }
                     if void {
                         self.lines.push(format!("{};", call));
                     } else {
@@ -20817,8 +27437,12 @@ impl<'a> Body<'a> {
                         pn,
                         close_write: close,
                         maybe,
+                        walk,
                         ..
                     } = self.whole_array_place(p)?;
+                    if walk.is_some() {
+                        return Err("a whole-array operation on a moved pointer".to_string());
+                    }
                     if let Some(slot) = self.slots.iter_mut().find(|slot| slot.addr == arr) {
                         slot.array_value = None;
                     }
@@ -20978,6 +27602,13 @@ impl<'a> Body<'a> {
                 if let Some((i, _)) = nt {
                     self.mark_checked(i, live_then);
                 }
+                let seed = self.seed_split(cond).filter(|_| pt.is_some());
+                if let Some((_, c)) = &seed {
+                    self.seed_pending.remove(c);
+                    if pt_live_then {
+                        self.out_params.push(c.clone());
+                    }
+                }
                 if let Some((p, _)) = pt.as_ref().filter(|_| pt_live_then) {
                     self.unguarded.push(p.clone());
                 }
@@ -20996,6 +27627,11 @@ impl<'a> Body<'a> {
                 if let Some((i, _)) = nt {
                     self.mark_checked(i, !live_then);
                 }
+                if let Some((_, c)) = &seed
+                    && !pt_live_then
+                {
+                    self.out_params.push(c.clone());
+                }
                 if let Some((p, _)) = pt.as_ref().filter(|_| !pt_live_then) {
                     self.unguarded.push(p.clone());
                 }
@@ -21004,6 +27640,21 @@ impl<'a> Body<'a> {
                     self.unguarded.pop();
                 }
                 let mut els = els?;
+                // The seed test settles the slot. Where both arms go on, the
+                // one that has the cursor in it forgets it, unless it wrote
+                // it: what the other arm has is storage.
+                if let Some((sd, c)) = &seed {
+                    then.lines.insert(0, Self::seed_elim(sd, c, pt_live_then));
+                    els.lines.insert(0, Self::seed_elim(sd, c, !pt_live_then));
+                    if !then.diverged && !els.diverged && !then.returned && !els.returned {
+                        let (t, e) = (then.out_params.contains(c), els.out_params.contains(c));
+                        if t != e {
+                            let held = if t { &mut els } else { &mut then };
+                            held.lines.push(format!("ptr_forget var_{};", c));
+                            held.out_params.push(c.clone());
+                        }
+                    }
+                }
                 if let Some((p, _)) = &pt {
                     let payload = self.nullable_payload(p, &entry_out);
                     let (live, null) = if pt_live_then {
@@ -21011,8 +27662,7 @@ impl<'a> Body<'a> {
                     } else {
                         (&mut els, &mut then)
                     };
-                    live.lines
-                        .insert(0, format!("elim_unless_null var_{} ({});", p, payload));
+                    live.lines.splice(0..0, self.open_guard(p, &payload));
                     if !live.returned && !live.diverged {
                         let payload = self.nullable_payload(p, &live.out_params);
                         live.lines
@@ -21151,7 +27801,27 @@ impl<'a> Body<'a> {
                     }
                     None => (Vec::new(), Vec::new()),
                 };
+                // A pure `_ensures` is the author's statement of what the
+                // join keeps. Pulse's own join forgets every fact about a
+                // value an arm computed, so a loop inside an arm leaves
+                // nothing behind but the clause. The slots the arms do not
+                // write keep their values, and walked pointers their walk.
+                let pure_join = !states_own && ensures.iter().any(|e| !live_only(e));
+                let join = if pure_join {
+                    let mut t = Touched::default();
+                    touch_stmts(then_branch, &mut t);
+                    touch_stmts(else_branch, &mut t);
+                    self.join_written = Some(t.written);
+                    let j = self.frame_slprop(ensures, "an `if`", "    ");
+                    self.join_written = None;
+                    Some(j?)
+                } else {
+                    None
+                };
                 self.lines.push(format!("if ({})", c));
+                if let Some(j) = join {
+                    self.lines.push(format!("  ensures {}", j));
+                }
                 if states_own {
                     // Pulse does not frame an `if`'s annotation, so it has to
                     // be the whole state at the join: the author's ownership
@@ -21192,6 +27862,14 @@ impl<'a> Body<'a> {
                 self.lines.extend(else_pre.iter().map(|l| indent(l)));
                 self.lines.extend(els.lines.iter().map(|l| indent(l)));
                 self.lines.push("};".to_string());
+                // Pulse refuses an annotated `if` in tail position under an
+                // expected postcondition -- the end of an enclosing annotated
+                // `if`'s arm, or of a loop body -- as two postconditions for
+                // one statement. A unit after it is the tail instead, checked
+                // against the outer expectation from the `if`'s own.
+                if pure_join || states_own {
+                    self.lines.push("();".to_string());
+                }
                 for (addr, key) in fps {
                     self.seeded
                         .push((addr, "_".to_string(), "_".to_string(), key));
@@ -21292,8 +27970,16 @@ impl<'a> Body<'a> {
                     cond,
                     then_branch,
                     else_branch,
-                    ..
-                } if may_exit(then_branch) || may_exit(else_branch) => {
+                    ensures,
+                } if may_exit(then_branch)
+                    || may_exit(else_branch)
+                    || (ensures.is_empty()
+                        && (has_loop(then_branch)
+                            || has_loop(else_branch)
+                            || self.writes_walked(then_branch)
+                            || self.writes_walked(else_branch))
+                        && copyable_tail(then_branch, else_branch, &stmts[i + 1..])) =>
+                {
                     self.active.clear();
                     // A test of a freshly allocated pointer is the one
                     // condition that is not just a value: it decides which arm
@@ -21362,24 +28048,29 @@ impl<'a> Body<'a> {
                         }
                         _ => Vec::new(),
                     };
+                    let seed = self.seed_split(cond).filter(|_| pt.is_some());
                     let open = |b: &mut Self, live: bool| {
                         if let Some((p, _)) = pt.as_ref().filter(|_| live) {
                             b.unguarded.push(p.clone());
+                        }
+                        if let Some((_, c)) = &seed {
+                            b.seed_pending.remove(c);
+                            if live {
+                                b.out_params.push(c.clone());
+                            }
                         }
                     };
                     let close = |b: &mut Self, live: bool, lines: &mut Vec<String>| {
                         if let Some((p, _)) = pt.as_ref().filter(|_| live) {
                             b.unguarded.pop();
-                            lines.insert(
-                                0,
-                                format!(
-                                    "elim_unless_null var_{} ({});",
-                                    p,
-                                    pt_payload.as_ref().unwrap()
-                                ),
-                            );
+                            lines.splice(0..0, b.open_guard(p, pt_payload.as_ref().unwrap()));
                         } else if !live {
                             lines.splice(0..0, pt_null_lines.iter().cloned());
+                        }
+                        if let Some((sd, c)) = &seed {
+                            lines.insert(0, Self::seed_elim(sd, c, live));
+                            b.out_params.retain(|n| n != c);
+                            b.seed_pending.insert(c.clone());
                         }
                     };
                     open(self, pt_live_then);
@@ -21460,7 +28151,7 @@ impl<'a> Body<'a> {
                     // for, including the initialized ownership `_live` asks
                     // for rather than merely the existence of a slot.
                     for e in ensures.iter() {
-                        let p = self.assertion(e)?;
+                        let p = self.stmt_assertion(e)?;
                         self.lines.push(format!("assert ({});", p));
                     }
                     // Labels inside the one being jumped to are out of scope
@@ -21566,8 +28257,13 @@ impl<'a> Body<'a> {
         let outer_tail_branch = std::mem::replace(&mut self.tail_branch, false);
         let outer_diverged = std::mem::replace(&mut self.diverged, false);
 
+        let folded = if self.in_loop {
+            fold_exits(stmts)
+        } else {
+            stmts.clone()
+        };
         let result = (|| -> Result<bool, String> {
-            for s in stmts.iter() {
+            for s in folded.iter() {
                 if self.diverged {
                     break;
                 }
@@ -21794,10 +28490,44 @@ impl<'a> Body<'a> {
                 let Some(a) = self.arrays.get(&base) else {
                     continue;
                 };
-                self.lines.push(format!(
-                    "array_somes {}_repr {} {} {}_alignof;",
-                    a.pn, a.addr, a.esize, a.pn
-                ));
+                // The postcondition states a refined struct's element fact
+                // of the sequence claimed here, so the claim asks it of
+                // every written cell.
+                let refined =
+                    a.pn.strip_prefix("struct_")
+                        .and_then(|sn| self.tds.structs.get(sn))
+                        .is_some_and(|si| si.elem_refine.is_some());
+                self.lines.push(if refined {
+                    format!(
+                        "array_somes_forall {pn}__refine {pn}_repr {} {} {pn}_alignof;",
+                        a.addr,
+                        a.esize,
+                        pn = a.pn
+                    )
+                } else {
+                    format!(
+                        "array_somes {}_repr {} {} {}_alignof;",
+                        a.pn, a.addr, a.esize, a.pn
+                    )
+                });
+            }
+        }
+        // A heap array handed back to the caller leaves as a value, like an
+        // `_out` array: `array_somes` asks that every cell was written.
+        if mark == 0 && self.ret_array {
+            for b in &self.blocks {
+                if let Some(a) = &b.array
+                    && b.checked
+                    && !b.freed
+                    && !a.filled
+                {
+                    self.lines.push(format!(
+                        "array_somes {pn}_repr {} {} {pn}_alignof;",
+                        b.tmp,
+                        a.esize,
+                        pn = b.pn
+                    ));
+                }
             }
         }
         for i in (mark..self.slots.len()).rev() {
@@ -21860,22 +28590,22 @@ fn int_literal(tds: &Typedefs, n: &BigInt, ty: &Type) -> Result<String, String> 
     match &peel(tds, ty).val {
         TypeT::Int { signed, width } => {
             let suffix = int_suffix(*signed, *width)?;
-            if *n < BigInt::ZERO {
-                if !*signed {
-                    // C converts a negative constant to an unsigned type by
-                    // reducing it modulo the width -- `(uint32_t)-1` is
-                    // `4294967295` -- and F* has no negative unsigned literal
-                    // to write it with, so the reduction is done here.
-                    let m = BigInt::from(1u8) << *width;
-                    let r = ((n % &m) + &m) % &m;
-                    return Ok(format!("{}{}", r, suffix));
-                }
+            // C converts a constant to an integer type by reducing it modulo
+            // the width -- `(uint32_t)-1` is `4294967295`, `(uint8_t)300` is
+            // `44` -- and F* has no out-of-range literal to write it with, so
+            // the reduction is done here. For a signed target the result is
+            // implementation-defined, and every target PAL knows wraps.
+            let n = wrap_int(n, *signed, *width);
+            if n < BigInt::ZERO {
                 Ok(format!("({}{})", n, suffix))
             } else {
                 Ok(format!("{}{}", n, suffix))
             }
         }
-        TypeT::SizeT => Ok(format!("{}sz", n)),
+        TypeT::SizeT => Ok(format!(
+            "{}sz",
+            wrap_int(n, false, (8 * tds.ptr_bytes) as u32)
+        )),
         // `true` and `false` are macros for the integer literals 1 and 0, so
         // they reach the IR as literals at type `_Bool`.
         TypeT::Bool => Ok(if *n == BigInt::ZERO { "false" } else { "true" }.to_string()),
@@ -22123,9 +28853,35 @@ fn float_literal(tds: &Typedefs, text: &str, ty: &Type) -> Result<String, String
 /// for a signed type, `MAX - a` for an unsigned one. Neither can overflow,
 /// and unlike F*'s `lognot` the solver can reason about either -- including
 /// through the narrowing cast that `(uint8_t)~x` puts around a promoted `~`.
-fn bitnot(tds: &Typedefs, ty: &Type, a: &str) -> Option<String> {
-    let TypeT::Int { signed, width } = peel(tds, ty).val else {
+/// A shift count wider than the `UInt32.t` F*'s shifts take: elab casts it
+/// to `uint32_t`, and that cast would truncate -- a count of 2^32 would
+/// become 0 and its shift look defined. Returns the uncast count and the F*
+/// module whose `v` reads it, so the count can be narrowed by the checked
+/// `UInt32.uint_to_t` instead, which owes `0 <= v < 2^32`.
+fn wide_shift_count<'e>(
+    tds: &Typedefs,
+    ty_of: impl Fn(&Expr) -> Option<Rc<Type>>,
+    r: &'e Expr,
+) -> Option<(&'e Expr, String)> {
+    let ExprT::Cast(inner, _) = &r.val else {
         return None;
+    };
+    let ty = ty_of(inner)?;
+    let m = match &peel(tds, &ty).val {
+        TypeT::SizeT => "SizeT".to_string(),
+        TypeT::Int { signed, width } if *width > 32 => {
+            format!("{}Int{}", if *signed { "" } else { "U" }, width)
+        }
+        _ => return None,
+    };
+    Some((inner, m))
+}
+
+fn bitnot(tds: &Typedefs, ty: &Type, a: &str) -> Option<String> {
+    let (signed, width) = match peel(tds, ty).val {
+        TypeT::Int { signed, width } => (signed, width),
+        TypeT::SizeT => return Some(format!("(Pulse.Lib.C.SizeT.lognot {})", a)),
+        _ => return None,
     };
     let all = if signed {
         BigInt::from(-1)
@@ -22135,6 +28891,15 @@ fn bitnot(tds: &Typedefs, ty: &Type, a: &str) -> Option<String> {
     let lit = int_literal(tds, &all, ty).ok()?;
     let m = format!("FStar.{}Int{}", if signed { "" } else { "U" }, width);
     Some(format!("({}.sub {} {})", m, lit, a))
+}
+
+/// `n` reduced into the range of a `width`-bit integer type, as C's
+/// conversion to an unsigned type does and as a signed one does on every
+/// target PAL knows.
+fn wrap_int(n: &BigInt, signed: bool, width: u32) -> BigInt {
+    let m = BigInt::from(1u8) << width;
+    let r = ((n % &m) + &m) % &m;
+    if signed && r >= (&m >> 1) { r - m } else { r }
 }
 
 fn int_suffix(signed: bool, width: u32) -> Result<&'static str, String> {
@@ -22374,6 +29139,69 @@ fn ptr_elem_size(tds: &Typedefs, ty: &Type) -> Option<u64> {
     palow_sizeof(tds, &pt).filter(|n| *n > 0)
 }
 
+/// Whether a specification expression measures a distance between pointers:
+/// `p - q`, or arithmetic and conversions of one. Such a distance is an
+/// element count, and a specification reads it, and everything it is
+/// combined with, as a mathematical integer.
+///
+/// Only a conversion that keeps every distance's value is looked through:
+/// to `ptrdiff_t`, to a signed type at least as wide, or to `_specint`.
+/// Under a narrowing or unsigned one, `(uint8_t)(p - a)`, the distance is a
+/// machine value like any other and the conversion has to be translated.
+fn has_ptr_diff(tds: &Typedefs, e: &Expr, is_ptr: &dyn Fn(&Expr) -> bool) -> bool {
+    match &strip_vattr(e).val {
+        ExprT::BinOp(BinOp::Sub, l, r) if is_ptr(l) && is_ptr(r) => true,
+        ExprT::BinOp(BinOp::Add | BinOp::Sub | BinOp::Mul, l, r) => {
+            has_ptr_diff(tds, l, is_ptr) || has_ptr_diff(tds, r, is_ptr)
+        }
+        ExprT::UnOp(UnOp::Neg, i) | ExprT::Old(i) => has_ptr_diff(tds, i, is_ptr),
+        ExprT::Cast(i, to) if keeps_diff_ty(tds, to) => has_ptr_diff(tds, i, is_ptr),
+        _ => false,
+    }
+}
+
+/// Whether converting a pointer distance to `to` keeps its value.
+fn keeps_diff_ty(tds: &Typedefs, to: &Type) -> bool {
+    matches!(
+        tds.resolve(to).val,
+        TypeT::PtrdiffT
+            | TypeT::SpecInt
+            | TypeT::Int {
+                signed: true,
+                width: 64..
+            }
+    )
+}
+
+/// `e` without the value-keeping conversions (see `has_ptr_diff`) around it.
+fn keeps_diff<'a>(tds: &Typedefs, e: &'a Expr) -> &'a Expr {
+    match &strip_vattr(e).val {
+        ExprT::Cast(i, to) if keeps_diff_ty(tds, to) => keeps_diff(tds, i),
+        _ => strip_vattr(e),
+    }
+}
+
+/// The integer under the conversion to `ptrdiff_t` the elaborator puts on
+/// a `size_t` or other integer that meets a pointer distance.
+fn ptrdiff_conv<'a>(
+    tds: &Typedefs,
+    e: &'a Expr,
+    ty_of: &dyn Fn(&Expr) -> Option<Rc<Type>>,
+) -> Option<&'a Expr> {
+    let ExprT::Cast(inner, to) = &strip_vattr(e).val else {
+        return None;
+    };
+    if !matches!(tds.resolve(to).val, TypeT::PtrdiffT) {
+        return None;
+    }
+    let it = ty_of(inner)?;
+    matches!(
+        tds.resolve(&it).val,
+        TypeT::Int { .. } | TypeT::SizeT | TypeT::Bool
+    )
+    .then_some(&**inner)
+}
+
 fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String, String> {
     let t = peel(tds, ty);
     let m = match &t.val {
@@ -22427,7 +29255,9 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
         _ => return Err(format!("an operator on {}", describe(t))),
     };
     match op {
-        BinOp::Eq => return Ok("=".to_string()),
+        // The module's own `eq`, like `lt` below, so that every comparison
+        // reaches the solver as one on `v` of its operands.
+        BinOp::Eq => return Ok(format!("`{}.eq`", m)),
         // GNU `a ?: b`. The operand is already bound to a name by the time
         // this is applied, so the `if` below it duplicates a value and not a
         // computation -- which is the whole content of "evaluated once".
@@ -22444,13 +29274,13 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
         BinOp::LEq => return Ok(format!("`{}.lte`", m)),
         // The bitwise operators are defined on the whole range at both
         // signednesses, so they need no obligation and no wrapping variant.
-        // `FStar.SizeT` does not have them, hence the guard.
+        // `FStar.SizeT` does not have them, so `size_t` gets its own.
         // C requires the shift count to be below the width, which PAL turns
         // into a proof obligation and the source discharges with a
         // `_requires`; a signed left shift additionally needs a non-negative
         // operand. Both come out of the contract, so an untranslated one has
         // to refuse rather than emit a failure about something else.
-        BinOp::Shl | BinOp::Shr if matches!(t.val, TypeT::Int { .. }) => {
+        BinOp::Shl | BinOp::Shr if matches!(t.val, TypeT::Int { .. } | TypeT::SizeT) => {
             if !signed_ok {
                 return Err(
                     "a shift, whose width obligation needs the untranslated `_requires`"
@@ -22459,7 +29289,11 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
             }
             return Ok(format!(
                 "`{}.shift_{}`",
-                m,
+                if matches!(t.val, TypeT::SizeT) {
+                    "Pulse.Lib.C.SizeT"
+                } else {
+                    m.as_str()
+                },
                 if matches!(op, BinOp::Shl) {
                     "left"
                 } else {
@@ -22467,10 +29301,16 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
                 }
             ));
         }
-        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor if matches!(t.val, TypeT::Int { .. }) => {
+        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+            if matches!(t.val, TypeT::Int { .. } | TypeT::SizeT) =>
+        {
             return Ok(format!(
-                "`FStar.{}.log{}`",
-                m,
+                "`{}.log{}`",
+                if matches!(t.val, TypeT::SizeT) {
+                    "Pulse.Lib.C.SizeT".to_string()
+                } else {
+                    format!("FStar.{}", m)
+                },
                 match op {
                     BinOp::BitAnd => "and",
                     BinOp::BitOr => "or",
@@ -22487,12 +29327,15 @@ fn binop(tds: &Typedefs, op: BinOp, ty: &Type, signed_ok: bool) -> Result<String
     // `_requires` clause. When the contract did not translate, emitting it
     // would produce a failure that says nothing about the memory model, so it
     // is refused instead.
-    if let TypeT::Int {
-        signed: false,
-        width,
-    } = &t.val
-    {
-        let wrap = format!("Pulse.Lib.C.UInt{}", width);
+    let wrap = match &t.val {
+        TypeT::Int {
+            signed: false,
+            width,
+        } => Some(format!("Pulse.Lib.C.UInt{}", width)),
+        TypeT::SizeT => Some("Pulse.Lib.C.SizeT".to_string()),
+        _ => None,
+    };
+    if let Some(wrap) = wrap {
         // Division is partial at either signedness: by zero it is undefined.
         if matches!(op, BinOp::Div | BinOp::Mod) && !signed_ok {
             return Err(
@@ -22539,6 +29382,10 @@ struct ArrayPlace {
     close_read: Vec<String>,
     close_write: Vec<String>,
     maybe: bool,
+    /// Set when the access is through a pointer walked through the array
+    /// rather than at its base: the term for that pointer's current value.
+    /// `addr` is then the base the ownership is at.
+    walk: Option<String>,
 }
 
 struct Focus {
@@ -22624,7 +29471,7 @@ fn pieces_named(contract: &str) -> HashSet<String> {
 fn is_plain(tds: &Typedefs, ty: &Type) -> bool {
     match &tds.resolve(ty).val {
         TypeT::Plain(_) => true,
-        TypeT::Nullable(t) | TypeT::RefineValue(t, ..) => is_plain(tds, t),
+        TypeT::Nullable(t) | TypeT::Overread(t) | TypeT::RefineValue(t, ..) => is_plain(tds, t),
         _ => false,
     }
 }
@@ -22658,6 +29505,7 @@ fn subst_var(e: &Rc<Expr>, from: &str, to: &Rc<Expr>) -> Option<Rc<Expr>> {
         ExprT::Deref(x) => at(ExprT::Deref(go(x)?)),
         ExprT::Ref(x) => at(ExprT::Ref(go(x)?)),
         ExprT::Live(x) => at(ExprT::Live(go(x)?)),
+        ExprT::Unchanged(x) => at(ExprT::Unchanged(go(x)?)),
         ExprT::Old(x) => at(ExprT::Old(go(x)?)),
         ExprT::Member(x, f) => at(ExprT::Member(go(x)?, f.clone())),
         ExprT::Index(x, i) => at(ExprT::Index(go(x)?, go(i)?)),
@@ -22754,6 +29602,271 @@ fn has_effects(e: &Rc<Expr>) -> bool {
     }
 }
 
+/// The `E` of a postcondition `return == E` (either way round), when `E` does
+/// not itself mention the result, either as `return` or, in inline Pulse, as
+/// `ret`, the name the result is bound to in the emitted contract.
+/// Elaboration renders a boolean clause as an slprop through a coercion,
+/// which is looked through first.
+fn determined_result<'e>(e: &'e Rc<Expr>, ret: &str) -> Option<&'e Rc<Expr>> {
+    let mut inner = e;
+    loop {
+        match &inner.val {
+            ExprT::Cast(a, _) | ExprT::VAttr(_, a) => inner = a,
+            _ => break,
+        }
+    }
+    let ExprT::BinOp(BinOp::Eq, l, r) = &inner.val else {
+        return None;
+    };
+    let is_ret = |x: &Rc<Expr>| matches!(&x.val, ExprT::Var(id) if &*id.val == "return");
+    if is_ret(l) && !mentions_return(r, ret) {
+        Some(r)
+    } else if is_ret(r) && !mentions_return(l, ret) {
+        Some(l)
+    } else {
+        None
+    }
+}
+
+/// Conservatively, whether `e` could mention the result: the `return`
+/// keyword, or `ret`, its name in the emitted contract, written out in inline
+/// Pulse. Only the forms a contract is written in are looked into; any other
+/// answers `true`, which costs the `rewrites_to` form rather than soundness.
+fn mentions_return(e: &Expr, ret: &str) -> bool {
+    let m = |a: &Expr| mentions_return(a, ret);
+    match &e.val {
+        ExprT::Var(id) => &*id.val == "return",
+        ExprT::BoolLit(_) | ExprT::IntLit(..) | ExprT::FloatLit(..) => false,
+        ExprT::UnOp(_, a)
+        | ExprT::Cast(a, _)
+        | ExprT::Deref(a)
+        | ExprT::Ref(a)
+        | ExprT::Old(a)
+        | ExprT::Member(a, _)
+        | ExprT::VAttr(_, a) => m(a),
+        ExprT::BinOp(_, a, b) | ExprT::Index(a, b) => m(a) || m(b),
+        ExprT::Cond(a, b, c) => m(a) || m(b) || m(c),
+        ExprT::FnCall(_, args) => args.iter().any(|a| m(a)),
+        ExprT::StructInit(_, inits) => inits.iter().any(|(_, a)| m(a)),
+        // Inline Pulse reaches `return` through an antiquotation, but its
+        // verbatim text can also name the result directly, by the name the
+        // emitted contract binds it to: `_inline_pulse(not ret_f)` would make
+        // `rewrites_to ret_f (not ret_f)`, which callers cannot solve. So the
+        // antiquotations are looked inside and the text is searched for that
+        // name. That is what lets `_ensures(return == (_Bool)_inline_pulse(f
+        // $(A) $(B)))`, the only way to say "this function decides that
+        // predicate", be a `rewrites_to` as well.
+        ExprT::InlinePulse(code, _) => code.tokens.iter().any(|tok| match tok {
+            InlinePulseToken::RValueAntiquot { expr, .. }
+            | InlinePulseToken::LValueAntiquot { expr, .. } => m(expr),
+            InlinePulseToken::Verbatim(t) | InlinePulseToken::WitnessAntiquot(t) => t
+                .text
+                .val
+                .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
+                .any(|w| w == ret),
+            InlinePulseToken::Declare { ident, .. } => &*ident.val == ret,
+            _ => false,
+        }),
+        _ => true,
+    }
+}
+
+/// Whether an `_old` in `e` names one of `names` (or something this cannot
+/// see into).
+fn old_mentions(e: &Expr, names: &HashSet<String>, under: bool) -> bool {
+    let m = |a: &Expr| old_mentions(a, names, under);
+    match &e.val {
+        ExprT::Var(id) => under && names.contains(&*id.val),
+        ExprT::BoolLit(_) | ExprT::IntLit(..) | ExprT::FloatLit(..) => false,
+        ExprT::Old(a) => old_mentions(a, names, true),
+        ExprT::UnOp(_, a)
+        | ExprT::Cast(a, _)
+        | ExprT::Deref(a)
+        | ExprT::Ref(a)
+        | ExprT::Member(a, _)
+        | ExprT::VAttr(_, a) => m(a),
+        ExprT::Forall(_, _, ts, a) | ExprT::Exists(_, _, ts, a) => {
+            m(a) || ts.iter().flatten().any(|t| m(t))
+        }
+        ExprT::BinOp(_, a, b) | ExprT::Index(a, b) => m(a) || m(b),
+        ExprT::Cond(a, b, c) => m(a) || m(b) || m(c),
+        ExprT::FnCall(_, args) => args.iter().any(|a| m(a)),
+        _ => true,
+    }
+}
+
+/// The witness `w` of `_exists(T v, ... && v == w && ...)`, a conjunct of
+/// the body (the form `_exists(T v = w, p)` is sugar for) that pins `v` to
+/// something not itself mentioning `v`, with the side naming `v` (under
+/// whatever conversions the comparison put on it).
+fn exists_witness<'a>(v: &Ident, body: &'a Expr) -> Option<(&'a Expr, &'a Expr)> {
+    match &body.val {
+        ExprT::BinOp(BinOp::LogAnd, a, b) => exists_witness(v, a).or_else(|| exists_witness(v, b)),
+        ExprT::BinOp(BinOp::Eq, l, r) => {
+            fn is_v(e: &Expr, v: &Ident) -> bool {
+                match &strip_vattr(e).val {
+                    ExprT::Var(x) => x.val == v.val,
+                    ExprT::Cast(x, _) => is_v(x, v),
+                    _ => false,
+                }
+            }
+            let (vs, wt) = if is_v(l, v) {
+                (l, r)
+            } else if is_v(r, v) {
+                (r, l)
+            } else {
+                return None;
+            };
+            let names = HashSet::from([v.val.to_string()]);
+            (!old_mentions(wt, &names, true)).then_some((vs, wt))
+        }
+        _ => None,
+    }
+}
+
+/// The `{:pattern ...}` annotation a quantifier's `_trigger`s become, or
+/// nothing when it has none. Each `_trigger(e1, ..., en)` is a multi-pattern
+/// and several are alternatives. `term` translates a trigger exactly as the
+/// body's translation reads the same expression, which is what lets the
+/// pattern match the body's terms once both reach the solver.
+fn trigger_pattern(
+    v: &Ident,
+    bound: &str,
+    trigs: &Triggers,
+    mut term: impl FnMut(&Expr) -> Result<String, String>,
+) -> Result<String, String> {
+    if trigs.is_empty() {
+        return Ok(String::new());
+    }
+    let mut alts = Vec::new();
+    for group in trigs {
+        let mut terms = Vec::new();
+        let mut mentions = false;
+        for t in group {
+            if let Some(why) = not_a_trigger(t) {
+                return Err(format!("a `_trigger` that is {}{}", why, shown_at(t)));
+            }
+            let s = term(t)?;
+            let s = unparen(&s);
+            if s == bound {
+                return Err(format!(
+                    "a `_trigger` that is just the bound variable `{}`{}",
+                    v.val,
+                    shown_at(t)
+                ));
+            }
+            mentions |= mentions_word(s, bound);
+            terms.push(format!("({})", s));
+        }
+        if !mentions {
+            let first = &group[0];
+            return Err(format!(
+                "a `_trigger` that does not mention the bound variable `{}`{}",
+                v.val,
+                shown_at(first)
+            ));
+        }
+        alts.push(terms.join("; "));
+    }
+    Ok(format!("{{:pattern {}}} ", alts.join(r" \/ ")))
+}
+
+/// Why `t` cannot be an SMT pattern, if it plainly cannot: a pattern is a
+/// term to match, and the solver will not match on connectives, comparisons,
+/// conditionals or binders.
+fn not_a_trigger(t: &Expr) -> Option<&'static str> {
+    match &strip_vattr(t).val {
+        ExprT::BinOp(
+            BinOp::LogAnd | BinOp::LogOr | BinOp::Implies | BinOp::Eq | BinOp::Lt | BinOp::LEq,
+            ..,
+        )
+        | ExprT::UnOp(UnOp::Not, _) => Some("a proposition, not a term"),
+        ExprT::Forall(..) | ExprT::Exists(..) => Some("a quantifier"),
+        ExprT::Cond(..) => Some("a conditional expression"),
+        ExprT::BoolLit(_) | ExprT::IntLit(..) | ExprT::FloatLit(..) => Some("a constant"),
+        _ => None,
+    }
+}
+
+/// Whether the F* term `s` mentions the name `x` as a whole identifier.
+fn mentions_word(s: &str, x: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '\'' || c == '.';
+    s.match_indices(x).any(|(i, _)| {
+        !s[..i].chars().next_back().is_some_and(ident)
+            && !s[i + x.len()..].chars().next().is_some_and(ident)
+    })
+}
+
+/// `s` without parentheses that enclose all of it.
+fn unparen(s: &str) -> &str {
+    let t = s.trim();
+    if let Some(inner) = t.strip_prefix('(').and_then(|x| x.strip_suffix(')')) {
+        let mut depth = 0i32;
+        for c in inner.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            if depth < 0 {
+                return t;
+            }
+        }
+        if depth == 0 {
+            return unparen(inner);
+        }
+    }
+    t
+}
+
+/// `exists v. v == w /\ p` with the witness filled in: the range that makes
+/// `w` a value of `v`'s type, and `p` with `v` bound to it. Equality in a
+/// contract compares mathematical values, so this is the same proposition,
+/// but one the solver need not search for an instance of. `None` for a type
+/// this has no conversion for, which keeps the plain `exists`.
+fn witness_let(tds: &Typedefs, ty: &Type, bound: &str, wv: &str, body: &str) -> Option<String> {
+    let wit = format!("{}_wit", bound);
+    let (range, conv, fty) = match &tds.resolve(ty).val {
+        TypeT::SizeT => (
+            format!(r"0 <= {w} /\ SizeT.fits {w}", w = wit),
+            format!("SizeT.uint_to_t {}", wit),
+            "SizeT.t".to_string(),
+        ),
+        TypeT::Int {
+            signed: false,
+            width,
+        } => (
+            format!(r"0 <= {w} /\ {w} < pow2 {n}", w = wit, n = width),
+            format!("FStar.UInt{}.uint_to_t {}", width, wit),
+            format!("UInt{}.t", width),
+        ),
+        TypeT::Int {
+            signed: true,
+            width,
+        } => (
+            format!(
+                r"- pow2 {n} <= {w} /\ {w} < pow2 {n}",
+                w = wit,
+                n = width - 1
+            ),
+            format!("FStar.Int{}.int_to_t {}", width, wit),
+            format!("Int{}.t", width),
+        ),
+        TypeT::SpecInt => ("True".to_string(), wit.clone(), "int".to_string()),
+        TypeT::SpecNat => (format!("0 <= {}", wit), wit.clone(), "nat".to_string()),
+        _ => return None,
+    };
+    Some(format!(
+        r"(let {wit} : int = {wv} in {range} /\ (let {bound} : {fty} = {conv} in {body}))"
+    ))
+}
+
+fn diff_at_other_size() -> String {
+    "a difference of pointers whose element type is not their array's: cast both to \
+     the array's element type"
+        .to_string()
+}
+
 fn strip_vattr(e: &Expr) -> &Expr {
     match &e.val {
         ExprT::VAttr(_, inner) => strip_vattr(inner),
@@ -22842,6 +29955,574 @@ fn array_alias_map(tds: &Typedefs, body: &Stmts) -> HashMap<String, String> {
     out
 }
 
+/// The argument a function returns a pointer into, by its contract: the one
+/// pointer parameter `p` that every `return == p` or `return == p + e` in its
+/// `_ensures` names, up to casts. Such a call's result is a pointer walked
+/// through that argument, and whether it really is one is what the callee's
+/// postcondition has to prove at each access.
+fn returned_arg(env: &Env, g: &Ident) -> Option<usize> {
+    fn find(e: &Expr, params: &[Option<String>], out: &mut Vec<usize>) {
+        fn base(e: &Expr) -> Option<&str> {
+            match &strip_vattr(e).val {
+                ExprT::Var(v) => Some(&v.val),
+                ExprT::Cast(x, _) => base(x),
+                ExprT::BinOp(BinOp::Add, l, r) => base(l).or_else(|| base(r)),
+                _ => None,
+            }
+        }
+        match &strip_vattr(e).val {
+            ExprT::BinOp(BinOp::Eq, l, r) => {
+                for (a, b) in [(l, r), (r, l)] {
+                    if matches!(&strip_vattr(a).val, ExprT::Var(v) if &*v.val == "return")
+                        && let Some(n) = base(b)
+                        && let Some(k) = params.iter().position(|p| p.as_deref() == Some(n))
+                    {
+                        out.push(k);
+                    }
+                }
+            }
+            ExprT::BinOp(_, l, r) => {
+                find(l, params, out);
+                find(r, params, out);
+            }
+            ExprT::UnOp(_, x)
+            | ExprT::Cast(x, _)
+            | ExprT::Forall(_, _, _, x)
+            | ExprT::Exists(_, _, _, x) => find(x, params, out),
+            ExprT::Cond(a, b, c) => {
+                find(a, params, out);
+                find(b, params, out);
+                find(c, params, out);
+            }
+            _ => {}
+        }
+    }
+    let decl = env.lookup_fn(g)?;
+    let params: Vec<Option<String>> = decl
+        .args
+        .iter()
+        .map(|a| a.name.as_ref().map(|n| n.val.to_string()))
+        .collect();
+    let mut out = Vec::new();
+    for e in decl.ensures.iter() {
+        find(e, &params, &mut out);
+    }
+    out.dedup();
+    match out[..] {
+        [k] => Some(k),
+        _ => None,
+    }
+}
+
+/// The place a call returns the address of, by its callee's contract: the
+/// `PATH` of an `_ensures(return == &PATH)` conjunct, with the call's arguments
+/// for the callee's parameters. `PATH` has to be reached through a pointer
+/// parameter -- `&p->f`, `&p->a->b`, never the callee's own copy of a
+/// parameter -- and each argument it mentions has to be a plain name, so that
+/// re-reading the place after the call reads it through the same pointers the
+/// callee was given. A getter returning the address of a field is how C hands
+/// out an interior pointer, and the place is what lets the caller's accesses
+/// through the result go to the field the caller already owns.
+fn returned_place(env: &Env, e: &Expr) -> Option<Rc<Expr>> {
+    returned_place_k(env, e).map(|(p, _)| p)
+}
+
+/// `returned_place`, and whether the getter may also return `NULL`: an
+/// `_ensures(return == NULL || return == &PATH)` conjunct names the same place
+/// as `return == &PATH` does, but only for a result that is not `NULL`.
+fn returned_place_k(env: &Env, e: &Expr) -> Option<(Rc<Expr>, bool)> {
+    fn is_return(e: &Expr) -> bool {
+        matches!(&strip_casts(e).val, ExprT::Var(v) if &*v.val == "return")
+    }
+    fn is_null_lit(e: &Expr) -> bool {
+        matches!(&strip_casts(e).val, ExprT::IntLit(n, _) if **n == BigInt::ZERO)
+    }
+    // `return == &PATH`, either way round.
+    fn ret_ref(c: &Expr) -> Option<&Rc<Expr>> {
+        let ExprT::BinOp(BinOp::Eq, l, r) = &strip_casts(c).val else {
+            return None;
+        };
+        for (a, b) in [(l, r), (r, l)] {
+            if is_return(a)
+                && let ExprT::Ref(p) = &strip_casts(b).val
+            {
+                return Some(p);
+            }
+        }
+        None
+    }
+    // `return == NULL`, either way round.
+    fn ret_null(c: &Expr) -> bool {
+        let ExprT::BinOp(BinOp::Eq, l, r) = &strip_casts(c).val else {
+            return false;
+        };
+        (is_return(l) && is_null_lit(r)) || (is_return(r) && is_null_lit(l))
+    }
+    fn conjuncts<'a>(e: &'a Rc<Expr>, out: &mut Vec<&'a Rc<Expr>>) {
+        match &strip_casts(e).val {
+            ExprT::BinOp(BinOp::LogAnd, l, r) => {
+                conjuncts(l, out);
+                conjuncts(r, out);
+            }
+            _ => out.push(e),
+        }
+    }
+    fn place_ok(p: &Expr, params: &[Option<String>]) -> bool {
+        match &strip_vattr(p).val {
+            ExprT::Member(b, _) => place_ok(b, params),
+            ExprT::Index(b, i) => {
+                matches!(&strip_vattr(i).val, ExprT::IntLit(..)) && place_ok(b, params)
+            }
+            ExprT::Deref(x) => ptr_ok(x, params),
+            _ => false,
+        }
+    }
+    fn ptr_ok(x: &Expr, params: &[Option<String>]) -> bool {
+        match &strip_vattr(x).val {
+            ExprT::Var(v) => params.iter().any(|p| p.as_deref() == Some(&*v.val)),
+            ExprT::Cast(y, _) => ptr_ok(y, params),
+            _ => place_ok(x, params),
+        }
+    }
+    let ExprT::FnCall(g, args) = &strip_casts(e).val else {
+        return None;
+    };
+    let decl = env.lookup_fn(g)?;
+    if decl.args.len() != args.len() {
+        return None;
+    }
+    let params: Vec<Option<String>> = decl
+        .args
+        .iter()
+        .map(|a| a.name.as_ref().map(|n| n.val.to_string()))
+        .collect();
+    let mut cs = Vec::new();
+    for e in decl.ensures.iter() {
+        conjuncts(e, &mut cs);
+    }
+    let mut found = None;
+    for c in cs {
+        let (p, nullable) = if let Some(p) = ret_ref(c) {
+            (p, false)
+        } else if let ExprT::BinOp(BinOp::LogOr, l, r) = &strip_casts(c).val
+            && let Some(p) = (if ret_null(l) { ret_ref(r) } else { None })
+                .or_else(|| if ret_null(r) { ret_ref(l) } else { None })
+        {
+            (p, true)
+        } else {
+            continue;
+        };
+        if !place_ok(p, &params) {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some((p.clone(), nullable));
+    }
+    let (mut place, nullable) = found?;
+    // Two steps, so that an argument named like another parameter is not
+    // substituted a second time.
+    for (k, p) in params.iter().enumerate() {
+        let Some(p) = p else { continue };
+        let tmp = ExprT::Var(Rc::<str>::from(format!("__pal_param_{}", k)).with_loc(g.loc.clone()))
+            .with_loc(place.loc.clone());
+        place = subst_var(&place, p, &tmp)?;
+    }
+    for (k, a) in args.iter().enumerate() {
+        let mut used = Touched::default();
+        touch_expr(&place, &mut used);
+        if !used.vars.contains(&format!("__pal_param_{}", k)) {
+            continue;
+        }
+        if !matches!(&strip_casts(a).val, ExprT::Var(_)) {
+            return None;
+        }
+        place = subst_var(&place, &format!("__pal_param_{}", k), a)?;
+    }
+    Some((place, nullable))
+}
+
+/// The array parameter each pointer the body walks is a pointer into.
+///
+/// `for (; *s; s++)` moves `s` rather than indexing it, so the ownership the
+/// contract granted stays at the address `s` had on entry while `s` itself
+/// goes somewhere else. A dereference of `s` is still an element of that
+/// array, and finding the array is a question about where every value `s` can
+/// hold came from: the array parameter itself, another such pointer, or one of
+/// those moved by `+`, `-`, `++` or `--`. A pointer every one of whose values
+/// comes from the same array is a pointer into it (`Ok`). One that is moved
+/// and has a value from anywhere else -- a second array, a call, its own
+/// address escaping -- is one this cannot place (`Err`, with the reason). One
+/// that is never moved and is not placed is left out: it is a pointer object
+/// like any other, and an access through it asks for ownership at whatever it
+/// holds.
+///
+/// Nothing here is trusted. The access focuses the array at the pointer with
+/// a precondition that says the pointer really is in it, and that is what F*
+/// checks; this only decides which array to ask.
+/// The locals that hold their array parameter's base for as long as they
+/// exist: declared once, at the function's top level, as a copy of the
+/// parameter before anything moves it (`wchar_t *a = d;`), and never
+/// assigned, stepped or addressed afterwards. Without a `goto` the
+/// declaration runs once, so the copy is the parameter's entry value.
+/// Where `cur` points in the array at `addr`, in elements: `walk_idx`, or
+/// `0` when `cur` is the array's base. The plain `0` keeps an index through
+/// the base the same term as a contract's (`Seq.index s k`, not
+/// `Seq.index s (walk_idx e a a + k)`), which quantifier triggers need.
+/// Whether `t` names the identifier `id`, or a primed version of it, as a
+/// whole word rather than as part of a longer name.
+fn mentions_ident(t: &str, id: &str) -> bool {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    t.match_indices(id).any(|(i, _)| {
+        !t[..i].chars().next_back().is_some_and(word)
+            && !t[i + id.len()..].chars().next().is_some_and(word)
+    })
+}
+
+fn walk_pos(esize: &str, addr: &str, cur: &str) -> String {
+    if cur == addr {
+        "0".to_string()
+    } else {
+        format!("(walk_idx {} {} {})", esize, addr, cur)
+    }
+}
+
+/// `p + n` / `p - n` of positions, without the `0 +` and `- 0` a position at
+/// the base would leave (see `walk_pos`).
+fn pos_op(p: &str, op: BinOp, n: &str) -> String {
+    match op {
+        BinOp::Add if p == "0" => n.to_string(),
+        BinOp::Add | BinOp::Sub if n == "0" => p.to_string(),
+        _ => format!("({} {} {})", p, op.to_str(), n),
+    }
+}
+
+fn base_copies(body: &Stmts, arrays: &HashSet<String>) -> HashSet<String> {
+    fn decls(ss: &Stmts, n: &mut HashMap<String, usize>) -> bool {
+        for s in ss.iter() {
+            match &s.val {
+                StmtT::Let(x, ..) | StmtT::Decl(x, _) => {
+                    *n.entry(x.val.to_string()).or_default() += 1
+                }
+                StmtT::DeclStackArray { name, .. } => {
+                    *n.entry(name.val.to_string()).or_default() += 1
+                }
+                StmtT::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    if !decls(then_branch, n) || !decls(else_branch, n) {
+                        return false;
+                    }
+                }
+                StmtT::Match {
+                    branches,
+                    default_branch,
+                    ..
+                } => {
+                    for b in branches.iter() {
+                        if !decls(&b.body, n) {
+                            return false;
+                        }
+                    }
+                    if !decls(default_branch, n) {
+                        return false;
+                    }
+                }
+                StmtT::While { body, .. } => {
+                    if !decls(body, n) {
+                        return false;
+                    }
+                }
+                StmtT::Goto(_) | StmtT::GotoBlock { .. } | StmtT::Label { .. } => return false,
+                _ => {}
+            }
+        }
+        true
+    }
+    let mut n = HashMap::new();
+    if !decls(body, &mut n) {
+        return HashSet::new();
+    }
+    let mut all = Touched::default();
+    touch_stmts(body, &mut all);
+    let mut before = Touched::default();
+    let mut out = HashSet::new();
+    for (i, s) in body.iter().enumerate() {
+        // `T *a = d;` is a declaration and an assignment straight after it.
+        // The elaborator's cast from the array's pointer kind to a plain
+        // pointer moves nothing.
+        let init = match &s.val {
+            StmtT::Let(x, _, e) => Some((x, e, 0)),
+            StmtT::Decl(x, _) => match body.get(i + 1).map(|n| &n.val) {
+                Some(StmtT::Assign(l, e)) if matches!(&strip_vattr(l).val, ExprT::Var(v) if v.val == x.val) => {
+                    Some((x, e, 1))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((x, e, assigns)) = init
+            && let ExprT::Var(d) = &strip_casts(e).val
+            && arrays.contains(&*d.val)
+            && !before.rebound.contains_key(&*d.val)
+            && !before.addressed.contains(&*d.val)
+            && !before.declared.contains(&*d.val)
+            && n.get(&*x.val) == Some(&1)
+            && all.rebound.get(&*x.val).copied().unwrap_or(0) == assigns
+            && !all.addressed.contains(&*x.val)
+        {
+            out.insert(x.val.to_string());
+        }
+        touch_stmts(&vec![s.clone()], &mut before);
+    }
+    out
+}
+
+fn walk_map(
+    body: &Stmts,
+    arrays: &HashSet<String>,
+    seeds: &HashMap<String, String>,
+    returned: &dyn Fn(&Ident) -> Option<usize>,
+) -> HashMap<String, Result<String, String>> {
+    #[derive(Default)]
+    struct Facts {
+        srcs: HashMap<String, Vec<String>>,
+        stepped: HashSet<String>,
+        unknown: HashSet<String>,
+    }
+    // The names a value comes from, or `None` when it comes from something
+    // that is not a pointer this can follow. A call whose contract says it
+    // returns a pointer into one of its arguments (`returned_arg`) comes from
+    // that argument.
+    fn sources(
+        e: &Expr,
+        returned: &dyn Fn(&Ident) -> Option<usize>,
+    ) -> Option<(Vec<String>, bool)> {
+        match &strip_vattr(e).val {
+            ExprT::Var(v) => Some((vec![v.val.to_string()], false)),
+            // `*p` of a `_cursor` parameter is the base of the array the
+            // contract owns as `p__arr`. Of anything else it is a name that
+            // is not an array, which makes it unknown below.
+            ExprT::Deref(x) => match &strip_vattr(x).val {
+                ExprT::Var(v) => Some((vec![format!("{}__arr", v.val)], false)),
+                _ => None,
+            },
+            // A null pointer points into no array, and adds none: an access
+            // through the pointer still has to prove it is in one
+            // (`walk_ok`), which a null pointer never is.
+            ExprT::IntLit(n, _) if **n == BigInt::ZERO => Some((vec![], false)),
+            ExprT::Cast(x, _) => sources(x, returned),
+            ExprT::BinOp(BinOp::Add, l, r) => sources(l, returned)
+                .filter(|_| !matches!(strip_vattr(l).val, ExprT::IntLit(..)))
+                .or_else(|| sources(r, returned))
+                .map(|(s, _)| (s, true)),
+            ExprT::BinOp(BinOp::Sub, l, _) => sources(l, returned).map(|(s, _)| (s, true)),
+            ExprT::Cond(_, a, b) => {
+                let (mut x, s1) = sources(a, returned)?;
+                let (y, s2) = sources(b, returned)?;
+                x.extend(y);
+                Some((x, s1 || s2))
+            }
+            ExprT::PreIncr(x) | ExprT::PostIncr(x) | ExprT::PreDecr(x) | ExprT::PostDecr(x) => {
+                sources(x, returned).map(|(s, _)| (s, true))
+            }
+            ExprT::AssignExpr(_, r) => sources(r, returned),
+            ExprT::FnCall(g, args) => {
+                let k = returned(g)?;
+                sources(args.get(k)?, returned).map(|(s, _)| (s, true))
+            }
+            _ => None,
+        }
+    }
+    fn assign(f: &mut Facts, x: String, rhs: &Expr, returned: &dyn Fn(&Ident) -> Option<usize>) {
+        match sources(rhs, returned) {
+            Some((s, stepped)) => {
+                if stepped || s.iter().any(|n| *n == x) {
+                    f.stepped.insert(x.clone());
+                }
+                f.srcs.entry(x).or_default().extend(s);
+            }
+            None => {
+                f.unknown.insert(x);
+            }
+        }
+    }
+    fn expr(f: &mut Facts, e: &Expr, r0: &dyn Fn(&Ident) -> Option<usize>) {
+        match &e.val {
+            ExprT::AssignExpr(l, r) => {
+                if let ExprT::Var(v) = &strip_vattr(l).val {
+                    assign(f, v.val.to_string(), r, r0);
+                }
+                expr(f, l, r0);
+                expr(f, r, r0);
+            }
+            ExprT::PreIncr(x) | ExprT::PostIncr(x) | ExprT::PreDecr(x) | ExprT::PostDecr(x) => {
+                if let ExprT::Var(v) = &strip_vattr(x).val {
+                    f.stepped.insert(v.val.to_string());
+                }
+                expr(f, x, r0);
+            }
+            ExprT::Ref(x) => {
+                if let Some(n) = lvalue_name(strip_vattr(x)) {
+                    f.unknown.insert(n);
+                }
+                expr(f, x, r0);
+            }
+            ExprT::FnCall(_, args) | ExprT::FnPtrCall(_, args) => {
+                for a in args.iter() {
+                    expr(f, a, r0);
+                }
+            }
+            ExprT::Deref(x)
+            | ExprT::Member(x, _)
+            | ExprT::VAttr(_, x)
+            | ExprT::UnOp(_, x)
+            | ExprT::Cast(x, _) => expr(f, x, r0),
+            ExprT::Index(x, y) | ExprT::BinOp(_, x, y) => {
+                expr(f, x, r0);
+                expr(f, y, r0);
+            }
+            ExprT::Cond(a, b, c) => {
+                expr(f, a, r0);
+                expr(f, b, r0);
+                expr(f, c, r0);
+            }
+            _ => {}
+        }
+    }
+    fn stmts(f: &mut Facts, ss: &Stmts, r0: &dyn Fn(&Ident) -> Option<usize>) {
+        for s in ss.iter() {
+            match &s.val {
+                StmtT::Call(e) | StmtT::Return(Some(e)) => expr(f, e, r0),
+                StmtT::Let(x, _, e) => {
+                    assign(f, x.val.to_string(), e, r0);
+                    expr(f, e, r0);
+                }
+                StmtT::Assign(l, r) => {
+                    if let ExprT::Var(v) = &strip_vattr(l).val {
+                        assign(f, v.val.to_string(), r, r0);
+                    }
+                    expr(f, l, r0);
+                    expr(f, r, r0);
+                }
+                StmtT::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    expr(f, cond, r0);
+                    stmts(f, then_branch, r0);
+                    stmts(f, else_branch, r0);
+                }
+                StmtT::Match {
+                    scrutinee,
+                    branches,
+                    default_branch,
+                    ..
+                } => {
+                    expr(f, scrutinee, r0);
+                    for b in branches.iter() {
+                        stmts(f, &b.body, r0);
+                    }
+                    stmts(f, default_branch, r0);
+                }
+                StmtT::While { cond, body, .. } => {
+                    expr(f, cond, r0);
+                    stmts(f, body, r0);
+                }
+                StmtT::GotoBlock { body, .. } => stmts(f, body, r0),
+                // A ghost statement can say anything about a pointer it names.
+                StmtT::GhostStmt(c) => {
+                    let mut out = HashSet::new();
+                    spliced_addresses(c, &mut out);
+                    f.unknown.extend(out);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut f = Facts::default();
+    stmts(&mut f, body, returned);
+    // A `_cursor_from` seed arrives as the base of its cursor's array, when
+    // it is not null.
+    for (seed, cursor) in seeds {
+        f.srcs
+            .entry(seed.clone())
+            .or_default()
+            .push(format!("{}__arr", cursor));
+    }
+    // Owners by fixpoint: an array parameter owns itself, and a name owns
+    // whatever its sources own. A source that is neither an array parameter
+    // nor assigned here holds a value from outside, which is unknown.
+    let mut owners: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut unknown = f.unknown.clone();
+    for a in arrays {
+        owners.entry(a.clone()).or_default().insert(a.clone());
+    }
+    for srcs in f.srcs.values() {
+        for s in srcs {
+            if !arrays.contains(s) && !f.srcs.contains_key(s) {
+                unknown.insert(s.clone());
+            }
+        }
+    }
+    loop {
+        let mut changed = false;
+        for (x, srcs) in &f.srcs {
+            for s in srcs {
+                if unknown.contains(s) && unknown.insert(x.clone()) {
+                    changed = true;
+                }
+                let add: Vec<String> = owners.get(s).into_iter().flatten().cloned().collect();
+                let o = owners.entry(x.clone()).or_default();
+                for a in add {
+                    changed |= o.insert(a);
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut out = HashMap::new();
+    let names: BTreeSet<&String> = f.srcs.keys().chain(f.stepped.iter()).collect();
+    for x in names {
+        let os = owners.get(x).cloned().unwrap_or_default();
+        let stepped = f.stepped.contains(x);
+        if unknown.contains(x) || os.is_empty() {
+            if stepped && !os.is_empty() {
+                out.insert(
+                    x.clone(),
+                    Err(format!(
+                        "a dereference of `{}`, a pointer moved through an array but also given \
+                         a value that does not come from one",
+                        x
+                    )),
+                );
+            }
+        } else if os.len() == 1 {
+            out.insert(x.clone(), Ok(os.into_iter().next().unwrap()));
+        } else if stepped {
+            out.insert(
+                x.clone(),
+                Err(format!(
+                    "a dereference of `{}`, a pointer moved through more than one array ({})",
+                    x,
+                    os.into_iter()
+                        .map(|o| format!("`{}`", o))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            );
+        }
+    }
+    out
+}
+
 /// Whether an expression is a pointer or an array, so that adding to it is
 /// pointer arithmetic rather than ordinary addition. A type that cannot be
 /// inferred here -- a local declared in the body, which this env does not
@@ -22860,7 +30541,11 @@ fn ptr_base(tds: &Typedefs, env: &Env, e: &Expr) -> bool {
     }
 }
 
-fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, Rc<Expr>> {
+fn alias_map(
+    body: &Stmts,
+    ptr_base: &dyn Fn(&Expr) -> bool,
+    call_place: &dyn Fn(&Expr) -> Option<(Rc<Expr>, bool)>,
+) -> (HashMap<String, Rc<Expr>>, HashSet<String>) {
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
 
@@ -22876,13 +30561,34 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
     // a pointer assigned twice is an object after all.
     let mut cand: Vec<(String, Rc<Expr>)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    // Aliases bound by a getter that may return `NULL` instead: see
+    // `guard_nullable_aliases` for what keeps a use of one honest.
+    let mut nullable: HashSet<String> = HashSet::new();
     for st in body.iter() {
         let StmtT::Assign(lhs, rhs) = &st.val else {
             continue;
         };
-        let (Some(q), ExprT::Ref(place)) = (lvalue_name(lhs), &strip_vattr(rhs).val) else {
+        // `q = get(o)`, where `get`'s contract says it returns `&o->f`, is
+        // `q = &o->f` with a call in front. The emitter makes the call and
+        // proves its result is that address, so the alias is checked like
+        // any other. Taking `q`'s address would store the result, which the
+        // alias does not, so that case stays a pointer object.
+        let from_call = lvalue_name(lhs)
+            .filter(|q| !t.addressed.contains(q))
+            .and_then(|_| call_place(rhs));
+        let maybe_null = from_call.as_ref().is_some_and(|(_, n)| *n);
+        let (Some(q), Some(place)) = (
+            lvalue_name(lhs),
+            from_call
+                .map(|(p, _)| p)
+                .or_else(|| match &strip_vattr(rhs).val {
+                    ExprT::Ref(place) => Some(place.clone()),
+                    _ => None,
+                }),
+        ) else {
             continue;
         };
+        let place = &place;
         if !locals.contains(&q) {
             continue;
         }
@@ -22905,6 +30611,11 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
         // already bound such an index; whatever effect is left is refused.
         if has_effects(place) {
             continue;
+        }
+        if maybe_null {
+            nullable.insert(q.clone());
+        } else {
+            nullable.remove(&q);
         }
         cand.push((q, place.clone()));
     }
@@ -22968,6 +30679,13 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
         if !locals.contains(&q) || t.rebound.get(&q) != Some(&1) || out.contains_key(&q) {
             continue;
         }
+        // A pointer computed from one that may be `NULL` is a pointer object:
+        // only the guarded name itself is checked before a use.
+        let mut used = Touched::default();
+        touch_expr(rhs, &mut used);
+        if used.vars.iter().any(|v| nullable.contains(v)) {
+            continue;
+        }
         // `p = a + i` names the element `a[i]`: pointer arithmetic on an array
         // is the index written another way, and a local that holds the result
         // stands for that element as long as nothing rebinds what it was
@@ -23009,7 +30727,8 @@ fn alias_map(body: &Stmts, ptr_base: &dyn Fn(&Expr) -> bool) -> HashMap<String, 
             ExprT::Deref(rhs.clone()).with_loc(st.loc.clone()) as Rc<Expr>,
         );
     }
-    out
+    nullable.retain(|q| out.contains_key(q));
+    (out, nullable)
 }
 
 /// An expression with its virtual attributes and conversions removed. A
@@ -23197,6 +30916,168 @@ fn derived_ptr(e: &Expr) -> bool {
     }
 }
 
+/// `T *q = NULL; ... q = &place;` is C's way of declaring an alias at the top
+/// of a block and binding it later, and the `NULL` is never read: the next
+/// top-level statement to mention `q` overwrites it. That dead store is a
+/// second rebinding of `q`, which would make it an object in `alias_map`'s
+/// eyes, so it is dropped here. `q = get(o)`, for a `get` that returns the
+/// address of a place (`returned_place`), binds an alias the same way.
+/// `None` when there was nothing to do.
+fn drop_dead_alias_inits(
+    body: &Stmts,
+    call_place: &dyn Fn(&Expr) -> Option<Rc<Expr>>,
+) -> Option<Stmts> {
+    let assigned_ref = |st: &Stmt| match &st.val {
+        StmtT::Assign(lhs, rhs) if matches!(&strip_vattr(rhs).val, ExprT::Ref(_)) => {
+            lvalue_name(lhs)
+        }
+        // The call reads its arguments, so `q = get(q)` reads the `NULL`.
+        StmtT::Assign(lhs, rhs) if call_place(rhs).is_some() => lvalue_name(lhs).filter(|q| {
+            let mut t = Touched::default();
+            touch_expr(rhs, &mut t);
+            !t.vars.contains(q)
+        }),
+        _ => None,
+    };
+    let mut dead = HashSet::new();
+    for (i, st) in body.iter().enumerate() {
+        let StmtT::Assign(lhs, rhs) = &st.val else {
+            continue;
+        };
+        let Some(q) = lvalue_name(lhs) else {
+            continue;
+        };
+        if !matches!(&strip_casts(rhs).val, ExprT::IntLit(n, _) if **n == BigInt::ZERO) {
+            continue;
+        }
+        let next = body[i + 1..].iter().find(|s| {
+            let mut t = Touched::default();
+            touch_stmts(&vec![(*s).clone()], &mut t);
+            t.vars.contains(&q) || t.rebound.contains_key(&q)
+        });
+        if next.and_then(|s| assigned_ref(s)).as_ref() == Some(&q) {
+            dead.insert(i);
+        }
+    }
+    if dead.is_empty() {
+        return None;
+    }
+    Some(
+        body.iter()
+            .enumerate()
+            .filter(|(i, _)| !dead.contains(i))
+            .map(|(_, s)| s.clone())
+            .collect(),
+    )
+}
+
+/// Pulse joins an `if` that has no annotation by forgetting everything about
+/// the values its arms leave in the locals they write: a pointer one arm moves
+/// is some pointer after the `if`, on both paths. When a loop follows the `if`
+/// directly, its pure invariant is exactly what has to hold at the join, so it
+/// becomes the `if`'s `_ensures` -- each arm proves it about its own values,
+/// and the loop starts from it. That is musl's `memchr`: an `if` that may move
+/// `s` with a word loop, then the byte loop over `s`. `None` when nothing
+/// changes.
+fn loop_entry_joins(tds: &Typedefs, body: &Stmts) -> Option<Stmts> {
+    fn leaves(ss: &Stmts, in_loop: bool) -> bool {
+        ss.iter().any(|s| match &s.val {
+            StmtT::Return(_) | StmtT::Goto(_) | StmtT::Label { .. } => true,
+            StmtT::GotoBlock { .. } => true,
+            StmtT::Break | StmtT::Continue => !in_loop,
+            StmtT::While { body, .. } => leaves(body, true),
+            StmtT::If {
+                then_branch,
+                else_branch,
+                ..
+            } => leaves(then_branch, in_loop) || leaves(else_branch, in_loop),
+            StmtT::Match {
+                branches,
+                default_branch,
+                ..
+            } => {
+                branches.iter().any(|b| leaves(&b.body, in_loop)) || leaves(default_branch, in_loop)
+            }
+            _ => false,
+        })
+    }
+    fn sub(tds: &Typedefs, ss: &Rc<Stmts>, changed: &mut bool) -> Rc<Stmts> {
+        match loop_entry_joins(tds, ss) {
+            Some(n) => {
+                *changed = true;
+                Rc::new(n)
+            }
+            None => ss.clone(),
+        }
+    }
+    let mut changed = false;
+    let mut out: Stmts = Vec::with_capacity(body.len());
+    for (i, s) in body.iter().enumerate() {
+        let s = match &s.val {
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => {
+                let then_branch = sub(tds, then_branch, &mut changed);
+                let else_branch = sub(tds, else_branch, &mut changed);
+                let mut ensures = ensures.clone();
+                if ensures.is_empty()
+                    && let Some(StmtT::While { inv, .. }) = body.get(i + 1).map(|n| &n.val)
+                    && !inv.is_empty()
+                    && !inv.iter().any(|e| is_slprop_clause(tds, e))
+                    && !leaves(&then_branch, false)
+                    && !leaves(&else_branch, false)
+                {
+                    let mut t = Touched::default();
+                    touch_stmts(&then_branch, &mut t);
+                    touch_stmts(&else_branch, &mut t);
+                    let pure: Exprs = inv.iter().filter(|e| !live_only(e)).cloned().collect();
+                    if !t.written.is_empty() && !pure.is_empty() {
+                        ensures = Rc::new(pure);
+                        changed = true;
+                    }
+                }
+                StmtT::If {
+                    cond: cond.clone(),
+                    then_branch,
+                    else_branch,
+                    ensures,
+                }
+                .with_loc(s.loc.clone())
+            }
+            StmtT::While {
+                cond,
+                inv,
+                requires,
+                ensures,
+                body,
+            } => StmtT::While {
+                cond: cond.clone(),
+                inv: inv.clone(),
+                requires: requires.clone(),
+                ensures: ensures.clone(),
+                body: sub(tds, body, &mut changed),
+            }
+            .with_loc(s.loc.clone()),
+            StmtT::GotoBlock {
+                body,
+                label,
+                ensures,
+            } => StmtT::GotoBlock {
+                body: sub(tds, body, &mut changed),
+                label: label.clone(),
+                ensures: ensures.clone(),
+            }
+            .with_loc(s.loc.clone()),
+            _ => s.clone(),
+        };
+        out.push(s);
+    }
+    changed.then_some(out)
+}
+
 /// `q = &a[i++]` and `q = a + i++` evaluate the index once, but an alias
 /// stands for its place at every use and would evaluate it each time. Binding
 /// the index first -- `__pal_idx_n = i++; q = &a[__pal_idx_n]` -- keeps the
@@ -23268,6 +31149,658 @@ fn hoist_alias_effects(env: &Env, body: &Stmts) -> Option<Stmts> {
         out.push(st.clone());
     }
     changed.then_some(out)
+}
+
+/// The pointers an alias's place loads out of memory, each with the local
+/// that holds the value it had when the alias was bound.
+type AliasSnaps = HashMap<String, Vec<(Rc<Expr>, Rc<Ident>)>>;
+
+/// Bind, before each alias is taken, the pointers its place loads.
+///
+/// An alias is re-evaluated at every use, which is right only while the place
+/// it names is the one C's pointer holds. `q = &h->s->seq` names the `seq` of
+/// whatever `h->s` holds *at the use*, while `q` holds the address of the one
+/// `h->s` held when `q` was set. `stable_names` keeps the names a place is
+/// built from fixed, but not the pointers it reads through them. So each such
+/// load is bound to a `__pal_snap_<n>` here, and every statement that uses
+/// the alias first proves the load still gives that value (see `Body::stmt`).
+/// A callee that leaves the pointer alone says so in its contract, and the
+/// proof is the solver's; one that does not refuses the use, which is the
+/// point.
+///
+/// An index that reads memory is held to the same terms, since `&a[h->n]`
+/// names element `h->n` of the time `q` was set.
+/// A getter that may return `NULL` binds an alias like any other getter does
+/// (`returned_place_k`), but the result is that place only when it is not
+/// `NULL`. So every statement that uses such a name -- other than to test it
+/// against `NULL` -- is preceded by `_assert(q != NULL)`, and an access through
+/// `q` goes to the place only where `q` is known to be its address. The name
+/// is bound once, so it has the same value at every use, and a use before the
+/// binding reads the slot before it holds anything and is refused.
+///
+/// A test inside a condition is taken at face value: `if (q != NULL && q->a)`
+/// guards the whole `if`, and is then refused. That costs completeness, never
+/// soundness.
+fn guard_nullable_aliases(body: &Stmts, nullable: &HashSet<String>) -> Option<Stmts> {
+    if nullable.is_empty() {
+        return None;
+    }
+    let types: HashMap<String, Rc<Type>> = body
+        .iter()
+        .filter_map(|s| match &s.val {
+            StmtT::Decl(n, ty) if nullable.contains(&*n.val) => {
+                Some((n.val.to_string(), ty.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    fn name<'a>(e: &'a Expr, nullable: &HashSet<String>) -> Option<&'a str> {
+        match &strip_casts(e).val {
+            ExprT::Var(v) if nullable.contains(&*v.val) => Some(&v.val),
+            _ => None,
+        }
+    }
+    fn is_null(e: &Expr) -> bool {
+        matches!(&strip_casts(e).val, ExprT::IntLit(n, _) if **n == BigInt::ZERO)
+    }
+    // The subexpressions that only test a guarded name against `NULL`.
+    fn tests<'a>(e: &'a Rc<Expr>, nullable: &HashSet<String>, out: &mut Vec<&'a Rc<Expr>>) {
+        match &strip_vattr(e).val {
+            ExprT::BinOp(BinOp::Eq, l, r)
+                if (name(l, nullable).is_some() && is_null(r))
+                    || (name(r, nullable).is_some() && is_null(l)) =>
+            {
+                out.push(e);
+                return;
+            }
+            ExprT::UnOp(UnOp::Not, x) if name(x, nullable).is_some() => {
+                out.push(e);
+                return;
+            }
+            ExprT::BinOp(BinOp::LogAnd | BinOp::LogOr, a, b) => {
+                for x in [a, b] {
+                    if name(x, nullable).is_some() {
+                        out.push(x);
+                    }
+                }
+            }
+            ExprT::Cond(c, ..) if name(c, nullable).is_some() => out.push(c),
+            _ => {}
+        }
+        for x in expr_operands(e) {
+            tests(x, nullable, out);
+        }
+    }
+    // The guarded names an expression uses for more than a test.
+    fn used(e: &Rc<Expr>, nullable: &HashSet<String>, out: &mut BTreeSet<String>) {
+        let f: Rc<Expr> = ExprT::BoolLit(false).with_loc(e.loc.clone());
+        let mut rest = e.clone();
+        // One test at a time, found afresh: `replace_subexpr` rebuilds the
+        // nodes it passes through, so a second test found in the original
+        // would no longer be there to replace.
+        let mut ts = Vec::new();
+        tests(e, nullable, &mut ts);
+        for _ in 0..ts.len() {
+            let mut ts = Vec::new();
+            tests(&rest, nullable, &mut ts);
+            let Some(t) = ts.first() else {
+                break;
+            };
+            rest = replace_subexpr(&rest, t, &f);
+        }
+        let mut t = Touched::default();
+        touch_expr(&rest, &mut t);
+        out.extend(t.vars.into_iter().filter(|v| nullable.contains(v)));
+    }
+    fn cond_used(c: &Rc<Expr>, nullable: &HashSet<String>, out: &mut BTreeSet<String>) {
+        if name(c, nullable).is_none() {
+            used(c, nullable, out);
+        }
+    }
+    fn go(
+        body: &Stmts,
+        nullable: &HashSet<String>,
+        types: &HashMap<String, Rc<Type>>,
+        changed: &mut bool,
+    ) -> Stmts {
+        let mut out = Vec::new();
+        for st in body {
+            let mut us = BTreeSet::new();
+            let sub = |b: &Rc<Stmts>, changed: &mut bool| Rc::new(go(b, nullable, types, changed));
+            let st2 = match &st.val {
+                StmtT::Assign(lhs, rhs) => {
+                    if name(lhs, nullable).is_none() {
+                        used(lhs, nullable, &mut us);
+                    }
+                    used(rhs, nullable, &mut us);
+                    st.clone()
+                }
+                // An assertion reads through `q` as the place too, so it is
+                // guarded like any other use: `_assert(q->a == 1)` must not
+                // hold of the place while `q` is `NULL`.
+                StmtT::Call(e)
+                | StmtT::Let(_, _, e)
+                | StmtT::Return(Some(e))
+                | StmtT::Assert(e) => {
+                    used(e, nullable, &mut us);
+                    st.clone()
+                }
+                StmtT::GhostStmt(code) => {
+                    for t in &code.tokens {
+                        if let InlinePulseToken::RValueAntiquot { expr, .. }
+                        | InlinePulseToken::LValueAntiquot { expr, .. } = t
+                        {
+                            used(expr, nullable, &mut us);
+                        }
+                    }
+                    st.clone()
+                }
+                StmtT::DeclStackArray { size, .. } => {
+                    used(size, nullable, &mut us);
+                    st.clone()
+                }
+                StmtT::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                    ensures,
+                } => {
+                    cond_used(cond, nullable, &mut us);
+                    StmtT::If {
+                        cond: cond.clone(),
+                        then_branch: sub(then_branch, changed),
+                        else_branch: sub(else_branch, changed),
+                        ensures: ensures.clone(),
+                    }
+                    .with_loc(st.loc.clone())
+                }
+                StmtT::While {
+                    cond,
+                    inv,
+                    requires,
+                    ensures,
+                    body,
+                } => {
+                    cond_used(cond, nullable, &mut us);
+                    StmtT::While {
+                        cond: cond.clone(),
+                        inv: inv.clone(),
+                        requires: requires.clone(),
+                        ensures: ensures.clone(),
+                        body: sub(body, changed),
+                    }
+                    .with_loc(st.loc.clone())
+                }
+                StmtT::Match {
+                    scrutinee,
+                    branches,
+                    default_branch,
+                    ensures,
+                } => {
+                    used(scrutinee, nullable, &mut us);
+                    StmtT::Match {
+                        scrutinee: scrutinee.clone(),
+                        branches: Rc::new(
+                            branches
+                                .iter()
+                                .map(|b| {
+                                    Rc::new(MatchBranch {
+                                        patterns: b.patterns.clone(),
+                                        body: sub(&b.body, changed),
+                                    })
+                                })
+                                .collect(),
+                        ),
+                        default_branch: sub(default_branch, changed),
+                        ensures: ensures.clone(),
+                    }
+                    .with_loc(st.loc.clone())
+                }
+                StmtT::GotoBlock {
+                    body,
+                    label,
+                    ensures,
+                } => StmtT::GotoBlock {
+                    body: sub(body, changed),
+                    label: label.clone(),
+                    ensures: ensures.clone(),
+                }
+                .with_loc(st.loc.clone()),
+                _ => st.clone(),
+            };
+            for q in us {
+                let Some(ty) = types.get(&q) else {
+                    continue;
+                };
+                let l = st.loc.clone();
+                let v: Rc<Expr> =
+                    ExprT::Var(Rc::<str>::from(q.as_str()).with_loc(l.clone())).with_loc(l.clone());
+                let z: Rc<Expr> =
+                    ExprT::IntLit(Rc::new(BigInt::ZERO), ty.clone()).with_loc(l.clone());
+                let eq: Rc<Expr> = ExprT::BinOp(BinOp::Eq, v, z).with_loc(l.clone());
+                let ne: Rc<Expr> = ExprT::UnOp(UnOp::Not, eq).with_loc(l.clone());
+                out.push(StmtT::Assert(ne).with_loc(l));
+                *changed = true;
+            }
+            out.push(st2);
+        }
+        out
+    }
+    let mut changed = false;
+    let out = go(body, nullable, &types, &mut changed);
+    changed.then_some(out)
+}
+
+fn snapshot_alias_loads(
+    env: &Env,
+    body: &Stmts,
+    aliases: &HashMap<String, Rc<Expr>>,
+) -> (Option<Stmts>, AliasSnaps) {
+    fn reads_memory(e: &Rc<Expr>) -> bool {
+        matches!(
+            &e.val,
+            ExprT::Deref(_) | ExprT::Member(..) | ExprT::Index(..)
+        ) || expr_operands(e).into_iter().any(reads_memory)
+    }
+    struct Cx<'a> {
+        snaps: &'a AliasSnaps,
+        found: Vec<Rc<Expr>>,
+        inherited: Vec<(Rc<Expr>, Rc<Ident>)>,
+    }
+    // The loads in a pointer expression, innermost first, ending with the
+    // expression itself when it is one.
+    fn ptr(cx: &mut Cx, e: &Rc<Expr>) {
+        match &e.val {
+            ExprT::VAttr(_, x) | ExprT::Cast(x, _) => ptr(cx, x),
+            ExprT::Ref(p) => place(cx, p),
+            ExprT::BinOp(BinOp::Add | BinOp::Sub, b, i) => {
+                ptr(cx, b);
+                index(cx, i);
+            }
+            ExprT::Var(v) => {
+                if let Some(s) = cx.snaps.get(&*v.val.to_string()) {
+                    cx.inherited.extend(s.iter().cloned());
+                }
+            }
+            ExprT::Deref(_) | ExprT::Member(..) | ExprT::Index(..) => {
+                place(cx, e);
+                cx.found.push(e.clone());
+            }
+            _ if reads_memory(e) => cx.found.push(e.clone()),
+            _ => {}
+        }
+    }
+    fn index(cx: &mut Cx, i: &Rc<Expr>) {
+        if reads_memory(i) {
+            cx.found.push(i.clone());
+        }
+    }
+    fn place(cx: &mut Cx, p: &Rc<Expr>) {
+        match &p.val {
+            ExprT::VAttr(_, x) | ExprT::Member(x, _) => place(cx, x),
+            ExprT::Index(b, i) => {
+                place(cx, b);
+                index(cx, i);
+            }
+            ExprT::Deref(x) => ptr(cx, x),
+            _ => {}
+        }
+    }
+
+    let env_at_entry = env;
+    let mut env = env.clone();
+    let mut snaps: AliasSnaps = HashMap::new();
+    let mut out: Stmts = Vec::new();
+    let mut n = 0;
+    for st in body {
+        if let StmtT::Assign(lhs, _) = &st.val
+            && let Some(q) = lvalue_name(lhs)
+            && let Some(at) = aliases.get(&q)
+            && !snaps.contains_key(&q)
+        {
+            // A copy of an alias holds the address the original was bound
+            // to, so it answers to the original's snapshots, not new ones.
+            if let StmtT::Assign(_, rhs) = &st.val
+                && let ExprT::Var(v) = &strip_casts(rhs).val
+                && aliases.contains_key(&*v.val.to_string())
+            {
+                if let Some(s) = snaps.get(&*v.val.to_string()).cloned() {
+                    snaps.insert(q, s);
+                }
+                env.push_stmt(st);
+                out.push(st.clone());
+                continue;
+            }
+            let mut cx = Cx {
+                snaps: &snaps,
+                found: Vec::new(),
+                inherited: Vec::new(),
+            };
+            place(&mut cx, at);
+            let (found, mut held) = (cx.found, cx.inherited);
+            // A place a call returned is read in the state the call leaves.
+            let after_call = matches!(&st.val, StmtT::Assign(_, rhs)
+                if matches!(&strip_casts(rhs).val, ExprT::FnCall(..)));
+            if after_call {
+                env.push_stmt(st);
+                out.push(st.clone());
+            }
+            for l in found {
+                if held.iter().any(|(h, _)| **h == *l) {
+                    continue;
+                }
+                let Ok(ty) = env.infer_expr(&l) else {
+                    continue;
+                };
+                n += 1;
+                let id: Rc<Ident> =
+                    Rc::<str>::from(format!("__pal_snap_{}", n)).with_loc(st.loc.clone());
+                let s = StmtT::Let(id.clone(), ty.to_rc(), l.clone()).with_loc(st.loc.clone());
+                env.push_stmt(&s);
+                out.push(s);
+                held.push((l, id));
+            }
+            if !held.is_empty() {
+                snaps.insert(q, held);
+            }
+            if after_call {
+                continue;
+            }
+        }
+        env.push_stmt(st);
+        out.push(st.clone());
+    }
+    if n == 0 && snaps.is_empty() {
+        return (None, snaps);
+    }
+    let mut k = 0;
+    let out = split_alias_stores(&env_at_entry, &out, &snaps, &mut k);
+    (Some(out), snaps)
+}
+
+/// Whether an expression mentions one of the aliases in `snaps`.
+fn mentions_snapped(e: &Rc<Expr>, snaps: &AliasSnaps) -> bool {
+    matches!(&e.val, ExprT::Var(v) if snaps.contains_key(&*v.val.to_string()))
+        || expr_operands(e)
+            .into_iter()
+            .any(|x| mentions_snapped(x, snaps))
+}
+
+/// Whether an expression calls a function.
+fn has_call(e: &Rc<Expr>) -> bool {
+    matches!(&e.val, ExprT::FnCall(..) | ExprT::FnPtrCall(..))
+        || expr_operands(e).into_iter().any(has_call)
+}
+
+/// `*q = f(h)` stores through `q` after the call, so the check made before
+/// the statement would not cover what the call does to the place. Binding the
+/// call's result first puts the store in a statement of its own.
+fn split_alias_stores(env: &Env, body: &Stmts, snaps: &AliasSnaps, k: &mut usize) -> Stmts {
+    let mut env = env.clone();
+    let mut out: Stmts = Vec::new();
+    for st in body {
+        let loc = &st.loc;
+        let v = match &st.val {
+            // `q = get(h)` binds the alias rather than storing through it.
+            StmtT::Assign(lhs, rhs)
+                if has_call(rhs)
+                    && !has_call(lhs)
+                    && mentions_snapped(lhs, snaps)
+                    && !lvalue_name(lhs).is_some_and(|q| snaps.contains_key(&q)) =>
+            {
+                if let Ok(ty) = env.infer_expr(rhs) {
+                    *k += 1;
+                    let id: Rc<Ident> =
+                        Rc::<str>::from(format!("__pal_res_{}", k)).with_loc(loc.clone());
+                    let bind =
+                        StmtT::Let(id.clone(), ty.to_rc(), rhs.clone()).with_loc(loc.clone());
+                    env.push_stmt(&bind);
+                    out.push(bind);
+                    StmtT::Assign(lhs.clone(), ExprT::Var(id).with_loc(rhs.loc.clone()))
+                } else {
+                    st.val.clone()
+                }
+            }
+            StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } => StmtT::If {
+                cond: cond.clone(),
+                then_branch: Rc::new(split_alias_stores(&env, then_branch, snaps, k)),
+                else_branch: Rc::new(split_alias_stores(&env, else_branch, snaps, k)),
+                ensures: ensures.clone(),
+            },
+            StmtT::Match {
+                scrutinee,
+                branches,
+                default_branch,
+                ensures,
+            } => StmtT::Match {
+                scrutinee: scrutinee.clone(),
+                branches: Rc::new(
+                    branches
+                        .iter()
+                        .map(|b| {
+                            Rc::new(MatchBranch {
+                                patterns: b.patterns.clone(),
+                                body: Rc::new(split_alias_stores(&env, &b.body, snaps, k)),
+                            })
+                        })
+                        .collect(),
+                ),
+                default_branch: Rc::new(split_alias_stores(&env, default_branch, snaps, k)),
+                ensures: ensures.clone(),
+            },
+            StmtT::While {
+                cond,
+                inv,
+                requires,
+                ensures,
+                body,
+            } => StmtT::While {
+                cond: cond.clone(),
+                inv: inv.clone(),
+                requires: requires.clone(),
+                ensures: ensures.clone(),
+                body: Rc::new(split_alias_stores(&env, body, snaps, k)),
+            },
+            StmtT::GotoBlock {
+                body,
+                label,
+                ensures,
+            } => StmtT::GotoBlock {
+                body: Rc::new(split_alias_stores(&env, body, snaps, k)),
+                label: label.clone(),
+                ensures: ensures.clone(),
+            },
+            other => other.clone(),
+        };
+        let st = v.with_loc(loc.clone());
+        env.push_stmt(&st);
+        out.push(st);
+    }
+    out
+}
+
+/// Split `if (A && B) S1 else S2`, where `A` tests a `_cursor_from` seed
+/// against null, into `if (A) { if (B) S1 else S2 } else S2`. Which way the
+/// seed test goes decides what the cursor's slot holds, and an arm of an
+/// `if` is where that can be acted on; the right operand of `&&` is not.
+fn split_seed_tests(body: &Stmts, seeds: &HashMap<String, String>) -> Option<Stmts> {
+    fn go(body: &Stmts, seeds: &HashMap<String, String>, changed: &mut bool) -> Stmts {
+        body.iter()
+            .map(|st| match &st.val {
+                StmtT::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                    ensures,
+                } => {
+                    let then_branch = Rc::new(go(then_branch, seeds, changed));
+                    let else_branch = Rc::new(go(else_branch, seeds, changed));
+                    if let ExprT::BinOp(BinOp::LogAnd, a, b) = &strip_vattr(cond).val
+                        && ensures.is_empty()
+                        && Body::null_tested(a).is_some_and(|(v, _)| seeds.contains_key(&v))
+                        && !Body::null_test_assigns(a)
+                    {
+                        *changed = true;
+                        let inner = StmtT::If {
+                            cond: b.clone(),
+                            then_branch,
+                            else_branch: else_branch.clone(),
+                            ensures: ensures.clone(),
+                        }
+                        .with_loc(st.loc.clone());
+                        return StmtT::If {
+                            cond: a.clone(),
+                            then_branch: Rc::new(vec![inner]),
+                            else_branch,
+                            ensures: ensures.clone(),
+                        }
+                        .with_loc(st.loc.clone());
+                    }
+                    StmtT::If {
+                        cond: cond.clone(),
+                        then_branch,
+                        else_branch,
+                        ensures: ensures.clone(),
+                    }
+                    .with_loc(st.loc.clone())
+                }
+                _ => st.clone(),
+            })
+            .collect()
+    }
+    if seeds.is_empty() {
+        return None;
+    }
+    let mut changed = false;
+    let out = go(body, seeds, &mut changed);
+    changed.then_some(out)
+}
+
+/// Name the pointer a `_cursor` holds before going through it. `**p` and
+/// `*(*p)++ = 0` access the cursor's array through a pointer loaded out of the
+/// slot, which nothing tracks; `t = *p; *t` and `t = (*p)++; *t = 0` access it
+/// through a local walked into the array, which is what a walk is. The local
+/// is evaluated where the access was, before the rest of its statement: what
+/// else the statement does cannot touch `*p` (the slot is not reachable from
+/// anything but `p`) except through the same unsequenced access C forbids.
+fn hoist_cursor_derefs(env: &Env, body: &Stmts, cursors: &HashSet<String>) -> Option<Stmts> {
+    fn is_cursor_ptr(e: &Expr, cursors: &HashSet<String>) -> bool {
+        match &strip_vattr(e).val {
+            ExprT::Deref(x) => {
+                matches!(&strip_vattr(x).val, ExprT::Var(v) if cursors.contains(&*v.val))
+            }
+            ExprT::Cast(x, _)
+            | ExprT::PreIncr(x)
+            | ExprT::PostIncr(x)
+            | ExprT::PreDecr(x)
+            | ExprT::PostDecr(x)
+            | ExprT::BinOp(BinOp::Add | BinOp::Sub, x, _) => is_cursor_ptr(x, cursors),
+            _ => false,
+        }
+    }
+    struct H<'a> {
+        env: Env,
+        cursors: &'a HashSet<String>,
+        n: usize,
+        pre: Stmts,
+    }
+    impl H<'_> {
+        fn hoist(&mut self, x: &Rc<Expr>) -> Rc<Expr> {
+            let Ok(ty) = self.env.infer_expr(x) else {
+                return x.clone();
+            };
+            self.n += 1;
+            let id: Rc<Ident> =
+                Rc::<str>::from(format!("__pal_cur_{}", self.n)).with_loc(x.loc.clone());
+            let st = StmtT::Let(id.clone(), ty.to_rc(), x.clone()).with_loc(x.loc.clone());
+            self.env.push_stmt(&st);
+            self.pre.push(st);
+            ExprT::Var(id).with_loc(x.loc.clone())
+        }
+        fn expr(&mut self, e: &Rc<Expr>) -> Rc<Expr> {
+            let v = match &e.val {
+                ExprT::Deref(x) if is_cursor_ptr(x, self.cursors) => ExprT::Deref(self.hoist(x)),
+                ExprT::Index(x, i) if is_cursor_ptr(x, self.cursors) => {
+                    let x = self.hoist(x);
+                    ExprT::Index(x, self.expr(i))
+                }
+                ExprT::Deref(x) => ExprT::Deref(self.expr(x)),
+                ExprT::Index(x, i) => ExprT::Index(self.expr(x), self.expr(i)),
+                ExprT::Member(x, f) => ExprT::Member(self.expr(x), f.clone()),
+                ExprT::VAttr(a, x) => ExprT::VAttr(a.clone(), self.expr(x)),
+                ExprT::Cast(x, t) => ExprT::Cast(self.expr(x), t.clone()),
+                ExprT::UnOp(o, x) => ExprT::UnOp(*o, self.expr(x)),
+                // Only the left operand is always evaluated.
+                ExprT::BinOp(o @ (BinOp::LogAnd | BinOp::LogOr), l, r) => {
+                    ExprT::BinOp(*o, self.expr(l), r.clone())
+                }
+                ExprT::BinOp(o, l, r) => ExprT::BinOp(*o, self.expr(l), self.expr(r)),
+                ExprT::Cond(c, a, b) => ExprT::Cond(self.expr(c), a.clone(), b.clone()),
+                ExprT::FnCall(g, args) => {
+                    ExprT::FnCall(g.clone(), args.iter().map(|a| self.expr(a)).collect())
+                }
+                _ => return e.clone(),
+            };
+            v.with_loc(e.loc.clone())
+        }
+        fn stmts(&mut self, body: &Stmts) -> Stmts {
+            let mut out = Vec::new();
+            for st in body {
+                let new = match &st.val {
+                    StmtT::Call(e) => StmtT::Call(self.expr(e)),
+                    StmtT::Return(Some(e)) => StmtT::Return(Some(self.expr(e))),
+                    StmtT::Let(x, t, e) => StmtT::Let(x.clone(), t.clone(), self.expr(e)),
+                    StmtT::Assign(l, r) => {
+                        let r = self.expr(r);
+                        StmtT::Assign(self.expr(l), r)
+                    }
+                    StmtT::If {
+                        cond,
+                        then_branch,
+                        else_branch,
+                        ensures,
+                    } => {
+                        let cond = self.expr(cond);
+                        let pre = std::mem::take(&mut self.pre);
+                        let env = self.env.clone();
+                        let then_branch = Rc::new(self.stmts(then_branch));
+                        self.env = env.clone();
+                        let else_branch = Rc::new(self.stmts(else_branch));
+                        self.env = env;
+                        self.pre = pre;
+                        StmtT::If {
+                            cond,
+                            then_branch,
+                            else_branch,
+                            ensures: ensures.clone(),
+                        }
+                    }
+                    _ => st.val.clone(),
+                };
+                out.append(&mut self.pre);
+                let st = new.with_loc(st.loc.clone());
+                self.env.push_stmt(&st);
+                out.push(st);
+            }
+            out
+        }
+    }
+    if cursors.is_empty() {
+        return None;
+    }
+    let mut h = H {
+        env: env.clone(),
+        cursors,
+        n: 0,
+        pre: Vec::new(),
+    };
+    let out = h.stmts(body);
+    (h.n > 0).then_some(out)
 }
 
 /// Recognize a direct native storage predicate, not a guarded or nested one.
@@ -23351,9 +31884,106 @@ fn emit_body(
         }
         None => defn,
     };
-    let aliases = alias_map(&defn.body, &|x| ptr_base(tds, &env, x));
+    let undead;
+    let defn = match drop_dead_alias_inits(&defn.body, &|x| returned_place(&env, x)) {
+        Some(body) => {
+            undead = FnDefn {
+                body,
+                ..defn.clone()
+            };
+            &undead
+        }
+        None => defn,
+    };
+    let joined;
+    let defn = match loop_entry_joins(tds, &defn.body) {
+        Some(body) => {
+            joined = FnDefn {
+                body,
+                ..defn.clone()
+            };
+            &joined
+        }
+        None => defn,
+    };
+    let cursors: HashSet<String> = if sig.contract {
+        defn.decl
+            .args
+            .iter()
+            .filter(|a| cursor_pointee(tds, &a.ty).is_some())
+            .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let seeds = if sig.contract {
+        cursor_seeds(tds, &defn.decl)?
+    } else {
+        HashMap::new()
+    };
+    let split;
+    let defn = match split_seed_tests(&defn.body, &seeds) {
+        Some(body) => {
+            split = FnDefn {
+                body,
+                ..defn.clone()
+            };
+            &split
+        }
+        None => defn,
+    };
+    let named;
+    let defn = match hoist_cursor_derefs(&env, &defn.body, &cursors) {
+        Some(body) => {
+            named = FnDefn {
+                body,
+                ..defn.clone()
+            };
+            &named
+        }
+        None => defn,
+    };
+    let (aliases, nullable_aliases) = alias_map(&defn.body, &|x| ptr_base(tds, &env, x), &|x| {
+        returned_place_k(&env, x)
+    });
+    let (snapped, alias_snaps) = snapshot_alias_loads(&env, &defn.body, &aliases);
+    let snapshotted;
+    let defn = match snapped {
+        Some(body) => {
+            snapshotted = FnDefn {
+                body,
+                ..defn.clone()
+            };
+            &snapshotted
+        }
+        None => defn,
+    };
+    let guarded;
+    let defn = match guard_nullable_aliases(&defn.body, &nullable_aliases) {
+        Some(body) => {
+            guarded = FnDefn {
+                body,
+                ..defn.clone()
+            };
+            &guarded
+        }
+        None => defn,
+    };
     let mut arrays = HashMap::new();
     let mut array_facts = Vec::new();
+    let walked: HashSet<String> = {
+        let names = defn
+            .decl
+            .args
+            .iter()
+            .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
+            .filter(|n| !seeds.contains_key(n))
+            .collect();
+        walk_map(&defn.body, &names, &seeds, &|g| returned_arg(&env, g))
+            .into_values()
+            .filter_map(|o| o.ok())
+            .collect()
+    };
     for a in &defn.decl.args {
         // An `_arrayptr` is not an array here: Palow grants it nothing, so
         // there is no sequence to focus an element out of, and the parameter
@@ -23377,6 +32007,9 @@ fn emit_body(
             continue;
         }
         let base = name.val.to_string();
+        if seeds.contains_key(&base) {
+            continue;
+        }
         // Only automatic, unconditional ownership supplies a byte extent.
         // A plain pointer or a nullable guard must not acquire one here.
         if sig.owned.iter().any(|o| o.base == base) || sig.olens.contains_key(&base) {
@@ -23389,6 +32022,12 @@ fn emit_body(
                 "array_fits {repr} var_{} {esize}sz {pn}_alignof;",
                 name.val
             ));
+            if walked.contains(&base) {
+                array_facts.push(format!(
+                    "array_walk_base {repr} var_{} {esize}sz {pn}_alignof;",
+                    name.val
+                ));
+            }
         }
         arrays.insert(
             base,
@@ -23405,7 +32044,49 @@ fn emit_body(
             },
         );
     }
+    // The array a `_cursor` parameter points at is an array parameter in all
+    // but name (see `emit_fn`): `p__arr`, at the incoming `*p`, behind its
+    // nullness guard. A pointer read out of `*p` is walked through it.
+    if sig.contract {
+        for a in &defn.decl.args {
+            let (Some(name), Some(pt)) = (a.name.as_ref(), cursor_pointee(tds, &a.ty)) else {
+                continue;
+            };
+            let base = format!("{}__arr", name.val);
+            if !sig.null_payload.contains_key(&base) {
+                continue;
+            }
+            let Some(et) = pointee(tds, peel(tds, pt)) else {
+                continue;
+            };
+            let (Some(pn), Some(esize), Some(fty)) = (
+                palow_name(tds, et),
+                palow_sizeof(tds, et),
+                fstar_type(tds, et),
+            ) else {
+                continue;
+            };
+            arrays.insert(
+                base.clone(),
+                ArrayParam {
+                    pn,
+                    fty,
+                    esize: format!("{}sz", esize),
+                    addr: format!("var_{}", base),
+                    maybe: false,
+                    known_len: false,
+                },
+            );
+        }
+    }
 
+    let walks = walk_map(
+        &defn.body,
+        &arrays.keys().cloned().collect(),
+        &seeds,
+        &|g| returned_arg(&env, g),
+    );
+    let bases = base_copies(&defn.body, &arrays.keys().cloned().collect());
     let mut b = Body {
         tds,
         env,
@@ -23439,13 +32120,14 @@ fn emit_body(
             ghost_stmt_names(&defn.body, &mut out);
             out
         },
+        author_slots: HashSet::new(),
         tail_branch: false,
         in_guard: false,
         inlining: 0,
         spec_binders: HashMap::new(),
         ret_binding: None,
         fp_witness: None,
-        arrays,
+        arrays: arrays.clone(),
         olens: sig.olens.clone(),
         requires_ok: sig.req_props,
         owned: &sig.owned,
@@ -23468,9 +32150,14 @@ fn emit_body(
         consumed: &sig.consumed,
         divergent: false,
         seeded: Vec::new(),
+        seed_pending: seeds.values().cloned().collect(),
+        seeds,
         laundered: HashSet::new(),
+        witness_results: HashSet::new(),
         post_valid: &sig.post_valid,
         ret_spliced: sig.ret_spliced,
+        ret_array: sig.ret_block.as_ref().is_some_and(|r| r.array),
+        copied_call: false,
         gotos: Vec::new(),
         in_loop: false,
         pending_close: Vec::new(),
@@ -23479,27 +32166,38 @@ fn emit_body(
         prescattered: HashSet::new(),
         decls: Vec::new(),
         own_open: Vec::new(),
+        const_lend: false,
+        mut_lend: false,
         loop_mark: None,
         loop_storage: Vec::new(),
         mirrors: HashMap::new(),
         mirror_reads: false,
         break_flag: None,
         frame_slots: Vec::new(),
+        join_written: None,
+        sign_view: false,
         divergent_fns,
         blocks: Vec::new(),
+        // A getter's result that may be `NULL` is kept in its slot as well,
+        // since comparing it with `NULL` has to read the value it really has.
         stored_aliases: {
             let mut t = Touched::default();
             touch_stmts(&defn.body, &mut t);
             t.addressed
                 .into_iter()
                 .filter(|name| aliases.contains_key(name))
+                .chain(nullable_aliases.iter().cloned())
                 .collect()
         },
+        nullable_aliases,
         aliases: aliases,
+        alias_snaps,
         ptr_src: ptr_source_map(&defn.body),
         byte_bases: byte_base_map(&defn.body),
         fp_from_call: call_bound_map(&defn.body),
         array_aliases: array_alias_map(tds, &defn.body),
+        walks,
+        bases,
         active: HashMap::new(),
         union_values: HashMap::new(),
         // Only where the contract survived: a dropped `_requires` is not a
@@ -23526,6 +32224,12 @@ fn emit_body(
             .args
             .iter()
             .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
+            .collect(),
+        ghost_args: defn
+            .decl
+            .ghost_args
+            .iter()
+            .map(|g| g.name.val.to_string())
             .collect(),
         old_params: HashSet::new(),
     };
@@ -23660,6 +32364,35 @@ fn int_lit(e: &Expr) -> Option<u64> {
     }
 }
 
+/// The C zero of `ty` as an expression: what a field an initialiser leaves
+/// out holds. A union's zero is its first member's, as in C. `None` for a
+/// type with no such expression (an array, a float).
+fn zero_expr(tds: &Typedefs, ty: &Rc<Type>, loc: &Rc<SourceInfo>) -> Option<Rc<Expr>> {
+    let lit = |t: Rc<Type>| ExprT::IntLit(Rc::new(BigInt::from(0)), t).with_loc(loc.clone());
+    Some(match &peel(tds, ty).val {
+        TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT => lit(ty.clone()),
+        TypeT::Bool => ExprT::BoolLit(false).with_loc(loc.clone()),
+        TypeT::Pointer(..) | TypeT::FnPtr { .. } => {
+            let int = TypeT::Int {
+                signed: true,
+                width: 32,
+            }
+            .with_loc(loc.clone());
+            ExprT::Cast(lit(int), ty.clone()).with_loc(loc.clone())
+        }
+        TypeT::TypeRef(TypeRefKind::Struct(n)) => {
+            ExprT::StructInit(n.clone(), Vec::new()).with_loc(loc.clone())
+        }
+        TypeT::TypeRef(TypeRefKind::Union(n)) => {
+            let m = tds.unions.get(&*n.val)?.members.first()?;
+            let z = zero_expr(tds, &m.ty, loc)?;
+            let arm = Rc::<str>::from(m.name.as_str()).with_loc(loc.clone());
+            ExprT::UnionInit(n.clone(), arm, z).with_loc(loc.clone())
+        }
+        _ => return None,
+    })
+}
+
 fn is_zero(e: &Expr) -> bool {
     int_lit(e) == Some(0)
 }
@@ -23676,6 +32409,116 @@ fn may_exit(stmts: &Stmts) -> bool {
         StmtT::GotoBlock { body, .. } => may_exit(body),
         _ => false,
     })
+}
+
+/// Whether the straight-line `return` that ends a function may be copied into
+/// both arms of the `if` before it. An `if` whose arms end in loops has
+/// nothing for Pulse to join the two exit invariants into, and the join loses
+/// what each loop established anyway; with the tail in each arm there is no
+/// join at all. Only a tail without control flow is copied, so the copies
+/// stay small, and only when neither arm declares a name the copy could see.
+fn copyable_tail(then_branch: &Stmts, else_branch: &Stmts, after: &[Rc<Stmt>]) -> bool {
+    // The locals `hoist_cursor_derefs` introduces have fresh names, so
+    // extending their scope over the tail cannot capture anything.
+    let declares = |b: &Stmts| {
+        b.iter().any(|s| match &s.val {
+            StmtT::Let(x, _, _) => !x.val.starts_with("__pal_cur_"),
+            StmtT::Decl(..) | StmtT::DeclStackArray { .. } => true,
+            _ => false,
+        })
+    };
+    matches!(after.last().map(|s| &s.val), Some(StmtT::Return(_)))
+        && after.iter().all(|s| {
+            !matches!(
+                s.val,
+                StmtT::If { .. }
+                    | StmtT::While { .. }
+                    | StmtT::Match { .. }
+                    | StmtT::Label { .. }
+                    | StmtT::GotoBlock { .. }
+                    | StmtT::Goto(_)
+            )
+        })
+        && !declares(then_branch)
+        && !declares(else_branch)
+}
+
+/// Whether a C block always leaves the enclosing block: by a `return`, a
+/// jump, or a `break` or `continue` of the loop it is in.
+fn exits(stmts: &Stmts) -> bool {
+    stmts.iter().any(|s| match &s.val {
+        StmtT::Return(_) | StmtT::Goto(_) | StmtT::Break | StmtT::Continue => true,
+        StmtT::If {
+            then_branch,
+            else_branch,
+            ..
+        } => exits(then_branch) && exits(else_branch),
+        _ => false,
+    })
+}
+
+/// A loop body's statements with each `if` one of whose arms always leaves
+/// given the rest of the block as its other arm: `if (c) { return x; } rest`
+/// becomes `if (c) { return x; } else { rest }`. That is what C means, and
+/// it is what keeps `c`'s outcome in hand in `rest` -- a Pulse `if` forgets
+/// its condition at the join, and nothing joins here. Not done when the arm
+/// that would take the rest declares a name of its own, which the rest could
+/// then see, when the `if` has an `_ensures` (the author's join), or when
+/// the rest has a label to jump to.
+fn fold_exits(stmts: &[Rc<Stmt>]) -> Stmts {
+    // The locals `hoist_cursor_derefs` introduces have fresh names, so
+    // extending their scope over the tail cannot capture anything.
+    let declares = |b: &Stmts| {
+        b.iter().any(|s| match &s.val {
+            StmtT::Let(x, _, _) => !x.val.starts_with("__pal_cur_"),
+            StmtT::Decl(..) | StmtT::DeclStackArray { .. } => true,
+            _ => false,
+        })
+    };
+    for (i, s) in stmts.iter().enumerate() {
+        let StmtT::If {
+            cond,
+            then_branch,
+            else_branch,
+            ensures,
+        } = &s.val
+        else {
+            continue;
+        };
+        let rest = &stmts[i + 1..];
+        if rest.is_empty()
+            || !ensures.is_empty()
+            || rest
+                .iter()
+                .any(|r| matches!(r.val, StmtT::Label { .. } | StmtT::GotoBlock { .. }))
+        {
+            continue;
+        }
+        let (t, e) = (exits(then_branch), exits(else_branch));
+        let (then_branch, else_branch) = if t && !e && !declares(else_branch) {
+            let mut b = (**else_branch).clone();
+            b.extend(rest.iter().cloned());
+            (then_branch.clone(), Rc::new(b))
+        } else if e && !t && !declares(then_branch) {
+            let mut b = (**then_branch).clone();
+            b.extend(rest.iter().cloned());
+            (Rc::new(b), else_branch.clone())
+        } else {
+            continue;
+        };
+        let mut out: Stmts = stmts[..i].to_vec();
+        out.push(
+            StmtT::If {
+                cond: cond.clone(),
+                then_branch,
+                else_branch,
+                ensures: ensures.clone(),
+            }
+            .with_loc(s.loc.clone()),
+        );
+        return out;
+    }
+    stmts.to_vec()
 }
 
 /// Whether a C block always leaves the function. Statements after a `return`
@@ -23879,6 +32722,10 @@ fn aux_fn_antiquot(
 fn field_antiquot(tds: &Typedefs, ty: &Type, field_name: &Ident) -> Result<String, String> {
     match &peel(tds, ty).val {
         TypeT::TypeRef(TypeRefKind::Struct(_)) => Ok(format!("fld_{}", field_name)),
+        TypeT::TypeRef(TypeRefKind::Union(u)) if is_overlay(tds, &u.val) => Err(format!(
+            "`$field` of the overlay union `{}`, whose value is bytes rather than a constructor",
+            u.val
+        )),
         TypeT::TypeRef(TypeRefKind::Union(u)) => Ok(format!("Union_{}_{}", u.val, field_name)),
         _ => Err(format!("`$field` of {}", describe(ty))),
     }
@@ -23895,6 +32742,12 @@ fn declared_expr(
         ExprT::Member(b, f) => {
             let bt = declared_type(tds, declared, b)?;
             Ok(match &peel(tds, &bt).val {
+                TypeT::TypeRef(TypeRefKind::Union(u)) if is_overlay(tds, &u.val) => format!(
+                    "union_{}_get_{} ({})",
+                    u.val,
+                    f.val,
+                    declared_expr(tds, declared, b)?
+                ),
                 TypeT::TypeRef(TypeRefKind::Union(u)) => format!(
                     "Union_{}_{}?.v {}",
                     u.val,
@@ -23945,6 +32798,14 @@ fn declared_expr(
             let TypeT::TypeRef(TypeRefKind::Union(u)) = &peel(tds, &bt).val else {
                 return Err("`_active` on something that is not a union".to_string());
             };
+            if is_overlay(tds, &u.val) {
+                return Ok(format!(
+                    "union_{}_active_{} ({})",
+                    u.val,
+                    m.val,
+                    declared_expr(tds, declared, b)?
+                ));
+            }
             Ok(format!(
                 "Union_{}_{}? ({})",
                 u.val,
@@ -24171,9 +33032,11 @@ fn expr_kind(e: &Expr) -> &'static str {
         ExprT::UnOp(..) => "a unary operator",
         ExprT::ContainerOf(..) => "`_container_of`",
         ExprT::InlinePulse(..) => "inline Pulse",
-        ExprT::Live(..) | ExprT::Old(..) | ExprT::Forall(..) | ExprT::Exists(..) => {
-            "a specification construct"
-        }
+        ExprT::Live(..)
+        | ExprT::Unchanged(..)
+        | ExprT::Old(..)
+        | ExprT::Forall(..)
+        | ExprT::Exists(..) => "a specification construct",
         _ => "this expression",
     }
 }

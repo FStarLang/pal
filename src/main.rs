@@ -60,6 +60,12 @@ struct Cli {
     )]
     portable: bool,
 
+    #[arg(
+        long = "split-invariants",
+        help = "Assert each conjunct of a loop invariant on its own before the invariant is re-established"
+    )]
+    split_invariants: bool,
+
     #[arg(long = "quiet", short = 'q', help = "Suppress diagnostic output")]
     quiet: bool,
 
@@ -323,6 +329,12 @@ fn main() {
     }
 
     let t = Instant::now();
+    pass::collapse_unions::collapse_unions(&mut combined_tu);
+    if cli.time_passes {
+        eprintln!("  collapse_unions: {:.3}s", t.elapsed().as_secs_f64());
+    }
+
+    let t = Instant::now();
     pass::normalize_casts::normalize_casts(&mut combined_tu);
     if cli.time_passes {
         eprintln!("  normalize_casts: {:.3}s", t.elapsed().as_secs_f64());
@@ -360,6 +372,7 @@ fn main() {
         &header_statics,
         diags.has_errors(),
         cli.portable,
+        cli.split_invariants,
     );
     if cli.time_passes {
         eprintln!(
@@ -380,8 +393,9 @@ fn main() {
     // comments and the count back.
     if !cli.palow_permissive {
         for module in &modules {
-            for why in pass::emit_palow::weakenings(module) {
+            for (why, at) in pass::emit_palow::weakenings(module) {
                 let loc = match &module.origin {
+                    _ if let Some(at) = at => at,
                     Some(o) => Location {
                         file_name: o.file.clone(),
                         range: o.range,
