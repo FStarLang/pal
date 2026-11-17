@@ -19,9 +19,10 @@ Sources must resolve to regular files inside the root. Sources and paths must
 be UTF-8.
 
 Use `--extract --proofs-only` to retain declaration contracts, parameter and
-type specifications, and body-less `_include_pulse(Module)` references inline.
+type specifications, and standalone specification vocabulary (`_type`, `_let`,
+and `_include_pulse`, including module bodies) inline.
 This extracts ghost statements, assertions, loop annotations, attributes within
-function bodies (including label joins), and standalone helper definitions.
+function bodies (including label joins), and proof statements in wrapper bodies.
 Application remembers this selection and preserves the retained specifications.
 Wrappers with runtime variants still retain those runtime uses.
 

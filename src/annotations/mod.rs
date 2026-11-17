@@ -515,8 +515,6 @@ fn selected_removals(source: &str, macros: &[Macro], proofs_only: bool) -> Resul
             removal.annotation_kind == MacroKind::Expression
                 || matches!(name, "_invariant" | "_do_while_first" | "_do_while_cond")
                 || bodies.iter().any(|body| body.contains(&removal.edit.start))
-                || (removal.annotation_kind == MacroKind::TopLevel
-                    && (name != "_include_pulse" || text.contains(',')))
         });
     }
     Ok(removals)

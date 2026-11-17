@@ -30,6 +30,7 @@ fn proofs_only_keeps_specs_and_roundtrips_implementation_annotations() {
     let root = directory.path();
     let source = "\
 _include_pulse(Vocabulary)\n\
+_type(Permission, Pulse.perm)\n\
 _include_pulse(Helpers, let proof () : Lemma True = ())\n\
 int f(_plain int *p) _requires(*p >= 0) _ensures(return >= 0) {\n\
     _ghost_stmt(start ());\n\
@@ -41,8 +42,10 @@ int f(_plain int *p) _requires(*p >= 0) _ensures(return >= 0) {\n\
     success(run(root, &["--extract", "--proofs-only", "a.c"]));
     let stripped = fs::read_to_string(root.join("a.c")).unwrap();
     assert!(stripped.contains("_include_pulse(Vocabulary)"));
+    assert!(stripped.contains("_type(Permission, Pulse.perm)"));
+    assert!(stripped.contains("_include_pulse(Helpers, let proof () : Lemma True = ())"));
     assert!(stripped.contains("f(_plain int *p) _requires(*p >= 0) _ensures(return >= 0)"));
-    for proof in ["_ghost_stmt", "_invariant", "_ensures(_live", "Helpers"] {
+    for proof in ["_ghost_stmt", "_invariant", "_ensures(_live"] {
         assert!(!stripped.contains(proof), "{stripped}");
     }
     success(run(root, &["--apply", "out.annotations", "--check"]));
