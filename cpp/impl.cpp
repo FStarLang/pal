@@ -3969,7 +3969,13 @@ public:
     } else if (dyn_cast<NullStmt>(stmt) || dyn_cast<IntegerLiteral>(stmt)) {
       return rust::Unit();
     } else if (auto *as = dyn_cast<GCCAsmStmt>(stmt);
+#if LLVM_VERSION_MAJOR >= 21
+               // Since LLVM 21, the template may be a constant expression
+               // (getAsmStringExpr), and getAsmString returns its value.
+               as && as->getAsmString().empty() &&
+#else
                as && as->getAsmString()->getString().empty() &&
+#endif
                as->getNumOutputs() == 0 && as->getNumLabels() == 0) {
       // An empty template executes no instructions, and without outputs or
       // labels it cannot change a C variable or jump: it is a compiler
