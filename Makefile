@@ -39,7 +39,7 @@ clean:
 
 # Binary package: dist/pal-<version>-<commit>-linux-<arch>.tar.gz. See
 # opt/package.sh for PACKAGE_OPTS (e.g. --check-pulse, --llvm system,
-# --fstar DIR, --fstar-ref REF).
+# --fstar DIR, --fstar-ref REF, --fstar-src SRC).
 PACKAGE_OPTS ?=
 .PHONY: package
 package:

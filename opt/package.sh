@@ -23,7 +23,8 @@
 # host's libclang-cpp<N> installed instead.
 #
 # Usage: opt/package.sh [--out DIR] [--llvm bundled|system] [--check-pulse]
-#                       [--fstar DIR | --fstar-ref REF [--fstar-repo URL]]
+#                       [--fstar DIR | --fstar-ref REF [--fstar-repo URL] |
+#                        --fstar-src DIR|FILE]
 #                       [--fstar-z3 VER,...|all] [--allow-dirty]
 #   --fstar DIR   bundle the F* binary distribution installed in DIR (e.g. by
 #                 opt/install-fstar.sh --dest DIR), and check pulse/ with it
@@ -31,6 +32,11 @@
 #                 full commit SHA of --fstar-repo (default: FStarLang/FStar)
 #                 with opt/build-fstar.sh (Linux, macOS; needs OCaml and F*'s
 #                 opam dependencies), and bundle it
+#   --fstar-src   or build F* from this F* git checkout (in place) or F*
+#                 source package, unpacked or not (fstar-src.tar.gz), and
+#                 bundle it (Linux, macOS; on Windows, build F* from a source
+#                 package with opt/build-fstar.sh in a Cygwin shell, then use
+#                 --fstar)
 #   --fstar-z3    the z3 versions to bundle (default: F*'s default version)
 # Environment: LLVM_CONFIG, FSTAR_EXE (for --check-pulse without --fstar),
 #   CARGO, FSTAR_LIB_PATH (macOS: directories where to find the dylibs that
@@ -40,7 +46,7 @@
 
 set -euo pipefail
 
-usage() { sed -n '3,40p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '3,45p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 OUT=dist
 LLVM_MODE=bundled
@@ -49,6 +55,7 @@ ALLOW_DIRTY=0
 FSTAR_DIR=""
 FSTAR_REF=""
 FSTAR_REPO=""
+FSTAR_SRC=""
 FSTAR_Z3=default
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -59,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --fstar) FSTAR_DIR="$2"; shift 2 ;;
         --fstar-ref) FSTAR_REF="$2"; shift 2 ;;
         --fstar-repo) FSTAR_REPO="$2"; shift 2 ;;
+        --fstar-src) FSTAR_SRC="$2"; shift 2 ;;
         --fstar-z3) FSTAR_Z3="$2"; shift 2 ;;
         -h|--help) usage ;;
         *) echo "unknown option: $1" >&2; usage 2 ;;
@@ -69,7 +77,9 @@ done
 
 die() { echo "package.sh: $*" >&2; exit 1; }
 
-[[ -z "$FSTAR_DIR" || -z "$FSTAR_REF" ]] || die "--fstar and --fstar-ref are exclusive"
+n=0
+for s in "$FSTAR_DIR" "$FSTAR_REF" "$FSTAR_SRC"; do [[ -z "$s" ]] || n=$((n + 1)); done
+[[ $n -le 1 ]] || die "--fstar, --fstar-ref and --fstar-src are exclusive"
 [[ -z "$FSTAR_REPO" || -n "$FSTAR_REF" ]] || die "--fstar-repo needs --fstar-ref"
 if [[ -n "$FSTAR_DIR" ]]; then
     FSTAR_DIR="$(cd "$FSTAR_DIR" && pwd)" || die "no such directory: $FSTAR_DIR"
@@ -123,6 +133,13 @@ if [[ -n "$FSTAR_REF" ]]; then
     echo "== building F* $FSTAR_REF from sources"
     FSTAR_DIR="$WORK/fstar"
     "$ROOT/opt/build-fstar.sh" --ref "$FSTAR_REF" ${FSTAR_REPO:+--repo "$FSTAR_REPO"} \
+        --work "$WORK" --dest "$FSTAR_DIR" --jobs "$NPROC"
+    CHECK_PULSE=1
+elif [[ -n "$FSTAR_SRC" ]]; then
+    echo "== building F* from $FSTAR_SRC"
+    FSTAR_DIR="$WORK/fstar"
+    if [[ -f "$FSTAR_SRC" ]]; then src_opt=--src-package; else src_opt=--src; fi
+    "$ROOT/opt/build-fstar.sh" "$src_opt" "$FSTAR_SRC" \
         --work "$WORK" --dest "$FSTAR_DIR" --jobs "$NPROC"
     CHECK_PULSE=1
 fi
@@ -372,6 +389,10 @@ if [[ -n "$FSTAR_DIR" ]]; then
     if [[ -f "$FSTAR_DIR/SOURCE" ]]; then
         FSTAR_BUNDLED="$FSTAR_BUNDLED, built from $(sed -n 's/^repo: //p' "$FSTAR_DIR/SOURCE")"
         FSTAR_BUNDLED="$FSTAR_BUNDLED $(sed -n 's/^ref: //p' "$FSTAR_DIR/SOURCE")"
+        kind="$(sed -n 's/^kind: //p' "$FSTAR_DIR/SOURCE")"
+        [[ -z "$kind" ]] || FSTAR_BUNDLED="$FSTAR_BUNDLED ($kind)"
+        diff_sha="$(sed -n 's/^diff_sha256: //p' "$FSTAR_DIR/SOURCE")"
+        [[ -z "$diff_sha" ]] || FSTAR_BUNDLED="$FSTAR_BUNDLED, uncommitted changes (diff sha256 $diff_sha)"
     fi
     if [[ $OS == macos ]]; then
         FSTAR_BUNDLED="$FSTAR_BUNDLED, $(lipo -archs "$FSTAR_EXE")"
