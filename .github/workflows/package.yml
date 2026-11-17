@@ -210,3 +210,26 @@ jobs:
 
     - name: Test package (translate and verify)
       run: VERIFY=1 make package-test
+
+  windows-msvc-test:
+    # Windows without MSYS2: the C library headers of MSVC and the Windows SDK
+    # (clang target x86_64-pc-windows-msvc, set by a compile_flags.txt next to
+    # each test), and a PowerShell test driver instead of bash and make.
+    needs: windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+    - uses: actions/checkout@v4
+
+    # Sets INCLUDE to the MSVC and Windows SDK header directories.
+    - uses: ilammy/msvc-dev-cmd@v1
+
+    - uses: actions/download-artifact@v4
+      with:
+        name: pal-windows-x86_64
+        path: dist
+
+    - name: Test package (translate and verify)
+      run: ./opt/package-test.ps1 (Get-Item dist/pal-*.zip).FullName -Target x86_64-pc-windows-msvc

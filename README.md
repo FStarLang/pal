@@ -169,7 +169,12 @@ loads (and their dependencies), and Clang's builtin headers in
   on `PATH`; otherwise, point `pal.exe` to a MinGW-w64 sysroot that has them
   in `include/`, e.g. from MSYS2's `mingw-w64-ucrt-x86_64-headers`:
   `PAL_SYSROOT=C:/msys64/ucrt64`. (`PAL_SYSROOT`, passed to Clang as
-  `--sysroot`, works on every platform.)
+  `--sysroot`, works on every platform.) To use the headers of MSVC and the
+  Windows SDK instead, select the MSVC target with a `compile_flags.txt`
+  next to the C sources containing `--target=x86_64-pc-windows-msvc`; Clang
+  then finds the headers from `INCLUDE` (set by a Visual Studio developer
+  prompt) or by locating Visual Studio. `opt/package-test.ps1` tests a
+  package this way, with PowerShell only (no MSYS2).
 
 On Linux and macOS, the C library headers come from the system as well
 (`libc6-dev` or equivalent; the macOS SDK).
@@ -191,7 +196,8 @@ with `rm -rf pulse/_cache && make -C pulse FSTAR_EXE=fstar.exe`.
 [`.github/workflows/package.yml`](.github/workflows/package.yml) builds the
 packages, with F\* and z3, on Ubuntu 22.04, macOS 15 (arm64 and x86\_64) and
 Windows, then translates and verifies tests with them on clean machines
-without LLVM or F\*, and uploads them as workflow artifacts (run it manually
+without LLVM or F\* (on Windows, both with MSYS2's MinGW headers and with
+MSVC's), and uploads them as workflow artifacts (run it manually
 from the Actions tab).
 
 ### Translate a file
