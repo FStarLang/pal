@@ -87,6 +87,95 @@ fn invalid_overlays_and_missing_inputs_never_modify_sources() {
 }
 
 #[test]
+fn proof_only_validation_preflights_every_file_for_check_and_apply() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path();
+    fs::write(root.join("a.c"), "void a(void) { _ghost_stmt(a ()); }\n").unwrap();
+    fs::write(root.join("b.c"), "void b(void) { _ghost_stmt(b ()); }\n").unwrap();
+    success(run(root, &["--extract", "a.c", "b.c"]));
+    let originals: Vec<_> = ["a.c", "b.c"]
+        .map(|name| fs::read(root.join(name)).unwrap())
+        .into();
+    let original: toml::Value =
+        toml::from_str(&fs::read_to_string(root.join("out.annotations")).unwrap()).unwrap();
+    for payload in [
+        "_ghost_stmt(b ()); injected();",
+        "_ghost_stmt(b ());\n#define INJECTED 1\n",
+    ] {
+        let mut overlay = original.clone();
+        overlay["files"][1]["annotations"][0]["text"] = payload.into();
+        fs::write(
+            root.join("bad.annotations"),
+            toml::to_string(&overlay).unwrap(),
+        )
+        .unwrap();
+        for args in [
+            vec!["--apply", "bad.annotations", "--check"],
+            vec!["--apply", "bad.annotations"],
+        ] {
+            let result = run(root, &args);
+            assert!(!result.status.success());
+            assert!(String::from_utf8_lossy(&result.stderr).contains("b.c:"));
+            assert!(String::from_utf8_lossy(&result.stderr).contains("source preservation"));
+            for (name, original) in ["a.c", "b.c"].iter().zip(&originals) {
+                assert_eq!(fs::read(root.join(name)).unwrap(), *original);
+            }
+        }
+    }
+}
+
+#[test]
+fn overlay_cannot_classify_runtime_or_unrelated_names_as_proof_wrappers() {
+    for prefix in ["void STEP(int);\n", "#define STEP(x) runtime(x)\n", ""] {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        fs::write(
+            root.join("a.c"),
+            "#define STEP(x) _ghost_stmt(proof $(x))\nvoid a(int x) { STEP(x); }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("b.c"),
+            format!("{prefix}void b(int x) {{ _ghost_stmt(proof $(x)); }}\n"),
+        )
+        .unwrap();
+        success(run(root, &["--extract", "a.c", "b.c"]));
+        let original_a = fs::read(root.join("a.c")).unwrap();
+        let original_b = fs::read(root.join("b.c")).unwrap();
+        let mut overlay: toml::Value =
+            toml::from_str(&fs::read_to_string(root.join("out.annotations")).unwrap()).unwrap();
+        // STEP is genuinely proof-only in a.c, but b.c neither includes it nor
+        // defines the same proof-only wrapper. The metadata must not grant it.
+        let advertised = overlay["files"][0]["macros"].clone();
+        overlay["files"][1]
+            .as_table_mut()
+            .unwrap()
+            .insert("macros".into(), advertised);
+        overlay["files"][1]["annotations"][0]["text"] = "STEP(x);".into();
+        fs::write(
+            root.join("bad.annotations"),
+            toml::to_string(&overlay).unwrap(),
+        )
+        .unwrap();
+        for args in [
+            vec!["--apply", "bad.annotations", "--check"],
+            vec!["--apply", "bad.annotations"],
+        ] {
+            let result = run(root, &args);
+            assert!(!result.status.success());
+            let error = String::from_utf8_lossy(&result.stderr);
+            assert!(
+                error.contains("source preservation")
+                    || error.contains("source contains annotations"),
+                "{error}"
+            );
+            assert_eq!(fs::read(root.join("a.c")).unwrap(), original_a);
+            assert_eq!(fs::read(root.join("b.c")).unwrap(), original_b);
+        }
+    }
+}
+
+#[test]
 fn source_root_is_independent_of_overlay_location() {
     let directory = TempDir::new().unwrap();
     let root = directory.path();

@@ -35,7 +35,11 @@ struct Cli {
     )]
     root: PathBuf,
 
-    #[arg(long, requires = "apply", help = "Check applicability without writing")]
+    #[arg(
+        long,
+        requires = "apply",
+        help = "Check applicability and source preservation without writing"
+    )]
     check: bool,
 
     #[arg(

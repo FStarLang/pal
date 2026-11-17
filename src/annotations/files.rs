@@ -1,4 +1,7 @@
-use super::{Overlay, Result, apply_source, discover_macros, extract_source};
+use super::{
+    Overlay, Result, discover_macros, extract_source, preservation::validate_application,
+    render_source,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -142,6 +145,23 @@ fn include_graph(sources: &BTreeMap<PathBuf, &str>) -> Result<BTreeMap<PathBuf, 
     Ok(graph)
 }
 
+fn context<'a>(
+    path: &Path,
+    sources: &BTreeMap<PathBuf, &'a str>,
+    graph: &BTreeMap<PathBuf, Vec<PathBuf>>,
+) -> Vec<&'a str> {
+    let mut pending = vec![path.to_owned()];
+    let mut visited = BTreeSet::new();
+    let mut context = Vec::new();
+    while let Some(path) = pending.pop() {
+        if visited.insert(path.clone()) {
+            context.push(sources[&path]);
+            pending.extend(graph[&path].iter().cloned());
+        }
+    }
+    context
+}
+
 pub fn extract_files(root: &Path, inputs: &[PathBuf], output: &Path) -> Result<String> {
     let root = fs::canonicalize(root).map_err(|error| error.to_string())?;
     let mut sources = BTreeMap::new();
@@ -175,16 +195,7 @@ pub fn extract_files(root: &Path, inputs: &[PathBuf], output: &Path) -> Result<S
     };
     let mut changes = Vec::new();
     for (relative, (path, original)) in &sources {
-        let mut pending = vec![path.clone()];
-        let mut visited = BTreeSet::new();
-        let mut context = Vec::new();
-        while let Some(path) = pending.pop() {
-            if visited.insert(path.clone()) {
-                context.push(source_index[&path]);
-                pending.extend(graph[&path].iter().cloned());
-            }
-        }
-        let macros = discover_macros(&context)?;
+        let macros = discover_macros(&context(path, &source_index, &graph))?;
         let (file, updated) = extract_source(relative.clone(), original, &macros)
             .map_err(|error| format!("{relative}: {error}"))?;
         overlay.files.push(file);
@@ -224,7 +235,7 @@ pub fn apply_files(root: &Path, input: &Path, check: bool) -> Result<String> {
             overlay.format_version
         ));
     }
-    let mut changes = Vec::new();
+    let mut candidates = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for file in &overlay.files {
         let relative = Path::new(&file.path);
@@ -240,16 +251,32 @@ pub fn apply_files(root: &Path, input: &Path, check: bool) -> Result<String> {
             return Err(format!("duplicate source path: {}", file.path));
         }
         let original = read(&path)?;
-        let updated = apply_source(file, &original, &file.macros)
+        let updated = render_source(file, &original, &file.macros)
             .map_err(|error| format!("{}: {error}", file.path))?;
-        if original != updated {
-            changes.push(Change {
-                path,
-                original,
-                updated,
-            });
-        }
+        candidates.push(Change {
+            path,
+            original,
+            updated,
+        });
     }
+    // Reconstruct wrappers from the candidate sources and their actual
+    // supplied includes, never from the overlay's classification alone. Every
+    // candidate (including header definitions) is validated before any write.
+    let source_index: BTreeMap<_, _> = candidates
+        .iter()
+        .map(|change| (change.path.clone(), change.updated.as_str()))
+        .collect();
+    let graph = include_graph(&source_index)?;
+    for (file, change) in overlay.files.iter().zip(&candidates) {
+        let macros = discover_macros(&context(&change.path, &source_index, &graph))
+            .map_err(|error| format!("{}: {error}", file.path))?;
+        validate_application(file, &change.original, &change.updated, &macros)
+            .map_err(|error| format!("{}: {error}", file.path))?;
+    }
+    let changes: Vec<_> = candidates
+        .into_iter()
+        .filter(|change| change.original != change.updated)
+        .collect();
     if !check {
         commit(&changes)?;
     }

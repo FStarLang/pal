@@ -150,6 +150,8 @@ cargo run --bin pal_annotations -- --apply swap.annotations
 For edited sources, application uses named C declarations and required token
 context rather than line numbers, refusing ambiguous or changed attachment
 sites. `--check` does not write files or run verification.
+Both application modes validate that erasing the result preserves the current
+unannotated C, rejecting payloads or replacement metadata that alter source code.
 See [annotation overlays](doc/annotations.md) for the format, guarantees,
 and current limitations.
 

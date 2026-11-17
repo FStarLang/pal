@@ -30,6 +30,9 @@ be UTF-8.
   Success, including already-applied overlays, exits with status 0. Conflicts,
   invalid overlays, and I/O errors exit with a nonzero status.
 - Reapplying an already-applied overlay does not duplicate annotations.
+- Applying validates that only recognized annotations and their scaffolding
+  change. This preservation check is mandatory, including for `--check` and
+  exact-hash matches; a sidecar cannot authorize arbitrary C replacements.
 - Every source is preflighted before any source is changed. Each replacement
   uses a staged file and atomic rename. Extraction saves the overlay first.
   Handled write failures attempt rollback; failed rollback reports a saved
@@ -38,6 +41,52 @@ be UTF-8.
 
 `--check` and successful application do **not** establish proof validity.
 Run PAL verification again after changing the implementation or annotations.
+
+## Source-preserving application
+
+Before any writes, application builds candidate files in memory and checks:
+
+```text
+erase_annotations(candidate) == erase_annotations(current_source)
+```
+
+`current_source` means the file immediately before application, normally the
+unannotated source, including edits made since extraction. It is not the old
+source identified by a stored digest. If annotations are already present, the
+check compares the erased forms of both versions.
+
+The check has three parts:
+
+- Each payload must contain exactly one recognized annotation invocation,
+  optional surrounding whitespace, and its semicolon when representing a
+  compacted proof statement. Nested annotations remain inside that invocation.
+  Appending ordinary statements, directives, or trailing comments is rejected.
+  Only empty text and the known `((void)0)` placeholder are legal replacements;
+  the replacement must agree with the annotation's erasure and matching tokens.
+- Payloads must also be recognized at their actual insertion sites, not hidden
+  in an existing comment/string or merged with neighboring tokens. Original
+  bytes outside the insertion/placeholder spans are copied unchanged.
+  Relocation may consume whitespace within a placeholder, but not user comments.
+- Independent erasure compares the remaining C tokens, their preprocessor
+  directive membership, and whether each `#define` is function-like. Thus
+  moving tokens across a directive boundary, or changing `F(x)` into `F (x)`,
+  is not mistaken for harmless formatting. The comparison normalizes trivia
+  and complete standalone `((void)0);` scaffolding, never arbitrary expressions
+  or controlled statement bodies.
+
+The sidecar's wrapper table is not an authority for declaring runtime names to
+be annotations. Wrappers are rederived from the candidate sources and their
+actual include graph among files listed in the overlay. Every advertised
+wrapper must match this classification; header candidates must themselves pass
+the same preservation checks. Keep the header entries in an overlay even when
+they have no annotations if they supply wrapper definitions.
+
+Any failure rejects the entire batch, reports the affected file and the invalid
+annotation or first unexpected difference, and leaves sources unchanged.
+This is a syntactic annotation-erasure guarantee using PAL's recognized macro
+conventions, not a proof of semantic equivalence under arbitrary macro expansion
+or a validation of the proof annotations themselves. No compiler configuration
+is needed, and inactive branches are checked too.
 
 ## What is extracted
 
@@ -128,3 +177,9 @@ restoration, symlink preservation, a second extraction finding no remaining
 invocations, idempotent application, conflicts, and compilability of stripped
 control-flow/`for`-clause fixtures. The repository checkout is never stripped by
 the census.
+
+Preservation regressions cover injected C/directives, forged replacement tokens
+and wrapper metadata, payloads hidden inside comments, macro-definition spacing
+and directive-boundary changes, preservation of comments in edited placeholders,
+and valid source/proof edits. Both `--check` and `--apply` reject invalid
+multi-file overlays without partially modifying any source.

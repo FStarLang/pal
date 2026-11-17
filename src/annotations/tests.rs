@@ -1,11 +1,114 @@
 use super::*;
 
+fn apply_source(file: &FileOverlay, source: &str, macros: &[Macro]) -> Result<String> {
+    let updated = render_source(file, source, macros)?;
+    preservation::validate_application(file, source, &updated, macros)?;
+    Ok(updated)
+}
+
 fn extract(source: &str) -> (FileOverlay, String, Vec<Macro>) {
     let macros = discover_macros(&[source]).unwrap();
     let (overlay, stripped) = extract_source("sample.c".into(), source, &macros).unwrap();
     assert_eq!(apply_source(&overlay, &stripped, &macros).unwrap(), source);
     assert_eq!(apply_source(&overlay, source, &macros).unwrap(), source);
     (overlay, stripped, macros)
+}
+
+#[test]
+fn application_rejects_runtime_text_and_forged_replacements() {
+    let source = "void f(void) {\n    _ghost_stmt(proof ());\n}\n";
+    for payload in [
+        "_ghost_stmt(proof ()); work();",
+        "_ghost_stmt(proof ());\n#define CHANGED 1\n",
+        "_ghost_stmt(proof ()); // hide following code",
+        "work();",
+    ] {
+        let (mut file, stripped, macros) = extract(source);
+        file.annotations[0].text = payload.into();
+        for current in [stripped.clone(), format!("int unrelated;\n{stripped}")] {
+            assert!(
+                apply_source(&file, &current, &macros)
+                    .unwrap_err()
+                    .contains("source preservation")
+            );
+        }
+    }
+    let (mut file, stripped, macros) = extract(source);
+    file.annotations[0].replacement = "void".into();
+    file.annotations[0].site.replacement_tokens = vec!["void".into()];
+    assert!(
+        apply_source(&file, &stripped, &macros)
+            .unwrap_err()
+            .contains("scaffolding")
+    );
+    file.annotations[0].replacement.clear();
+    assert!(
+        apply_source(&file, &stripped, &macros)
+            .unwrap_err()
+            .contains("scaffolding")
+    );
+}
+
+#[test]
+fn application_checks_payload_recognition_at_the_actual_site() {
+    let source = "void f(void) _requires(1) { /* comment */ }\n";
+    let (mut file, stripped, macros) = extract(source);
+    file.annotations[0].offset = stripped.find("comment").unwrap();
+    assert!(
+        apply_source(&file, &stripped, &macros)
+            .unwrap_err()
+            .contains("source context")
+    );
+}
+
+#[test]
+fn application_preserves_macro_form_and_directive_boundaries() {
+    let source = "#define F(x) _plain x\n";
+    let (mut file, stripped, macros) = extract(source);
+    file.annotations[0].offset = stripped.find("F(").unwrap() + 1;
+    file.annotations[0].text = " _plain ".into();
+    assert!(
+        apply_source(&file, &stripped, &macros)
+            .unwrap_err()
+            .contains("function-like")
+    );
+
+    let (mut file, stripped, macros) = extract(source);
+    file.annotations[0].text = "_plain\n".into();
+    assert!(
+        apply_source(&file, &stripped, &macros)
+            .unwrap_err()
+            .contains("runtime/preprocessor token")
+    );
+}
+
+#[test]
+fn application_does_not_consume_user_comments_in_placeholders() {
+    let source = "void f(int x) { if (x) _assert(x); }\n";
+    let (file, stripped, macros) = extract(source);
+    let edited = stripped.replace("((void)0)", "((/* keep me */void)0)");
+    assert!(
+        apply_source(&file, &edited, &macros)
+            .unwrap_err()
+            .contains("remove non-annotation text")
+    );
+}
+
+#[test]
+fn application_preserves_the_current_source_with_edited_proofs() {
+    let source = "int f(int x) _requires(x > 0) { return x; }\n";
+    let (mut file, stripped, macros) = extract(source);
+    file.annotations[0].text = "_requires(x >= 0)".into();
+    let edited = format!("int added(void) {{ return 42; }}\n{stripped}");
+    let applied = apply_source(&file, &edited, &macros).unwrap();
+    assert_eq!(
+        applied,
+        format!(
+            "int added(void) {{ return 42; }}\n{}",
+            source.replace("x > 0", "x >= 0")
+        )
+    );
+    assert_eq!(apply_source(&file, &applied, &macros).unwrap(), applied);
 }
 
 #[test]

@@ -1,6 +1,7 @@
 mod anchors;
 mod files;
 mod lex;
+mod preservation;
 #[cfg(test)]
 mod tests;
 
@@ -520,6 +521,7 @@ fn restore_clean(file: &FileOverlay, source: &str) -> Result<String> {
     let scopes = anchors::scopes(source, &tokens)?;
     let mut edits = Vec::new();
     for annotation in &file.annotations {
+        preservation::validate_replacement(annotation)?;
         let (start, end, text) = if exact {
             let end = annotation
                 .offset
@@ -581,13 +583,14 @@ fn restore_clean(file: &FileOverlay, source: &str) -> Result<String> {
                 (start, end, annotation.text.clone())
             }
         };
+        preservation::validate_removed_text(annotation, &source[start..end])?;
         edits.push(Edit { start, end, text });
     }
     edits.sort_by_key(|edit| edit.start);
     edit_source(source, &edits)
 }
 
-fn apply_source(file: &FileOverlay, source: &str, macros: &[Macro]) -> Result<String> {
+fn render_source(file: &FileOverlay, source: &str, macros: &[Macro]) -> Result<String> {
     if file.annotations.is_empty() {
         return Ok(source.into());
     }
