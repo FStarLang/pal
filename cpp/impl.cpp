@@ -4364,6 +4364,12 @@ static void parse_file(RefMut<Ctx> ctx) {
       ArgumentInsertPosition::END));
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
+  // The C library headers to compile against, if not the toolchain's default.
+  // On Windows (MinGW target), clang otherwise only finds them through a MinGW
+  // gcc on PATH, e.g. PAL_SYSROOT=C:/msys64/ucrt64 for <dir>/include/stdlib.h.
+  if (const char *sysroot = std::getenv("PAL_SYSROOT"); sysroot && *sysroot)
+    Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
+        {std::string("--sysroot=") + sysroot}, ArgumentInsertPosition::BEGIN));
 
   // Preserve platform preincludes from the compilation database before
   // applying the caller's annotation headers, in their requested order.
