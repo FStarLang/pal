@@ -29,8 +29,8 @@
 #   --fstar-z3    the z3 versions to bundle (default: F*'s default version)
 # Environment: LLVM_CONFIG, FSTAR_EXE (for --check-pulse without --fstar),
 #   CARGO, FSTAR_LIB_PATH (macOS: directories where to find the dylibs that
-#   fstar.exe links, by name, if they are not where it says, e.g. on arm64,
-#   for the x86_64 F* that runs under Rosetta 2).
+#   fstar.exe links, by name, if they are not where it says, e.g. for an
+#   F* of another architecture that runs under Rosetta 2).
 # Output: dist/<name>.tar.gz (Linux, macOS) or .zip (Windows), and .sha256.
 
 set -euo pipefail

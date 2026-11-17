@@ -68,10 +68,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        # Disabled: the pinned F* nightly has no arm64 macOS build, and
-        # Homebrew no longer ships the x86_64 bottles (gmp) that bundling it
-        # for Rosetta 2 needs.
-        # - { runner: macos-15, arch: arm64 }
+        - { runner: macos-15, arch: arm64 }
         - { runner: macos-15-intel, arch: x86_64 }
     runs-on: ${{ matrix.runner }}
     steps:
@@ -85,27 +82,12 @@ jobs:
     - name: Install Rust
       run: rustup update stable && rustup default stable
 
-    # The pinned F* nightly is only built for x86_64 macOS (arm64 packages
-    # would bundle it too, to run under Rosetta 2).
-    - name: Install F* (x86_64)
-      run: arch -x86_64 /bin/bash ./opt/install-fstar.sh --dest "$RUNNER_TEMP/fstar" --no-link
-
-    - name: Fetch the x86_64 Homebrew libraries that F* links
+    # The F* build for this architecture, and the Homebrew libraries that its
+    # fstar.exe links (bundled next to it by package.sh).
+    - name: Install F*
       run: |
-        dir="$RUNNER_TEMP/fstar-libs"
-        mkdir -p "$dir"
-        # The libraries' own dependencies too (bundled only if linked).
-        for formula in gmp zstd $(brew deps --formula gmp zstd); do
-          # An x86_64 macOS bottle tag, e.g. sequoia (not arm64_sequoia).
-          tag="$(brew info --json=v2 "$formula" | python3 -c '
-        import json, sys
-        files = json.load(sys.stdin)["formulae"][0]["bottle"]["stable"]["files"]
-        print(next(t for t in files if not t.startswith("arm64_") and "linux" not in t))')"
-          brew fetch --force --bottle-tag="$tag" "$formula"
-          tar -xzf "$(brew --cache --bottle-tag="$tag" "$formula")" -C "$dir"
-        done
-        libdirs="$(find "$dir" -name '*.dylib' -exec dirname {} \; | sort -u | paste -sd: -)"
-        echo "FSTAR_LIB_PATH=$libdirs" >> "$GITHUB_ENV"
+        ./opt/install-fstar.sh --dest "$RUNNER_TEMP/fstar" --no-link
+        brew install gmp zstd
 
     - name: Build package
       run: make package PACKAGE_OPTS="--fstar $RUNNER_TEMP/fstar"
@@ -122,7 +104,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        # - { runner: macos-26, arch: arm64 }  # disabled, see the macos job
+        - { runner: macos-26, arch: arm64 }
         - { runner: macos-26-intel, arch: x86_64 }
     runs-on: ${{ matrix.runner }}
     steps:
