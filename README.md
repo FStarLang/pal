@@ -82,6 +82,9 @@ sudo apt install -y clang-20 libclang-cpp20-dev g++ clang-tools-20 libclang-20-d
 
 # Rust (skip if already installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Select Rustup's Cargo and rustc in this shell, ahead of any system packages.
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 ```
 
 `llvm-config` (or `llvm-config-20`) must be on `PATH` -- the build script
@@ -135,6 +138,30 @@ PAL emits code against the [Palow](palow.md) memory model.
 
 82 test directories, each a C file that PAL translates and F\*/Pulse
 verifies. Create a new one with `./test/new.sh my_test`.
+
+### Separate annotation overlays
+
+`pal_annotations` moves PAL annotations into a versioned TOML sidecar and
+restores them without changing the original bytes:
+
+```bash
+cargo run --bin pal_annotations -- --extract test/swap/swap.c -o swap.annotations
+cargo run --bin pal_annotations -- --apply swap.annotations --check
+cargo run --bin pal_annotations -- --apply swap.annotations
+```
+
+For edited sources, application uses named C declarations and required token
+context rather than line numbers, refusing ambiguous or changed attachment
+sites. `--check` does not write files or run verification.
+Both application modes validate that erasing the result preserves the current
+unannotated C, rejecting payloads or replacement metadata that alter source code.
+See [annotation overlays](doc/annotations.md) for the format, guarantees,
+and current limitations.
+
+The [doubly linked list example](examples/doubly-linked-list) keeps public
+contracts in `dll.h` and implementation/client proofs in `proofs.annotations`.
+`make -C examples/doubly-linked-list -j8` reapplies the overlay to build copies,
+verifies the library and client, and runs native and roundtrip checks.
 
 ### Translate a file
 
