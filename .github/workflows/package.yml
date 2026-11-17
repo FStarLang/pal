@@ -1,8 +1,8 @@
 name: Package
 
-# Builds the relocatable Linux binary package (opt/package.sh), smoke-tests it
-# on clean distributions without LLVM, and attaches it to a GitHub release when
-# a `v*` tag is pushed.
+# Builds the relocatable binary packages (opt/package.sh) for Linux, macOS and
+# Windows, smoke-tests them on machines without LLVM (opt/package-test.sh), and
+# attaches them to a GitHub release when a `v*` tag is pushed.
 
 on:
   push:
@@ -66,8 +66,144 @@ jobs:
     - name: Test package (translate)
       run: VERIFY=0 make package-test
 
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        # The F* nightlies have no macOS arm64 build: translate only there.
+        - { runner: macos-15, arch: arm64, verify: 0 }
+        - { runner: macos-15-intel, arch: x86_64, verify: 1 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install LLVM 20
+      run: |
+        brew install llvm@20
+        echo "LLVM_CONFIG=$(brew --prefix llvm@20)/bin/llvm-config" >> "$GITHUB_ENV"
+
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+
+    - name: Install F*
+      if: matrix.verify == 1
+      run: |
+        ./opt/install-fstar.sh --link-dir "$HOME/.local/bin"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Build package
+      run: make package PACKAGE_OPTS="${{ matrix.verify == 1 && '--check-pulse' || '' }}"
+
+    - name: Test package
+      run: VERIFY=${{ matrix.verify }} make package-test
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: pal-macos-${{ matrix.arch }}
+        path: dist/pal-*.tar.gz*
+
+  macos-test:
+    # A fresh runner, without Homebrew's llvm@20.
+    needs: macos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - { runner: macos-26, arch: arm64 }
+        - { runner: macos-26-intel, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/download-artifact@v4
+      with:
+        name: pal-macos-${{ matrix.arch }}
+        path: dist
+
+    - name: Test package (translate)
+      run: VERIFY=0 make package-test
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+    - name: Check out with symlinks and LF line endings
+      shell: pwsh
+      run: |
+        git config --global core.symlinks true
+        git config --global core.autocrlf false
+
+    - uses: actions/checkout@v4
+
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: UCRT64
+        update: true
+        install: >-
+          make git python zip unzip
+          mingw-w64-ucrt-x86_64-rust
+          mingw-w64-ucrt-x86_64-clang
+          mingw-w64-ucrt-x86_64-llvm
+          mingw-w64-ucrt-x86_64-clang-tools-extra
+
+    - name: Configure MSYS2 git like the checkout
+      run: |
+        git config --global --add safe.directory "$PWD"
+        git config --global core.symlinks true
+        git config --global core.autocrlf false
+        git status --short
+
+    - name: Install F*
+      run: |
+        dest="$(cygpath -u "$RUNNER_TEMP")/fstar"
+        ./opt/install-fstar.sh --dest "$dest" --no-link
+        echo "FSTAR_EXE=$dest/bin/fstar.exe" >> "$GITHUB_ENV"
+
+    - name: Build package
+      run: make package PACKAGE_OPTS=--check-pulse
+
+    - name: Test package (translate and verify)
+      run: VERIFY=1 make package-test
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: pal-windows-x86_64
+        path: dist/pal-*.zip*
+
+  windows-test:
+    # A clean environment: MSYS2 tools (make, unzip), but no clang or LLVM.
+    needs: windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+    - name: Check out with symlinks and LF line endings
+      shell: pwsh
+      run: |
+        git config --global core.symlinks true
+        git config --global core.autocrlf false
+
+    - uses: actions/checkout@v4
+
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: UCRT64
+        install: make unzip
+
+    - uses: actions/download-artifact@v4
+      with:
+        name: pal-windows-x86_64
+        path: dist
+
+    - name: Test package (translate)
+      run: VERIFY=0 make package-test
+
   release:
-    needs: test
+    needs: [test, macos-test, windows-test]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -75,7 +211,8 @@ jobs:
     steps:
     - uses: actions/download-artifact@v4
       with:
-        name: pal-linux-x86_64
+        pattern: pal-*
+        merge-multiple: true
         path: dist
 
     - name: Create release
