@@ -75,9 +75,13 @@ case "$(uname -s)" in
         ! grep -qE 'not found|\?\?\?' <<<"$LIBS" || fail "unresolved libraries" ;;
 esac
 if [[ $BUNDLED == 1 ]]; then
-    outside="$(grep -iE 'lib(clang-cpp|LLVM)' <<<"$LIBS" | grep -viF "$PKG/" || true)"
+    # Case-sensitive: macOS ships unrelated system libraries such as
+    # /System/Library/PrivateFrameworks/GPUCompiler.framework/.../libllvm-flatbuffers.dylib.
+    llvm_re='lib(clang-cpp|LLVM)[.-]'
+    outside="$(grep -E "$llvm_re" <<<"$LIBS" | grep -vE '(^|[[:space:]])/System/' |
+        grep -viF "$PKG/" || true)"
     [[ -z "$outside" ]] || fail "bundled package loads LLVM from outside the package: $outside"
-    grep -iqE 'lib(clang-cpp|LLVM)' <<<"$LIBS" || fail "LLVM libraries not found in the load list"
+    grep -qE "$llvm_re" <<<"$LIBS" || fail "LLVM libraries not found in the load list"
 fi
 PATH="$TEST_PATH" "$PKG/bin/$EXE" --help >/dev/null
 
