@@ -7,8 +7,9 @@ verify them with the bundled F* and Pulse library.
 .DESCRIPTION
 Meant for Windows without MSYS2, e.g. against the C library headers of MSVC
 and the Windows SDK: -Target x86_64-pc-windows-msvc writes a compile_flags.txt
-with --target=<triple> next to each test (clang then finds the headers from
-INCLUDE, as set by vcvars, or by locating Visual Studio). Tests run with a
+with --target=<triple> next to each test. Clang then finds the headers from
+INCLUDE, which must be set, e.g. by vcvars64.bat (MinGW builds of clang, like
+pal.exe, cannot locate Visual Studio 2017+ by themselves). Tests run with a
 minimal PATH (the package's bin and the system directories), so that no MinGW
 gcc on PATH provides C library headers. PAL_SYSROOT is ignored.
 
@@ -34,6 +35,9 @@ function Fail([string] $msg) { Write-Error "FAIL: $msg" -ErrorAction Continue; e
 
 $Root = Split-Path -Parent $PSScriptRoot
 $Archive = (Resolve-Path $Archive).Path
+if ($Target -like '*-msvc' -and -not $env:INCLUDE) {
+    Fail 'INCLUDE is not set: run from a Visual Studio developer prompt (vcvars64.bat)'
+}
 $Tmp = Join-Path ([IO.Path]::GetTempPath()) ("pal-test-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $Tmp | Out-Null
 

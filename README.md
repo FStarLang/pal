@@ -172,8 +172,10 @@ loads (and their dependencies), and Clang's builtin headers in
   `--sysroot`, works on every platform.) To use the headers of MSVC and the
   Windows SDK instead, select the MSVC target with a `compile_flags.txt`
   next to the C sources containing `--target=x86_64-pc-windows-msvc`; Clang
-  then finds the headers from `INCLUDE` (set by a Visual Studio developer
-  prompt) or by locating Visual Studio. `opt/package-test.ps1` tests a
+  then finds the headers from `INCLUDE`, as set by a Visual Studio
+  developer prompt (`vcvars64.bat`). `INCLUDE` is required: `pal.exe` is
+  built with MinGW, and such builds of Clang cannot locate Visual Studio
+  2017 or later by themselves. `opt/package-test.ps1` tests a
   package this way, with PowerShell only (no MSYS2).
 
 On Linux and macOS, the C library headers come from the system as well

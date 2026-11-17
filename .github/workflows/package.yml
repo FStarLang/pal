@@ -226,8 +226,19 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # Sets INCLUDE to the MSVC and Windows SDK header directories.
-    - uses: ilammy/msvc-dev-cmd@v1
+    # INCLUDE: the MSVC and Windows SDK header directories, as set by
+    # vcvars64.bat of the Visual Studio installation that vswhere finds.
+    - name: Set INCLUDE to the MSVC and Windows SDK headers
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vs = & $vswhere -latest -products * `
+          -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if (-not $vs) { throw 'no Visual Studio with the MSVC x64 tools' }
+        $include = cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" |
+          Select-String '^INCLUDE=' | Select-Object -First 1
+        if (-not $include) { throw 'vcvars64.bat did not set INCLUDE' }
+        Write-Host $include.Line
+        $include.Line >> $env:GITHUB_ENV
 
     - uses: actions/download-artifact@v4
       with:
