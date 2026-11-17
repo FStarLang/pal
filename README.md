@@ -143,8 +143,9 @@ verifies. Create a new one with `./test/new.sh my_test`.
 
 ```bash
 make package                              # dist/pal-<version>-<commit>-<os>-<arch>.tar.gz (.zip on Windows)
-make package PACKAGE_OPTS=--check-pulse   # also ship pulse/_cache, checked by fstar.exe
-make package-test                         # unpack and run a few tests with the package
+make package PACKAGE_OPTS="--fstar DIR"   # bundle F* and z3 from DIR (opt/install-fstar.sh --dest DIR)
+make package PACKAGE_OPTS=--check-pulse   # without --fstar: ship pulse/_cache, checked by fstar.exe
+make package-test                         # unpack, translate and verify a few tests with the package
 ```
 
 [`opt/package.sh`](opt/package.sh) builds a relocatable package on the
@@ -163,18 +164,35 @@ loads (and their dependencies), and Clang's builtin headers in
   the Xcode command line tools (PAL finds the SDK with `xcrun`).
 - **Windows**: build from an MSYS2 UCRT64 shell (see above) with `zip`
   installed. The package is a zip with the DLLs next to `bin\pal.exe`; it
-  needs no MSYS2 installation to run.
+  needs no MSYS2 installation to run, but it does not include the C library
+  headers (`stdlib.h`, `string.h`, ...). Clang finds them through a MinGW gcc
+  on `PATH`; otherwise, point `pal.exe` to a MinGW-w64 sysroot that has them
+  in `include/`, e.g. from MSYS2's `mingw-w64-ucrt-x86_64-headers`:
+  `PAL_SYSROOT=C:/msys64/ucrt64`. (`PAL_SYSROOT`, passed to Clang as
+  `--sysroot`, works on every platform.)
+
+On Linux and macOS, the C library headers come from the system as well
+(`libc6-dev` or equivalent; the macOS SDK).
 
 The package also contains `include/pal.h`, the Pulse support library in
 `pulse/`, and `share/pal/run-fstar.sh` (and `run-fstar.cmd` on Windows),
-which runs `fstar.exe` (or `$PAL_FSTAR_EXE`) with `pulse/` on the include
-path. F\*/Pulse itself is not included. A shipped `pulse/_cache` is only
-usable with the exact F\* that checked it (see `BUILDINFO`); otherwise
-re-check it with `rm -rf pulse/_cache && make -C pulse FSTAR_EXE=fstar.exe`.
+which runs F\* with `pulse/` on the include path: `$PAL_FSTAR_EXE` if set,
+else the bundled `fstar/bin/fstar.exe`, else `fstar.exe` on `PATH`. With
+`--fstar DIR`, the package bundles in `fstar/` what verification needs from
+that F\* binary distribution (`fstar.exe`, its checked standard and Pulse
+libraries, and F\*'s default z3; `--fstar-z3 VER,...|all` for others), and
+ships `pulse/_cache` checked by it. On macOS, the dylibs that `fstar.exe`
+links (Homebrew's gmp and zstd) are copied next to it. The F\* nightlies are
+only built for x86\_64 macOS, so arm64 packages bundle that build, which
+runs under Rosetta 2 (`FSTAR_LIB_PATH` tells `package.sh` where to find
+x86\_64 dylibs; see the workflow). A shipped `pulse/_cache` is only usable
+with the exact F\* that checked it (see `BUILDINFO`); otherwise re-check it
+with `rm -rf pulse/_cache && make -C pulse FSTAR_EXE=fstar.exe`.
 [`.github/workflows/package.yml`](.github/workflows/package.yml) builds the
-packages on Ubuntu 22.04, macOS 15 (arm64 and x86\_64) and Windows, tests
-them on clean machines, and uploads them as workflow artifacts (run it
-manually from the Actions tab).
+packages, with F\* and z3, on Ubuntu 22.04, macOS 15 (arm64 and x86\_64) and
+Windows, then translates and verifies tests with them on clean machines
+without LLVM or F\*, and uploads them as workflow artifacts (run it manually
+from the Actions tab).
 
 ### Translate a file
 

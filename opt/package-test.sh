@@ -3,11 +3,13 @@
 # Smoke-test a package built by opt/package.sh, outside the source tree:
 # unpack it, check that a bundled package loads no LLVM library from the
 # system, translate some tests with the packaged pal, and verify them with the
-# packaged Pulse library if fstar.exe is available (VERIFY=0 to skip, VERIFY=1
-# to require it). A shipped pulse/_cache checked by another F* is re-checked.
+# packaged Pulse library if F* is available (VERIFY=0 to skip, VERIFY=1 to
+# require it). A shipped pulse/_cache checked by another F* is re-checked.
 #
 # Usage: opt/package-test.sh <pal-*.tar.gz|pal-*.zip> [test...]
-# Environment: VERIFY (auto|0|1), FSTAR_EXE (default: fstar.exe on PATH).
+# Environment: VERIFY (auto|0|1), FSTAR_EXE (default: the package's bundled F*,
+#   else fstar.exe on PATH), PAL_SYSROOT (passed to pal: the C library headers,
+#   e.g. MSYS2's ucrt64 directory on Windows, see README.md).
 
 set -euo pipefail
 
@@ -67,6 +69,13 @@ case "$(uname -s)" in
                 codesign -v "$f" || fail "$f: invalid signature"
             done
         fi
+        # The bundled F* and z3 (and the Homebrew dylibs that F* links).
+        for f in "$PKG"/fstar/bin/* "$PKG"/fstar/lib/fstar/z3-*/bin/z3; do
+            [[ -f "$f" ]] || continue
+            bad="$(otool -L "$f" | tail -n +2 | awk '{ print $1 }' |
+                grep -vE '^(@executable_path/|@loader_path/|/usr/lib/|/System/)' || true)"
+            [[ -z "$bad" ]] || fail "$f references $bad"
+        done
         LIBS="$(DYLD_PRINT_LIBRARIES=1 "$PKG/bin/pal" --help 2>&1 >/dev/null | grep -i dylib || true)"
         echo "$LIBS" ;;
     *)
@@ -86,7 +95,13 @@ fi
 PATH="$TEST_PATH" "$PKG/bin/$EXE" --help >/dev/null
 
 VERIFY="${VERIFY:-auto}"
-FSTAR_BIN="$(command -v "${FSTAR_EXE:-fstar.exe}" || true)"
+if [[ -z "${FSTAR_EXE:-}" && -f "$PKG/fstar/bin/fstar.exe" ]]; then
+    FSTAR_BIN="$PKG/fstar/bin/fstar.exe"
+    echo "== bundled F*"
+    PATH="$TEST_PATH" "$FSTAR_BIN" --version || fail "the bundled F* does not run"
+else
+    FSTAR_BIN="$(command -v "${FSTAR_EXE:-fstar.exe}" || true)"
+fi
 if [[ "$VERIFY" == auto ]]; then
     [[ -n "$FSTAR_BIN" ]] && VERIFY=1 || VERIFY=0
 fi
@@ -123,6 +138,7 @@ for t in "${TESTS[@]}"; do
         Linux|Darwin) run=(env -i PATH="$TEST_PATH" HOME="$TMP" PAL_FSTAR_EXE="$FSTAR_BIN") ;;
         *) run=(env PATH="$TEST_PATH" PAL_FSTAR_EXE="$FSTAR_BIN") ;;
     esac
+    [[ -n "${PAL_SYSROOT:-}" ]] && run+=(PAL_SYSROOT="$PAL_SYSROOT")
     if "${run[@]}" make --no-print-directory -C "$TMP/test/$t" "$target" \
             C2PULSE="$PKG/bin/$EXE" FSTAR_EXE="$PKG/share/pal/run-fstar.sh"; then
         echo "PASS: $t"
