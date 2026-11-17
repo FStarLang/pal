@@ -14,6 +14,19 @@ From a checkout with the [PAL toolchain](../../README.md#dependencies):
 make -C examples/doubly-linked-list -j8
 ```
 
+`make prepare` also builds the Rust tools. If it reports that `edition2024` is
+unsupported, check `cargo --version` and `rustc --version`: the shell may be
+selecting older system packages instead of an installed Rustup toolchain.
+For a Rustup installation, select both tools before retrying:
+
+```sh
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+make -C examples/doubly-linked-list prepare
+```
+
+Run the export in the same shell used for `make`, or enable Rustup's environment
+setup in that shell's startup configuration.
+
 The default target builds PAL and its support library, then:
 
 1. Copies the C files and header into `_build/annotated/`.

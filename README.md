@@ -82,6 +82,9 @@ sudo apt install -y clang-20 libclang-cpp20-dev g++ clang-tools-20 libclang-20-d
 
 # Rust (skip if already installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Select Rustup's Cargo and rustc in this shell, ahead of any system packages.
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 ```
 
 `llvm-config` (or `llvm-config-20`) must be on `PATH` -- the build script
