@@ -4609,16 +4609,17 @@ std::string getBinaryForResourcesPath() {
 #endif
 
 #ifdef _WIN32
-// The clang resource directory, in order of preference: $PAL_CLANG_RESOURCE_DIR,
-// <dir of pal.exe>/../lib/clang/<major> (relocatable binary package, see
-// opt/package.sh), and the directory of the clang used to build PAL.
+// The clang resource directory, in order of preference:
+// $PAL_CLANG_RESOURCE_DIR, <dir of pal.exe>/../lib/clang/<major> (relocatable
+// binary package, see opt/package.sh), and the directory of the clang used to
+// build PAL.
 std::string getWindowsResourcesPath() {
   if (const char *env = std::getenv("PAL_CLANG_RESOURCE_DIR"); env && *env)
     return env;
   std::string exe = llvm::sys::fs::getMainExecutable(nullptr, nullptr);
   if (!exe.empty()) {
-    llvm::SmallString<256> dir(llvm::sys::path::parent_path(
-        llvm::sys::path::parent_path(exe)));
+    llvm::SmallString<256> dir(
+        llvm::sys::path::parent_path(llvm::sys::path::parent_path(exe)));
     llvm::sys::path::append(dir, "lib", "clang",
                             std::to_string(LLVM_VERSION_MAJOR));
     llvm::SmallString<256> include(dir);
