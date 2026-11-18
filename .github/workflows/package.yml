@@ -8,8 +8,8 @@ name: Package
 # F* is the pinned nightly (opt/install-fstar.sh), unless fstar_ref or
 # fstar_src_url is given: then the fstar-src job makes (or downloads) an F*
 # source package, and each platform builds F* from it (opt/build-fstar.sh;
-# Windows in its own Cygwin job, fstar-windows), all cached; arm64 macOS
-# packages are built too.
+# Windows in its own Cygwin job, fstar-windows), all cached. (arm64 macOS
+# packages, possible only then, are disabled for now: see the macos job.)
 
 on:
   workflow_dispatch:
@@ -194,10 +194,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # arm64 only with F* built from source: the pinned F* nightly has no
-        # arm64 macOS build, and Homebrew no longer ships the x86_64 bottles
-        # (gmp) that bundling it for Rosetta 2 needs.
-        include: ${{ fromJSON((inputs.fstar_ref != '' || inputs.fstar_src_url != '') && '[{"runner":"macos-15","arch":"arm64"},{"runner":"macos-15-intel","arch":"x86_64"}]' || '[{"runner":"macos-15-intel","arch":"x86_64"}]') }}
+        # arm64 is disabled for now. It is only possible with F* built from
+        # source: the pinned F* nightly has no arm64 macOS build, and Homebrew
+        # no longer ships the x86_64 bottles (gmp) that bundling it for
+        # Rosetta 2 needs. To re-enable it, use (and likewise in macos-test):
+        # include: ${{ fromJSON((inputs.fstar_ref != '' || inputs.fstar_src_url != '') && '[{"runner":"macos-15","arch":"arm64"},{"runner":"macos-15-intel","arch":"x86_64"}]' || '[{"runner":"macos-15-intel","arch":"x86_64"}]') }}
+        include:
+        - runner: macos-15-intel
+          arch: x86_64
     runs-on: ${{ matrix.runner }}
     steps:
     - uses: actions/checkout@v4
@@ -284,8 +288,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # arm64 only with F* built from source, see the macos job.
-        include: ${{ fromJSON((inputs.fstar_ref != '' || inputs.fstar_src_url != '') && '[{"runner":"macos-26","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]' || '[{"runner":"macos-26-intel","arch":"x86_64"}]') }}
+        # arm64 is disabled for now, see the macos job. To re-enable it:
+        # include: ${{ fromJSON((inputs.fstar_ref != '' || inputs.fstar_src_url != '') && '[{"runner":"macos-26","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]' || '[{"runner":"macos-26-intel","arch":"x86_64"}]') }}
+        include:
+        - runner: macos-26-intel
+          arch: x86_64
     runs-on: ${{ matrix.runner }}
     steps:
     - uses: actions/checkout@v4

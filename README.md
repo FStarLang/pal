@@ -229,8 +229,8 @@ from the Actions tab). Its `fstar_ref` input (and `fstar_repo`) builds F\*
 from source at that ref instead of using the pinned nightly: a Linux job
 makes an F\* source package from it (or downloads the one at
 `fstar_src_url`), from which each platform builds F\*, Windows in a
-separate Cygwin job (all cached); then the workflow also builds and tests
-arm64 macOS packages.
+separate Cygwin job (all cached). (It could then also build and test arm64
+macOS packages, but these are disabled for now.)
 
 ### Translate a file
 
