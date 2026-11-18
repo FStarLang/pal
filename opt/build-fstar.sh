@@ -209,6 +209,18 @@ if [[ -n "$SRC_OUT" ]]; then
 fi
 [[ -n "$DEST" ]] || exit 0
 
+# make package bundles z3 with F*'s .scripts/package_z3.sh, which ignores a
+# failing download (then the package just lacks z3): try F*'s download script
+# first, to fail early and show why.
+echo "== checking that F*'s z3 versions can be downloaded"
+if ! "$SRC/.scripts/get_fstar_z3.sh" --full "$TMP/z3" >/dev/null; then
+    echo "== get_fstar_z3.sh failed; tracing it (curl and unzip: $(type -ap curl unzip | paste -sd' ' -))" >&2
+    rm -rf "$TMP/z3"
+    bash -x "$SRC/.scripts/get_fstar_z3.sh" --full "$TMP/z3" >&2 || true
+    die "cannot download z3 with F*'s .scripts/get_fstar_z3.sh"
+fi
+rm -rf "$TMP/z3"
+
 if [[ $KIND == git ]]; then
     echo "== building F* (make package ADMIT=1)"
     "$MAKE" -C "$SRC" -skj"$JOBS" package ADMIT=1 FSTAR_TAG=
@@ -218,7 +230,16 @@ else
     if [[ $WINDOWS == 1 ]]; then
         # The libgmp DLL that fstar.exe loads, to ship next to it (which
         # libgmp-10.dll may find a 32-bit one).
-        LIBGMP="$(ldd "$SRC/out/bin/fstar.exe" | sed -n 's/^[[:space:]]*libgmp-10.dll => *\([^ ]*\) .*$/\1/p')"
+        ldd_out="$(ldd "$SRC/out/bin/fstar.exe")"
+        LIBGMP="$(sed -n 's/^[[:space:]]*libgmp-10.dll => *\([^ ]*\) .*$/\1/p' <<<"$ldd_out")"
+        # ldd may not list it: then the 64-bit MinGW one on the PATH (fstar.exe
+        # is a 64-bit MinGW program).
+        [[ -n "$LIBGMP" ]] || LIBGMP="$(type -ap libgmp-10.dll | grep -m1 x86_64-w64-mingw32 || true)"
+        if [[ ! -f "$LIBGMP" ]]; then
+            echo "$ldd_out" >&2
+            die "cannot find the libgmp-10.dll that fstar.exe loads"
+        fi
+        echo "== shipping $LIBGMP"
         export LIBGMP
     fi
     "$MAKE" -C "$SRC" -s package ADMIT=1 FSTAR_TAG=
@@ -232,6 +253,8 @@ tar -xzf "$SRC/fstar.tar.gz" -C "$TMP/pkg"
 top="$(dirname "$(dirname "$(find "$TMP/pkg" -path '*/bin/fstar.exe' | head -1)")")"
 [[ "$top" != . ]] || die "no bin/fstar.exe in $SRC/fstar.tar.gz"
 (cd "$top" && tar -cf - .) | tar -xf - -C "$DEST"
+compgen -G "$DEST/lib/fstar/z3-*/bin/z3*" >/dev/null ||
+    die "no z3 in $SRC/fstar.tar.gz (see make package's output)"
 {
     printf 'repo: %s\nref: %s\ncommit: %s\nkind: %s\n' "$REPO" "$REF" "$COMMIT" "$KIND"
     [[ -z "$DIFF_SHA" ]] || printf 'diff_sha256: %s\n' "$DIFF_SHA"
