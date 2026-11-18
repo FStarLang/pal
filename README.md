@@ -219,7 +219,7 @@ of sources. A shipped `pulse/_cache` is only usable
 with the exact F\* that checked it (see `BUILDINFO`); otherwise re-check it
 with `rm -rf pulse/_cache && make -C pulse FSTAR_EXE=fstar.exe`.
 [`.github/workflows/package.yml`](.github/workflows/package.yml) builds the
-packages, with F\* and z3, on Ubuntu 22.04, macOS (15 arm64, 26 x86\_64) and
+packages, with F\* and z3, on Ubuntu 22.04, macOS 26 (arm64 and x86\_64) and
 Windows, then translates and verifies tests with them on clean machines
 without LLVM or F\* (on Windows, both with MSYS2's MinGW headers and with
 MSVC's), and uploads them as workflow artifacts (run it manually
