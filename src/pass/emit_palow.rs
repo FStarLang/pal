@@ -5771,8 +5771,9 @@ fn pure_let(
 /// author has given a piece of ownership a word, and a contract that uses the
 /// word means the ownership.
 /// The `_plain` parameters `P` of `decl` that its spliced clauses give only
-/// bytes: some clause states `..._pts_to $(P)` and none mentions an `_own`
-/// predicate (or a word for one, like `..._owned`).
+/// bytes: some clause states `..._pts_to $(P)`, or `..._pts_to ($(P) ...)`
+/// for the bytes of a field, and none mentions an `_own` predicate (or a
+/// word for one, like `..._owned`).
 fn bytes_only_params<'e>(
     tds: &Typedefs,
     decl: &FnDecl,
@@ -5790,7 +5791,15 @@ fn bytes_only_params<'e>(
                     if names_own_predicate(&ct.text.val) {
                         return HashSet::new();
                     }
-                    prev_pts_to = ct.text.val.trim_end().ends_with("_pts_to");
+                    // Tokens may arrive split, so `_pts_to ($(p) ...)` gives
+                    // a lone `(` between the predicate and the antiquot.
+                    let t = ct
+                        .text
+                        .val
+                        .trim_end_matches(|c: char| c.is_whitespace() || c == '(');
+                    if !t.is_empty() {
+                        prev_pts_to = t.ends_with("_pts_to");
+                    }
                 }
                 InlinePulseToken::RValueAntiquot { expr, .. } => {
                     if prev_pts_to && let ExprT::Var(v) = &strip_vattr(expr).val {
@@ -17045,7 +17054,8 @@ impl<'a> Body<'a> {
     /// value the object holds after the write. Ownership is read at the
     /// object's current value, so it cannot be left behind. A write to a field
     /// the ownership does read is not followed, since the ownership then
-    /// really is about something else.
+    /// really is about something else. A bytes-only parameter has no deep
+    /// ownership to follow.
     fn own_before_write(&mut self, lhs: &Expr) -> Option<(String, String, String)> {
         if let Some(b) = self.union_own_before_write(lhs) {
             return Some(b);
@@ -17060,7 +17070,7 @@ impl<'a> Body<'a> {
             return None;
         };
         let p = v.val.to_string();
-        if !self.owned_here(&p) || !self.params.contains(&p) {
+        if !self.owned_here(&p) || !self.params.contains(&p) || self.bytes_only.contains(&p) {
             return None;
         }
         let ty = self.ty_of(base).ok()?;
