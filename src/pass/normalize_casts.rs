@@ -120,7 +120,8 @@ fn normalize_expr(env: &Env, expr: &mut Expr) {
         | ExprT::CallocArray(ty, value)
         | ExprT::MallocFlex(ty, value)
         | ExprT::CallocFlex(ty, value)
-        | ExprT::MemsetZero(ty, value) => {
+        | ExprT::MemsetZero(ty, value)
+        | ExprT::MemsetFill(ty, value, _) => {
             normalize_expr(env, Rc::make_mut(value));
             normalize_type(env, ty);
         }

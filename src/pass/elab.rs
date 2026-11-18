@@ -602,7 +602,7 @@ impl<'a> Elaborator<'a> {
                     }
                 }
             }
-            ExprT::MemsetZero(ty, ptr) => {
+            ExprT::MemsetZero(ty, ptr) | ExprT::MemsetFill(ty, ptr, _) => {
                 self.elab_type(env, Rc::make_mut(ty));
                 self.elab_rvalue(env, Rc::make_mut(ptr), None);
             }

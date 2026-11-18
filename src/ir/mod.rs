@@ -418,6 +418,14 @@ pub enum ExprT {
     /// for any type with a `has_zero_default` instance. Emitted as a whole
     /// object write `(*ptr) := zero_default`.
     MemsetZero(Rc<Type>, Rc<Expr>),
+    /// `memset(ptr, c, sizeof(T))` with a nonzero byte `c` -- filling a
+    /// single object of type `T` through `ptr`, such as a debug build's
+    /// scribble over an object about to be rewritten. The bytes it leaves need
+    /// not encode any value of `T` (a `bool` or an enum, say), so the object
+    /// is uninitialized afterwards, and it must be uninitialized before:
+    /// the fill needs its full ownership, and a value held for it is
+    /// forgotten first.
+    MemsetFill(Rc<Type>, Rc<Expr>, u8),
     Free(Rc<Expr>),
     PreIncr(Rc<Expr>),
     PostIncr(Rc<Expr>),

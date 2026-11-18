@@ -963,6 +963,9 @@ fn mk_memset(
 fn mk_memset_zero(loc: Rc<SourceInfo>, ty: Rc<Type>, ptr: Rc<Expr>) -> Rc<Expr> {
     mk_ast(loc, ExprT::MemsetZero(ty, ptr))
 }
+fn mk_memset_fill(loc: Rc<SourceInfo>, ty: Rc<Type>, ptr: Rc<Expr>, fill: u32) -> Rc<Expr> {
+    mk_ast(loc, ExprT::MemsetFill(ty, ptr, fill as u8))
+}
 fn mk_free(loc: Rc<SourceInfo>, val: Rc<Expr>) -> Rc<Expr> {
     mk_ast(loc, ExprT::Free(val))
 }

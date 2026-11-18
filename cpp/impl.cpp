@@ -2393,6 +2393,16 @@ public:
                 return mk_memset_zero(std::move(loc), std::move(objTy),
                                       trRValue(ptrArg));
               }
+              // Filling a whole structure with a nonzero byte (a debug
+              // scribble) leaves it holding no value of its type.
+              if (!valIsZero && !pointeeQt.isNull() &&
+                  pointeeQt->isStructureType() &&
+                  astCtx->hasSameUnqualifiedType(objQt, pointeeQt)) {
+                auto objTy = trQualType(pointeeQt, szof->getSourceRange());
+                return mk_memset_fill(std::move(loc), std::move(objTy),
+                                      trRValue(ptrArg),
+                                      static_cast<uint32_t>(fillByte));
+              }
             }
           }
           // Filling a whole array: `f(arr, N)` where `arr` is an array-typed

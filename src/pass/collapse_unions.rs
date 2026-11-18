@@ -166,6 +166,7 @@ fn expr(env: &Env, c: &Collapsed, e: &mut Expr) {
         | ExprT::MallocFlex(t, v)
         | ExprT::CallocFlex(t, v)
         | ExprT::MemsetZero(t, v)
+        | ExprT::MemsetFill(t, v, _)
         | ExprT::ContainerOf(v, t, _) => {
             expr(env, c, Rc::make_mut(v));
             ty(env, c, t);
