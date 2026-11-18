@@ -198,9 +198,9 @@ jobs:
         # source: the pinned F* nightly has no arm64 macOS build, and Homebrew
         # no longer ships the x86_64 bottles (gmp) that bundling it for
         # Rosetta 2 needs. To re-enable it, use (and likewise in macos-test):
-        # include: ${{ fromJSON((inputs.fstar_ref != '' || inputs.fstar_src_url != '') && '[{"runner":"macos-15","arch":"arm64"},{"runner":"macos-15-intel","arch":"x86_64"}]' || '[{"runner":"macos-15-intel","arch":"x86_64"}]') }}
+        # include: ${{ fromJSON((inputs.fstar_ref != '' || inputs.fstar_src_url != '') && '[{"runner":"macos-15","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]' || '[{"runner":"macos-26-intel","arch":"x86_64"}]') }}
         include:
-        - runner: macos-15-intel
+        - runner: macos-26-intel
           arch: x86_64
     runs-on: ${{ matrix.runner }}
     steps:
