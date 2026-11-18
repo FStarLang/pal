@@ -58,8 +58,8 @@ it passes, the implementation satisfies the spec. More availabe at [`examples/`]
 
 | What | Version | Why |
 |------|---------|-----|
-| Clang / LLVM | 20.x (CI uses `llvm.sh 20`, currently 20.1.8) | libclang parses C |
-| LLVM dev headers | 20.x | `llvm-config`, `libclang-cpp20-dev`, `libclang-20-dev` |
+| Clang / LLVM | 20+ (CI uses `llvm.sh 23`, currently 23.1.6) | libclang parses C |
+| LLVM dev headers | same as Clang | `llvm-config`, `llvm-23-dev`, `libclang-cpp23-dev`, `libclang-23-dev` |
 | g++ | recent | builds the C++ FFI ([`cpp/impl.cpp`](cpp/impl.cpp)) |
 | Rust | 2024 edition | compiles the PAL binary |
 | F\*/Pulse | nightly 2026-11-17 | verifies generated `.fst` output |
@@ -70,12 +70,12 @@ These are the same steps CI runs
 (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 
 ```bash
-# Clang 20 + LLVM dev packages
+# Clang 23 + LLVM dev packages
 wget https://apt.llvm.org/llvm.sh
 chmod +x llvm.sh
-sudo ./llvm.sh 20
+sudo ./llvm.sh 23
 sudo apt update
-sudo apt install -y clang-20 libclang-cpp20-dev g++ clang-tools-20 libclang-20-dev
+sudo apt install -y clang-23 llvm-23-dev libclang-cpp23-dev g++ clang-tools-23 libclang-23-dev clang-format-23
 
 # F*/Pulse nightly (pinned to the version CI uses)
 ./opt/install-fstar.sh --link-dir /usr/local/bin
@@ -84,7 +84,7 @@ sudo apt install -y clang-20 libclang-cpp20-dev g++ clang-tools-20 libclang-20-d
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-`llvm-config` (or `llvm-config-20`) must be on `PATH` -- the build script
+`llvm-config` (or `llvm-config-23`) must be on `PATH` -- the build script
 calls it to find LLVM libraries.
 
 ### Setup (native Windows)
@@ -157,8 +157,8 @@ loads (and their dependencies), and Clang's builtin headers in
   package runs on any distribution with a glibc at least as recent as the
   build host's. `--llvm system` builds a small package that uses the
   system's libclang-cpp instead.
-- **macOS**: build with Homebrew's `llvm@20`
-  (`LLVM_CONFIG=$(brew --prefix llvm@20)/bin/llvm-config`). The dylibs in
+- **macOS**: build with Homebrew's `llvm`
+  (`LLVM_CONFIG=$(brew --prefix llvm)/bin/llvm-config`). The dylibs in
   `lib/` are found via `@rpath` and ad-hoc signed. Packages are per
   architecture and need the macOS version of the build host or later, and
   the Xcode command line tools (PAL finds the SDK with `xcrun`).

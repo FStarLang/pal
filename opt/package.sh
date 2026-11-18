@@ -86,7 +86,7 @@ done
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
 NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
 
-LLVM_CONFIG="${LLVM_CONFIG:-$(command -v llvm-config-20 || command -v llvm-config || true)}"
+LLVM_CONFIG="${LLVM_CONFIG:-$(command -v llvm-config-23 || command -v llvm-config || true)}"
 [[ -n "$LLVM_CONFIG" ]] || die "llvm-config not found (set LLVM_CONFIG)"
 LLVM_VERSION="$("$LLVM_CONFIG" --version | tr -d '\r')"
 LLVM_MAJOR="${LLVM_VERSION%%.*}"
