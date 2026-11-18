@@ -327,10 +327,14 @@ jobs:
         name: fstar-src
         path: fstar-src
 
+    # The MinGW libraries only (as F*'s Windows builds do): F* builds in the
+    # Cygwin of opam (setup-ocaml), which has make and unzip. Tools of this
+    # second Cygwin fail silently when run from opam's Cygwin bash (its curl
+    # did, in F*'s get_fstar_z3.sh): curl is then Windows' own.
     - uses: cygwin/cygwin-install-action@master
       if: steps.fstar-cache.outputs.cache-hit != 'true'
       with:
-        packages: make, curl, unzip, mingw64-i686-gmp, mingw64-i686-libffi, mingw64-x86_64-gmp, mingw64-x86_64-libffi
+        packages: mingw64-i686-gmp, mingw64-i686-libffi, mingw64-x86_64-gmp, mingw64-x86_64-libffi
 
     # Only Cygwin's tools on the PATH of Cygwin's bash.
     - run: echo "CYGWIN_NOWINPATH=1" >> "$GITHUB_ENV"
