@@ -27387,6 +27387,7 @@ impl<'a> Body<'a> {
                     let callee = self.callees.get(&*name.val.to_string());
                     let void = callee.is_some_and(|c| c.void);
                     let noreturn = callee.is_some_and(|c| c.noreturn);
+                    let mark = self.seeded.len();
                     let call = self.call(name, args)?;
                     if std::mem::take(&mut self.copied_call) {
                         return Ok(());
@@ -27396,6 +27397,13 @@ impl<'a> Body<'a> {
                     } else {
                         let t = self.fresh(&name.val);
                         self.lines.push(format!("let {} = {};", t, call));
+                    }
+                    // As for a call in an expression: a validity seeded for
+                    // the arguments is handed back by the callee and put down
+                    // here. Left for the end of the body, it would be lost
+                    // when an enclosing arm restores the outer seeds.
+                    if !noreturn {
+                        self.drop_seeded(mark);
                     }
                     // The call left `pure False` behind, so this point in the
                     // program is not reached. `unreachable` turns that into
@@ -30564,10 +30572,25 @@ fn alias_map(
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
 
+    // A local declared `_plain` is a pointer object by request: its uses read
+    // the local, and need no ownership of what it points into. A proof that
+    // lends that object away, piece by piece, needs exactly this.
+    fn plain_decl(ty: &Type) -> bool {
+        match &ty.val {
+            TypeT::Plain(_) => true,
+            TypeT::Refine(inner, _)
+            | TypeT::RefineAlways(inner, _)
+            | TypeT::RefineUninit(inner, _)
+            | TypeT::RefineValue(inner, _, _, _)
+            | TypeT::Nullable(inner)
+            | TypeT::Overread(inner) => plain_decl(inner),
+            _ => false,
+        }
+    }
     let locals: HashSet<String> = body
         .iter()
         .filter_map(|s| match &s.val {
-            StmtT::Decl(n, _) => Some(n.val.to_string()),
+            StmtT::Decl(n, ty) if !plain_decl(ty) => Some(n.val.to_string()),
             _ => None,
         })
         .collect();
