@@ -352,6 +352,7 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
         | ExprT::PostDecr(x)
         | ExprT::Free(x)
         | ExprT::MemsetZero(_, x)
+        | ExprT::MemsetFill(_, x, _)
         | ExprT::MallocArray(_, x)
         | ExprT::CallocArray(_, x)
         | ExprT::MallocFlex(_, x)
@@ -694,7 +695,7 @@ fn rewrite_types_expr(e: &mut Expr, elim: &HashSet<Rc<IdentT>>) {
                 rewrite_types_expr(Rc::make_mut(a), elim);
             }
         }
-        ExprT::MemsetZero(ty, x) => {
+        ExprT::MemsetZero(ty, x) | ExprT::MemsetFill(ty, x, _) => {
             rewrite_type(ty, elim);
             rewrite_types_expr(Rc::make_mut(x), elim);
         }

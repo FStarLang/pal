@@ -13572,7 +13572,9 @@ fn collect_array_fill_expr(tds: &Typedefs, e: &Expr, out: &mut BTreeMap<String, 
             collect_array_fill_expr(tds, b, out);
             collect_array_fill_expr(tds, c, out);
         }
-        ExprT::MemsetZero(_, x) | ExprT::Free(x) => collect_array_fill_expr(tds, x, out),
+        ExprT::MemsetZero(_, x) | ExprT::MemsetFill(_, x, _) | ExprT::Free(x) => {
+            collect_array_fill_expr(tds, x, out)
+        }
         ExprT::Forall(_, ty, trigs, body) | ExprT::Exists(_, ty, trigs, body) => {
             collect_array_fill_type(tds, ty, out);
             for t in trigs.iter().flatten() {
@@ -14092,6 +14094,7 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         | ExprT::MallocFlex(_, x)
         | ExprT::CallocFlex(_, x)
         | ExprT::MemsetZero(_, x)
+        | ExprT::MemsetFill(_, x, _)
         | ExprT::Free(x) => go(x),
         ExprT::Live(x) => {
             if let ExprT::Var(v) = &strip_vattr(x).val {
@@ -27537,6 +27540,29 @@ impl<'a> Body<'a> {
                     let place = deref_of(p);
                     self.store(&place, &pn, &z)
                 }
+                // Filling a whole structure with a nonzero byte leaves bytes
+                // that need not encode any value of it, so it is modeled as a
+                // write of no value: the object must be held uninitialized,
+                // and stays so. A local's own storage is a value PAL tracks,
+                // with no uninitialized state to hold.
+                ExprT::MemsetFill(ty, p, _) => {
+                    if !matches!(
+                        &peel(self.tds, ty).val,
+                        TypeT::TypeRef(TypeRefKind::Struct(..))
+                    ) {
+                        return Err(format!("a nonzero `memset` of {}", describe(ty)));
+                    }
+                    if let ExprT::Ref(x) = &strip_vattr(p).val
+                        && lvalue_name(x).is_some()
+                    {
+                        return Err("a nonzero `memset` of a local".to_string());
+                    }
+                    let pn = palow_name(self.tds, ty)
+                        .ok_or_else(|| format!("a nonzero `memset` of {}", describe(ty)))?;
+                    let a = self.rvalue(p)?;
+                    self.lines.push(format!("assert ({}_pts_to_uninit ({}));", pn, a));
+                    Ok(())
+                }
                 _ => Err(format!(
                     "a call in statement position that is not one: {}",
                     expr_kind(e)
@@ -33061,7 +33087,7 @@ fn expr_kind(e: &Expr) -> &'static str {
         | ExprT::CallocArray(..)
         | ExprT::CallocFlex(..)
         | ExprT::Free(..) => "an allocation",
-        ExprT::Memset(..) | ExprT::MemsetZero(..) => "a `memset`",
+        ExprT::Memset(..) | ExprT::MemsetZero(..) | ExprT::MemsetFill(..) => "a `memset`",
         ExprT::SizeOf(..) | ExprT::AlignOf(..) => "a `sizeof`",
         ExprT::StructInit(..) | ExprT::UnionInit(..) | ExprT::ArrayInit { .. } => {
             "an initialiser list"
