@@ -3566,14 +3566,11 @@ public:
 
           auto defaultBody = defaultGroup ? makeBody(*defaultGroup)
                                           : Vec<Rc<ir::Stmt>>::new_();
+          // Keep the clauses apart: an ownership clause is recognised only
+          // when it stands alone.
           auto matchEnss = Vec<Rc<ir::Expr>>::new_();
-          auto combined = switchEnss.front().clone();
-          for (size_t i = 1; i < switchEnss.size(); i++) {
-            combined =
-                mk_rvalue_binop(loc.clone(), ir::BinOp::LogAnd(),
-                                std::move(combined), switchEnss[i].clone());
-          }
-          matchEnss.push(std::move(combined));
+          for (auto &ens : switchEnss)
+            matchEnss.push(ens.clone());
           stmts.push(mk_match(loc.clone(),
                               mk_lvalue_var(loc.clone(), scrutId.clone()),
                               std::move(matchBranches), std::move(defaultBody),
