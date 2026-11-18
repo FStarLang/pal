@@ -1,0 +1,4 @@
+# Expected translation diagnostic substrings
+`Func_signedness`: its body is not translated: an `_out` argument that is not unwritten storage here
+`Func_int_as_pointer`: its body is not translated: an `_out` argument that is not unwritten storage here
+`Func_array_address`: its body is not translated: an `_out` argument that is not unwritten storage here

@@ -83,6 +83,7 @@ fn rename_expr_in_place(expr: &mut Expr, renames: &HashMap<Rc<str>, Rc<Ident>>) 
         | ExprT::Ref(a)
         | ExprT::UnOp(_, a)
         | ExprT::Live(a)
+        | ExprT::Unchanged(a)
         | ExprT::Old(a)
         | ExprT::PreIncr(a)
         | ExprT::PostIncr(a)
@@ -124,8 +125,11 @@ fn rename_expr_in_place(expr: &mut Expr, renames: &HashMap<Rc<str>, Rc<Ident>>) 
             rename_inline_pulse_in_place(Rc::make_mut(code), renames);
             rename_type_in_place(Rc::make_mut(ty), renames);
         }
-        ExprT::Forall(binder, ty, body) | ExprT::Exists(binder, ty, body) => {
+        ExprT::Forall(binder, ty, trigs, body) | ExprT::Exists(binder, ty, trigs, body) => {
             rename_type_in_place(Rc::make_mut(ty), renames);
+            for t in trigs.iter_mut().flatten() {
+                rename_shadowed_expr(binder, t, renames);
+            }
             rename_shadowed_expr(binder, body, renames);
         }
         ExprT::StructInit(_, fields) => {
@@ -195,7 +199,8 @@ fn rename_type_in_place(ty: &mut Type, renames: &HashMap<Rc<str>, Rc<Ident>>) {
         | TypeT::FixedArray(inner, _)
         | TypeT::FlexArray(inner)
         | TypeT::Plain(inner)
-        | TypeT::Nullable(inner) => rename_type_in_place(Rc::make_mut(inner), renames),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => rename_type_in_place(Rc::make_mut(inner), renames),
         TypeT::Refine(inner, pred)
         | TypeT::RefineAlways(inner, pred)
         | TypeT::RefineUninit(inner, pred) => {
@@ -387,6 +392,9 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     // definition is checked against a predicate mentioning names it does not
     // bind.
     let mut arg_type_renames: Vec<(usize, HashMap<Rc<str>, Rc<Ident>>)> = Vec::new();
+    // Parameter and return types a definition adopts from the declaration an
+    // alias gave it (`FnDecl::adopts_signature`).
+    let mut signature_copies: Vec<(usize, Vec<Rc<Type>>, Rc<Type>)> = Vec::new();
 
     // Build an Env for type comparison (need typedef resolution)
     let mut env = Env::new();
@@ -404,8 +412,23 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                         _ => unreachable!(),
                     };
 
-                    // Validate types match
-                    if !types_match(&env, fn_decl, &defn.decl) {
+                    let renames = param_renames(fn_decl, &defn.decl);
+
+                    // Validate types match. A declaration made for an alias's
+                    // contract instead lends its (annotated) types to the
+                    // definition: clang already checked that the C types agree.
+                    if fn_decl.adopts_signature {
+                        let args = fn_decl
+                            .args
+                            .iter()
+                            .map(|a| {
+                                let mut ty = (*a.ty).clone();
+                                rename_type_in_place(&mut ty, &renames);
+                                Rc::new(ty)
+                            })
+                            .collect();
+                        signature_copies.push((defn_idx, args, fn_decl.ret_type.clone()));
+                    } else if !types_match(&env, fn_decl, &defn.decl) {
                         report(
                             diags,
                             format!(
@@ -417,7 +440,6 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
                         continue;
                     }
 
-                    let renames = param_renames(fn_decl, &defn.decl);
                     if !renames.is_empty() {
                         arg_type_renames.push((defn_idx, renames.clone()));
                     }
@@ -540,6 +562,15 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
         }
     }
 
+    for (defn_idx, args, ret_type) in signature_copies {
+        if let DeclT::FnDefn(ref mut defn) = tu.decls[defn_idx].val {
+            for (arg, ty) in defn.decl.args.iter_mut().zip(args) {
+                arg.ty = ty;
+            }
+            defn.decl.ret_type = ret_type;
+        }
+    }
+
     // Copy specs from declarations into definitions before moving/removing them.
     for (defn_idx, requires, ensures, ghost_args) in spec_copies {
         if let DeclT::FnDefn(ref mut defn) = tu.decls[defn_idx].val {
@@ -567,6 +598,7 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
     }
 
     // === Phase 2.5: Give implicitly-declared struct tags a placeholder ===
+    opaque_incomplete_unions(tu);
     declare_implicit_structs(tu);
 
     // === Phase 3: Order type definitions before their dependents ===
@@ -602,7 +634,8 @@ fn is_plain_ptr(ty: &Type) -> bool {
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, _, _, _)
-        | TypeT::Nullable(inner) => is_plain_ptr(inner),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => is_plain_ptr(inner),
         _ => false,
     }
 }
@@ -618,7 +651,8 @@ fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, _, _, _)
-        | TypeT::Nullable(inner) => collect_type_refs(inner, out),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => collect_type_refs(inner, out),
         TypeT::TypeRef(k) => {
             let key = match k {
                 TypeRefKind::Typedef(n) => (TYPEDEF_NS, n.val.clone()),
@@ -642,7 +676,8 @@ fn collect_value_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
         | TypeT::RefineValue(inner, _, _, _)
-        | TypeT::Nullable(inner) => collect_value_type_refs(inner, out),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => collect_value_type_refs(inner, out),
         TypeT::TypeRef(_) => collect_type_refs(ty, out),
         _ => {}
     }
@@ -661,6 +696,7 @@ fn collect_refs_expr(e: &Expr, out: &mut Vec<TypeKey>) {
         | ExprT::Ref(a)
         | ExprT::UnOp(_, a)
         | ExprT::Live(a)
+        | ExprT::Unchanged(a)
         | ExprT::Old(a)
         | ExprT::PreIncr(a)
         | ExprT::PostIncr(a)
@@ -702,8 +738,11 @@ fn collect_refs_expr(e: &Expr, out: &mut Vec<TypeKey>) {
             collect_refs_inline(code, out);
             collect_type_refs(ty, out);
         }
-        ExprT::Forall(_, ty, body) | ExprT::Exists(_, ty, body) => {
+        ExprT::Forall(_, ty, trigs, body) | ExprT::Exists(_, ty, trigs, body) => {
             collect_type_refs(ty, out);
+            for t in trigs.iter().flatten() {
+                collect_refs_expr(t, out);
+            }
             collect_refs_expr(body, out);
         }
         ExprT::StructInit(_, fields) => {
@@ -1039,6 +1078,37 @@ fn declare_implicit_structs(tu: &mut TranslationUnit) {
                 val: DeclT::StructDecl(ident),
             },
         );
+    }
+}
+
+/// Turn every union tag the unit names but never defines into a struct tag.
+///
+/// A header can name `union u` only through pointers in a unit that never
+/// sees its body -- a forward-declared request type, say. Such a tag has no
+/// size and no members, just like an incomplete struct, and C's single tag
+/// namespace means no struct shares its name. Respelling it as a struct gives
+/// it the opaque placeholder `declare_implicit_structs` already provides,
+/// instead of a reference to a union module that is never created.
+fn opaque_incomplete_unions(tu: &mut TranslationUnit) {
+    let defined: HashSet<Rc<str>> = tu
+        .decls
+        .iter()
+        .filter_map(|d| match &d.val {
+            DeclT::UnionDefn(u) => Some(u.name.val.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut refs: Vec<TypeKey> = Vec::new();
+    for decl in &tu.decls {
+        collect_decl_type_refs(decl, false, &mut refs);
+    }
+    let missing: HashSet<Rc<str>> = refs
+        .into_iter()
+        .filter(|(ns, name)| *ns == UNION_NS && !defined.contains(name))
+        .map(|(_, name)| name)
+        .collect();
+    if !missing.is_empty() {
+        crate::pass::elim_cis::rewrite_union_refs_to_struct(tu, &missing);
     }
 }
 

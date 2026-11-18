@@ -16,6 +16,16 @@ FSTAR = $(FSTAR_EXE) \
 	--already_cached Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore \
 	--include $(OUT_DIR)
 
+# Optional wall-clock bound per Z3 query, in milliseconds (e.g.
+# `make Z3_TIMEOUT_MS=300000`). Z3's rlimit does not bound wall time (some
+# quantifier loops run for hours on a few rlimit units); an expired query is
+# reported as an ordinary F* Error 19 "The SMT query timed out". The bound
+# applies per check-sat, so fuel/ifuel retries multiply it.
+Z3_TIMEOUT_MS ?=
+ifneq ($(Z3_TIMEOUT_MS),)
+FSTAR += --z3cliopt timeout=$(Z3_TIMEOUT_MS)
+endif
+
 # Which directory of hand-written F* this test ships, if any.
 HELPERS ?= helpers
 ifneq ($(wildcard $(HELPERS)),)

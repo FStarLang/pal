@@ -37,14 +37,16 @@ void takes_nullable_fnptr(_nullable binop f) {}
 // it -- Pulse cannot do that on its own, because which branch of the guard
 // applies is decided by a pure fact rather than by the slprop's shape.
 //
-// Both arguments of the intro must be explicit, and the trailing elim is needed
-// to release what the callee hands back. The second argument is the callee's
-// precondition as printed in the generated module, with the guard stripped off.
+// For a pointer to a single object PAL emits both steps itself, introducing
+// the guard at full permission and the pointee type's zero value. For an
+// array there is no such canonical value to choose (the length is not a fact
+// about the type), so the steps are still written by hand: both arguments of
+// the intro explicit, and the trailing elim to release what the callee hands
+// back. The second argument is the callee's precondition as printed in the
+// generated module, with the guard stripped off.
 
 void call_ref(void) {
-    _ghost_stmt(intro_unless_null_null null (int32_t_pts_to null 1.0R 0l));
     takes_nullable_ref(NULL);
-    _ghost_stmt(elim_unless_null_null null _);
 }
 // _array owns a sequence of elements, so the guarded predicate is array_pts_to.
 void call_array(void) {
@@ -59,9 +61,7 @@ void call_arrayptr(void) {
     _ghost_stmt(elim_unless_null_null null _);
 }
 void call_struct(void) {
-    _ghost_stmt(intro_unless_null_null null (struct_ops_pts_to null 1.0R ({ fld_a = 0l })));
     takes_nullable_struct(NULL);
-    _ghost_stmt(elim_unless_null_null null _);
 }
 // A nullable function pointer owns nothing, so there is no guard to introduce.
 void call_fnptr(void) {

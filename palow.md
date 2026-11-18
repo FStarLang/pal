@@ -691,6 +691,24 @@ so we do not need a per-array-type axiomatization, and the existing
 today a dedicated `MallocFlex` special case — become an ordinary struct
 followed by an `array_repr` chunk, with no special support in the translator.
 
+A `_refine` on a struct declaration is a fact about every value of the struct,
+so an `_array` of it carries the fact for every element. The struct's module
+names the value-level refinement `struct_X__refine (x: struct_X) : prop`, and a
+contract (or a loop invariant that rebinds the array's sequence) states
+`seq_forall struct_X__refine xs` beside the array's points-to. `seq_forall` is
+opaque to SMT; `Pulse.Lib.C.Palow.Array` exposes it through patterned lemmas
+that fire on a concrete read (`Seq.index xs i`) and on the sequences the array
+operations build (`Seq.upd`, `Seq.slice`, `Seq.append`, `Seq.create`). A
+`_nullable` array states it under `not (is_null p) ==>`. An `_out` array has no
+elements on entry, so it carries the fact only in its postcondition: the
+function leaves through `array_somes_forall`, which asks every cell to hold a
+value satisfying the refinement (a loop that fills the array says so in its
+invariant, e.g. `_forall(size_t j, j < i ==> a[j].v < 100)`) and gives back
+`seq_forall` of the sequence it claims. A struct refinement that states
+ownership, or is otherwise not a proposition about the value (one calling a
+`_pure` C function, today), cannot be spread over a sequence, and an array of
+such a struct is refused rather than given a weaker contract.
+
 ### Effective types
 
 C's effective-type rules (C11 6.5p6-7) are what license a compiler's
@@ -1390,6 +1408,262 @@ machine primitives, but note that their *specifications* are written entirely
 in terms of the derived layer-1 predicates, so they add operations rather than
 new facts about memory.
 
+### Unions of one integer type
+
+An `_overlay` union with two or more members that all have the same integer
+type, none refined, and no `_owning` member, is that integer: C uses it to rename a field
+while keeping the old name for readers, and every member reads the same bytes
+the same way. A union that is not `_overlay` is left as it is, since its active
+member is a tag that a specification may rely on.
+A pass before emission (`collapse_unions`) replaces the union type with the
+integer type, `e.m` with `e`, `(U){.m = v}` with `v`, and `e.m._active` with
+`true`, so no contract has to say which member is active
+(`union_same_type`).
+
+### Overlay unions
+
+An ordinary union is a tagged value: one member is live, and writing another
+member forgets everything about the first (`_switch_m` hands out uninit
+storage). That is the right model for a choice between alternatives, but not
+for a layered request layout, where one object is viewed through several
+struct members at once -- a scheduler owns `Generic.Status`, a library owns
+`BaseParams.ActivityId`, the request type owns its own parameters -- and each
+layer relies on the others' fields, which occupy bytes its own fields do not,
+surviving its stores. The tagged model cannot state that a store through
+`Params` leaves `BaseParams.ActivityId` unchanged, so such code could not be
+verified.
+
+A union declared `_overlay` (`typedef union _overlay _REQ { ... }`,
+`#define _overlay __attribute__((annotate("pal-overlay")))` in `pal.h`) is
+modelled instead as its bytes:
+
+- `union_U` is `b: bytes{length b == sizeof U}` and `union_U_pts_to a p u` is
+  `mem_pts_to a p u` plus alignment. There is no tag.
+- Every struct reachable from an overlay union gets a *view* --
+  `struct_S_view_ok (b: bytes)` (every leaf's bytes are readable as it) and
+  the ghost `struct_S_view b : GTot struct_S` -- with lemmas from
+  `Pulse.Lib.C.Palow.Overlay` (`array_view`, `append_overlay`, `plain_split`,
+  `plain_sub`). `uint8_array_view_inj_at` says the view of a plain byte array
+  determines its bytes, and so every range inside it; its hypothesis has
+  the shape PAL gives `_forall(size_t k, k < n ==> a[k] == _old(a[k]))`, so
+  a callee that keeps a view's byte array keeps every other view's fields
+  inside it.
+- Per member `m`: `union_U_is_m u` (the view is defined), `union_U_get_m u`
+  (the view), `union_U_active_m u` (a ghost bool equal to `is_m`), and
+  `_focus_m` / `_unfocus_m` / `_switch_m` / `_rest_m` as for a tagged union.
+  `_unfocus_m` writes some encoding of the struct back *over* the union's
+  first `sizeof m` bytes, so the bytes past the member are kept. A member
+  that is itself an overlay union is always `is`.
+- The leaves a view reads are the fixed-width integers, which are readable
+  when their bytes are plain; `bool`, whose byte must also be 0 or 1;
+  `size_t`; and pointers, including function pointers, whose bytes must
+  encode *some* pointer, provenance included (`ptr_view_ok`). Decoding a
+  pointer is not computable, which is why views are ghost. An array field
+  must have integer elements, or be of structs that have views themselves
+  and no padding between elements (`array_view_ok` / `array_view_g`, a
+  ghost sequence; both are opaque to SMT, so a store elsewhere keeps them by
+  congruence on the unchanged bytes).
+- Every union reachable from an overlay union is an overlay union too,
+  `_overlay` or not. Its bytes are part of the same object, and every layer
+  reads them through its own members, so a union nested in a layer's view
+  -- an anonymous union of alternative names for a parameter area, say -- is
+  punned just as the outer one is. A struct view sees such a field as its
+  bytes, not as a member's view, and so needs nothing of them: an opaque
+  `char` area another layer has stored pointers into still has a view.
+  The exception is a named union the translation unit also uses as a whole
+  value -- a parameter, a return value, a global or a local (including an
+  array of them), like a status word that is passed around by value. An overlay union has no whole values,
+  so such a union keeps its tagged model everywhere, and a field of it inside
+  an overlay is an *island*: its type there is `union_U__island`, a member-less
+  overlay union of the same size and alignment, i.e. the field's bytes, which
+  the view does not look into. An island is loaded and stored whole, as a
+  value of `U`'s tagged type, when `U`'s first member can be read whole
+  (`union_U__island_load`/`_store` at an offset into bytes, and
+  `union_U__island_read`/`_write` on an island object of its own, for a
+  field reached through a pointer to its struct). A load needs
+  `union_U__island_readable b` -- the bytes are a representation of a `U`
+  whose first member is live, which a contract writes
+  `s.Field.M0._active` -- and returns that value; a store writes some
+  representation of the value (what the padding gets is not said) and no
+  other byte, so the other views' fields keep theirs. The outer overlay
+  union's `union_V_union_U__island_read`/`_write` do the same at a constant
+  offset. Reading a member of an island, or an island whose first member
+  holds a union, is rejected; `_unchanged` of it works as for any region.
+  Members of an overlay union may be structs, unions, scalars (with the same
+  `is`/`get`/`focus` functions as a struct member) or integer arrays (whose
+  elements are reached by the scalar accessors below, at constant
+  subscripts; they have no functions of their own).
+- Per scalar type `X` whose size divides the union's alignment:
+  `union_U_X_read a o` needs the bytes at offset `o` to be plain and returns
+  their decoding; `union_U_X_write a o x` makes the union
+  `overlay u (X_bytes x) o`. That is the frame property: a store changes
+  exactly `sizeof X` bytes. A field of another member keeps its value when
+  its bytes are disjoint from those, and is clobbered when they overlap
+  (`overlay_union_clobber_bad`).
+
+In a function body, a member path `r->A.B[k].C` that ends at a scalar of one
+of those types, through struct fields and constant indices, is translated as a
+read or write of the *outermost* overlay union at the constant offset of the
+path; the arms it passes through are never focused. Any other use of a member
+(passing `&r->Params` to a callee, a non-constant index, a bit-field) focuses
+the whole arm, and a store through it uses `_switch_m`. In contracts,
+`r->A.B.C` means `union_U_get_A(...).B.C`, `_active(r->A)` means
+`union_U_active_A`, and there is no tag guard: the read is well defined
+exactly when its bytes are, which is what the body's read checks.
+
+A struct that holds an overlay union has no whole-value writer either, so
+`x = (T){ ... }` into one is taken apart (`split_overlay_init`): a store per
+field -- the ones the literal leaves out get their C zero -- and, for the
+overlay union's part, a store to the arm the literal initializes, recursively
+while the part still holds an overlay and, inside the arm, down to its scalars,
+since a whole member of an overlay union is not stored (`overlay_struct_literal`).
+C leaves the bytes of the union outside the initialized member unspecified, so
+the split is made only when that member -- an omitted union's first -- covers
+every byte of the union without padding; otherwise the literal is refused
+(`overlay_struct_literal_stale_bad`).
+
+`_unchanged(lv)` in a postcondition says the object `lv` names has the bytes
+it had on entry. Inside an overlay union it is
+`Overlay.range_unchanged u' u o (o + n)` for the outermost overlay union `u`
+on the path, with `lv` at offset `o` and `sizeof(lv) == n`. Elsewhere it is
+equality of values. It is how a layer that does not interpret a region --
+the parameter area of a request, which the layer above has stored pointers
+into -- promises to leave it alone: comparing the region element by element
+with `_old` would need its bytes to be plain, and they are not. The lemmas
+on `range_unchanged` give the same fact for every range inside the region,
+including ranges reached through a slice of an enclosing object, which is
+how the caller's fields in it are known to keep their values. The offset is
+computed as in a body (an outer subscript of a multi-dimensional array steps
+over whole rows); a path under an overlay union whose offset is not constant
+-- through a bit-field or a variable subscript -- is rejected rather than
+weakened to equality of values.
+
+Being an overlay is contagious: every union nested in a layer's view of an
+overlay union is punned (except a whole-value union, which becomes an island),
+and which unions are punned is decided per translation unit: a union not
+declared `_overlay` is punned in a unit that nests it in an overlay union, and
+keeps its tagged model in a unit that does not, so the two units' Pulse
+types for it differ. Every struct or
+union that contains an overlay union, at any depth, is a sequence of bytes
+too, and has no whole values.
+
+What is rejected:
+
+- A whole-member store (`r->Params = p`) and a whole-value read or write of
+  an overlay union or of a struct with one in it (its value is bytes with
+  provenance, which a program cannot hold). C11 6.2.6.1p7 leaves the bytes of other members unspecified after a
+  member store, so the frame property cannot be claimed; write fields instead.
+- Reading a field whose bytes were never written (`overlay_union_unread_bad`).
+- A constant subscript past the end of its array, even when its bytes are
+  inside the union (`overlay_union_oob_bad`), in a body or in `_unchanged`.
+- `_unchanged` of a place under an overlay union at an offset that is not
+  constant (`overlay_union_unchanged_reject`).
+
+Tests: `overlay_union` (scalar stores through three views of a layered
+request, each keeping the fields of the others that it does not overlap; a
+constant subscript into a byte array; lending an arm to a callee, including
+one whose contract promises a byte array back element by element, after which
+the fields of other views stored in those bytes are still known; a
+two-dimensional subscript, whose outer index steps over whole rows, also in
+`_unchanged`);
+`overlay_union_unread_bad`, `overlay_union_clobber_bad` (a store into `Params`
+claimed not to change `Generic.Parameters[8]`, which it overlaps),
+`overlay_union_whole_bad`, `overlay_union_2d_bad`, `overlay_union_oob_bad`;
+`overlay_union_leaves` (pointer, function
+pointer, `bool` and `size_t` leaves; a lower layer whose parameter area is
+an anonymous union of byte arrays the upper layer stores pointers into, and
+which promises it `_unchanged`; a nested union with a scalar member; an
+island, a named union also returned by value, loaded and stored whole both
+through a pointer to its struct and through the outer overlay; an array of
+one-byte bit-field structs);
+`overlay_union_unchanged_bad` (a store into a region promised `_unchanged`),
+`overlay_union_unchanged_2d_bad` (the same, for a row of a two-dimensional
+array), `overlay_union_unchanged_reject`.
+
+#### Ownership through an overlay
+
+An overlay union has no tag, so nothing in its bytes says which member's
+pointers are live. `_owning` on one member says that member's are: a pointer
+to the union then carries the deep ownership of that member's struct
+(`_own`), at the member's view of the union's bytes.
+
+```c
+union _overlay req {
+    _owning struct params params;   /* struct params { struct ctx *ctx; uint32_t seq; } */
+    struct header header;           /* struct header { uint64_t opaque; uint32_t status, flags; } */
+};
+```
+
+generates, beside the union's `_pts_to`:
+
+- `union_req_own u p s = pure (union_req_own_ok u) ** struct_params_own (union_req_get_params u) p s`,
+  where `_own_ok` says the bytes of each owned pointer read as a pointer;
+- `_own_scatter`/`_own_gather`, between that and the member's `_own`;
+- `_own_same u y`: equality of `u` and `y` on the byte ranges of the fields
+  the member's ownership reads, and `_own_follow`, which moves the ownership
+  from `u` to any `y` the union now holds with `_own_same u y`;
+- per owned pointer at offset `o`, `_own_at_o_read`, a load of it that comes
+  back as the term the ownership is at, so that what it points to is found.
+
+A contract on a `union req *` states `union_req_own` next to
+`union_req_pts_to`, as for a struct with an `_own`. In a body:
+
+- A read through any member, and a load through `params.ctx`, open and close
+  the ownership around the statement; ownership is unchanged.
+- A store through any member to bytes the ownership does not read
+  (`header.flags`, `header.status`, `params.seq`) is followed by
+  `_own_follow`: the ownership is the same afterwards. A whole union value
+  stored into another member (`header.ev = e`, an island) is bytes too, and
+  so is followed the same way -- also when it is written through
+  `(&r->base)->...`, as a macro handed `&r->base` does: the ownership is
+  found on the enclosing union.
+- A store of a struct-typed field of the owning member (`params.last = *v`)
+  goes through a focus on that member, so its bytes are not a scalar's.
+  It is followed by `_own_follow_view`, which needs the member live in the
+  new value and each owned field read through it unchanged: the member's
+  view says so of every field the store did not name.
+- A store that touches those bytes (`header.opaque`, which is where `ctx`
+  is) is not followed: the ownership stays keyed to the value before the
+  store, and a later dereference of `params.ctx` finds nothing it may use
+  (`overlay_union_own_clobber_bad`).
+- Passing `&r->m` to a callee, for any member `m`, lends the member's bytes.
+  The union's value before the call is named, and `_own_follow` is tried
+  after it. It holds when the callee's contract says the bytes the
+  ownership reads come back: `_ensures(_unchanged(b->header.opaque))` gives
+  `Overlay.range_unchanged`, which `Overlay.range_unchanged_overlay` carries
+  through the overlay of the callee's result onto the union. A callee that
+  promises nothing loses the ownership (`overlay_union_own_lend_bad`).
+  A `const` parameter needs no promise: a nested overlay union lent to one
+  is focused with `_focus_read_m`/`_unfocus_read_m`, which give the union
+  back as the very term it was, so the ownership is not touched.
+
+At most one member may be `_owning`, and it has to be a struct whose `_own`
+is not empty; otherwise the union is skipped with the reason. `_owning`
+anywhere else (a struct field, a member of a union that is not `_overlay`)
+is reported rather than ignored.
+Tests: `overlay_union_own` (including `set_last`, `clear_ev_then_count`,
+`clear_base_ev_then_count`, `call_then_count` and
+the `const` lends `peek_flags`, `peek_then_count`, `peek_only`),
+`overlay_union_own_clobber_bad`, `overlay_union_own_lend_bad`,
+`overlay_union_owning_reject`.
+
+A call can also be passed the address of a field of what an owned pointer
+reaches, `f(&p->ctx->seq.v)`, whether `ctx` is a struct field or sits in the
+`_owning` member. The place is opened the way a read of it is: the ownership
+`ctx` is read out of is scattered, the pointee focused down to the field, and
+both closed after the call, so the callee's postcondition about the field is
+what the caller sees afterwards. Storage the callee is to fill (`_out`) is not
+lent this way. Tests: `own_deep_lend` (through a struct and through a union),
+`own_deep_lend_bad`.
+
+Limitations:
+
+- Floats are not leaves; a field of floating type has no view.
+- An array of pointers or `bool`s has no view.
+- A scalar store is assumed to change only its own bytes. C11 6.2.6.1p6 lets
+  a store into a *struct member* make padding unspecified; that is ignored,
+  as everywhere else in Palow.
+
 ### Known deviations
 
 - **Over-aligned types are not modelled.** Ordinary alignment is (see
@@ -1510,9 +1784,10 @@ new facts about memory.
   completes the tracked `_out`, including before a later whole-object write.
   `nullable_out` covers scalar and record outputs, early returns, forwarding,
   addressed parameters, exact values, and null/non-null callers.
-  Callers introduce and eliminate nullable ownership explicitly, as for
-  other nullable parameters; a non-null caller derives non-nullness before
-  wrapping its storage. Nullable output arrays remain unsupported, and a
+  A caller takes back what it handed an optional parameter (entry 48):
+  a declined output's empty guard is discarded, and a supplied pointer whose
+  ownership PAL emitted comes back out of the guard. Nullable output arrays
+  remain unsupported, and a
   null-path witness requires a type whose ghost zero value can be constructed.
   `nullable_out_uninit`, `nullable_out_unchecked`, `nullable_out_rebind`, and
   `out_param_null` reject unwritten outputs, unchecked writes, rebinding, and
@@ -2111,9 +2386,39 @@ new facts about memory.
    means. It is only the same C if the place denotes the same object
    throughout, so the alias is taken only when nothing rebinds the pointer
    again and nothing rebinds any name the place is built from; writing
-   *through* those names is fine, and is the point. Handing the pointer itself
+   *through* those names is fine, and is the point. A place that reads a
+   pointer out of memory -- `q = &h->s->seq` -- needs one thing more: `q`
+   holds the `seq` of the `h->s` of the moment it was set, and a store into
+   `h->s` changes which `seq` the place names without touching `q`. So each
+   such load is bound to a local when the alias is, and every statement that
+   uses the alias first asserts the load still gives that value. A callee that
+   leaves the pointer alone says so (`_ensures(h->s == _old(h->s))`) and the
+   assertion is the solver's; a call on the right of a store through the alias
+   is bound first, and any other call in a statement that uses it is refused.
+   A pointer bound to a call whose contract says what it returns --
+   `q = get(o)` with `get` declared `_ensures(return == &o->in)` -- is an alias
+   of that place, with the call's arguments for the callee's parameters. The
+   call is still made, its result is asserted to be the place's address, and
+   any pointer the place loads is bound after the call. The arguments the
+   place mentions have to be plain names, and `PATH` has to be reached through
+   a pointer parameter. Handing the pointer itself
    to something else is still refused, because that hands out ownership of the
    place, which is the focus-across-statements problem again.
+
+   A getter that may also return `NULL` -- `_ensures(return == NULL ||
+   return == &o->in)` -- binds the same alias, but its result is kept in the
+   pointer's slot, since `q == NULL` has to read the value `q` really has.
+   The binding asserts that the result is `NULL` or the place's address, and
+   every later statement that uses `q` for anything but a test against `NULL`
+   (`q == NULL`, `q != NULL`, `!q`, `q` as a condition) is preceded by
+   `_assert(q != NULL)`. That includes an `_assert` and a `_ghost_stmt`
+   antiquotation, which read through `q` as the place just as code does:
+   `_assert(q->a == 1)` must not hold of the place while `q` is `NULL`. So an
+   access through `q` goes to the place only where `q` is known to be its
+   address; whether it is not `NULL` is the caller's to prove, from a test or
+   from the getter's contract. A test inside a larger condition (`q != NULL &&
+   q->a`, or `_assert(q == NULL || q->a == 1)`) is not looked through, and
+   such a statement is refused.
 
    Pointer arithmetic is where the low-level model is *simpler* than the one
    it replaces. `p + 3` is `p +! 3 * sizeof elem`, `p < q` compares addresses,
@@ -3448,7 +3753,9 @@ new facts about memory.
    Palow now generates a `_pts_to_not_null` per struct for the third, which
    is worth having anyway: a predicate over a linked structure is exactly
    where the null case has to be ruled out, and the caller has no reason to
-   know which field sits at offset zero.
+   know which field sits at offset zero. (Any field with a lemma of its own
+   will do, not only the one at offset zero: it shares the struct's
+   provenance, and null has none.)
 
    Two front-end things had to give. A `_letimpure` accessor -- `_elements_of(l)`,
    the list `l` denotes -- is impure by construction and has no F\* definition
@@ -5579,8 +5886,9 @@ new facts about memory.
    needs it, conjoined to its own left: `p /\ q` types `q` with `p` assumed,
    which is precisely the scope the application was missing. The clause is
    then a stronger statement than C's and provable from the `_requires` that
-   motivated it -- and `size_t`, whose F\* operations are the checked ones,
-   owes exactly the same thing.
+   motivated it. (`size_t` once owed the same for `+`, `-` and `*`, its F\*
+   operations being the checked ones; it now wraps as C's unsigned arithmetic
+   does -- see item 53 -- and owes only the shift and division guards.)
 
    A cast from a specification type reads as the number it already is. PAL
    writes `arr[(size_t) ((_specint) (len - j) - 1)]` when the author wrote
@@ -5846,8 +6154,8 @@ new facts about memory.
 
     The resulting bodies are the C, transliterated: `pool_alloc` is two reads,
     a comparison, one pointer sum, one write, and two ghost steps (`mem_split`,
-    and a `rewrite` that makes Pulse's syntactic matcher use the `add_add` SMT
-    pattern). `test/pool_flex` verifies `pool_new`, `pool_alloc` and
+    and a `rewrite` that makes Pulse's syntactic matcher use `add_add`, which
+    since item 86 is called explicitly). `test/pool_flex` verifies `pool_new`, `pool_alloc` and
     `pool_free`.
 
     Translating the program also turned up a frontend bug worth recording:
@@ -6678,3 +6986,1064 @@ new facts about memory.
     after the parameter is walked down by a loop;
     `test/label_old_param_bad` claims the walked parameter is unchanged;
     `test/label_old_param_shadowed` is the refusal.
+
+48. **Taking back what was handed to an optional parameter.** A callee
+    states a `_nullable` parameter's ownership as `unless_null p (..)` on
+    both sides, which is right for it and wrong for a caller that knows
+    which side of the test its own argument is on: until now a caller that
+    supplied an optional output could not read what it had asked to be
+    written, and one that declined it was left holding a guard over
+    nothing. Both had to be spelled out with ghost steps. A call now does
+    it: a `NULL` passed to a `_nullable _out` is followed by
+    `elim_unless_null_null null _` (marked `allow_ambiguous`, since a call
+    may decline several), and a supplied pointer whose ownership PAL
+    emitted -- the address of a local, or a parameter the contract grants
+    -- gets `T_pts_to[_uninit]_not_null p` before the call, while the
+    resource is still in the open, and `elim_unless_null p _` after it.
+    Which lemma follows from the callee's mode: an `_out` is handed
+    storage, anything else an initialized object. The pointee is looked
+    at through any refinement, `_plain` or `_nullable` wrapper. Struct
+    types gain `<s>_pts_to_uninit_not_null`, and `uint32_t` and `ptr` the
+    scalar ones they lacked; a struct's lemma goes through its field at
+    offset zero, which may now itself be a struct that has one. A union,
+    or a struct led by an array, has none, and its guard is left alone. A
+    caller's own `_nullable` parameter is forwarded with its guard
+    untouched, since the caller cannot say which way the test goes, and a
+    `_plain` or hand-granted argument, an array, and a declined
+    initialized input (whose value the guard would have to name; see entry
+    49) are left to the author as before. `test/nullable_caller_transfer`
+    supplies, declines and forwards optional outputs, including a local's
+    address, supplies an initialized input and refined structs (one led by
+    a nested struct), and declines an output beside a hand-managed array
+    input.
+
+49. **Declining an optional input, and supplying a borrowed member.** A
+    `_nullable` input (const or not) names its pointee value -- and, if
+    const, its permission -- as implicits of the callee's signature, which a
+    call passing `NULL` has nothing to solve against. Under a null pointer
+    the guard is `emp`, so a call now introduces it outright:
+    `intro_unless_null_null null (T_pts_to null 1.0R <zero>)` before and
+    `elim_unless_null_null null _` after, which pins both implicits by
+    structural match and asserts nothing about memory. Only pointees that
+    state nothing beyond a `pts_to` qualify -- scalars and structs of them;
+    a refinement or an owned pointer field would be a second guarded
+    conjunct, and an array has no canonical length -- so those are still
+    written by hand (`test/nullable`, `test/struct_pointee_refine`). A
+    refinement anywhere in the pointee counts: a struct-level `_refine`, a
+    refined field, or either in a nested struct -- exactly the refinements
+    the contract states, so a `_plain` nested struct, whose `_refine` it does
+    not state, does not count (`refined_pointee` asks `struct_refines` and
+    `field_refines`, the walk the contract is built from). Such a pointee is
+    also left out of entry 48's take-back, since its supplied guard has two
+    conjuncts. The last cases of `test/nullable_const_in` decline and supply
+    a struct whose nested member carries a struct-level `_refine`, with the
+    guards written by hand, and supply one whose nested member is `_plain`,
+    which PAL handles. The
+    take-back of entry 48 also covers `&s->f` (and `&u->m`), a field
+    opened for the call -- by `field_args` for an input or a union member,
+    and by `out_arg` for a single struct field handed to an `_out` -- or
+    a field of a local still being filled: the field's resource is taken
+    back out of the guard before the field is closed. An input field of
+    an object held in contract-stated pieces, and an array field, are left
+    alone.
+    `test/nullable_const_in` declines, forwards, and supplies a member of
+    a borrowed struct; `test/nullable_field_args` supplies struct fields
+    and union members, singly and two of one struct, as inputs and
+    outputs.
+
+50. **A postcondition that determines the result.** `_ensures(return == E)`,
+    with `E` free of `return`, is emitted as `rewrites_to ret E` rather than
+    `pure (ret == E)`. It is the same fact, but `rewrites_to` is the form
+    Pulse's prover reads as a substitution, which is what a conditional needs:
+    a call in a branch binds its result to a branch-local name, and with an
+    ordinary equality that name would survive into the branch's
+    postcondition under an `exists*` the join cannot get past. `rewrites_to`
+    is F\* equality, so only a result whose `==` is F\* equality qualifies --
+    machine integers, `_Bool`, and struct values, which C cannot compare and
+    a contract compares as records. Floats (IEEE `==`), pointers (possibly
+    behind a nullness guard) and an `E` whose translation carries a side
+    condition keep the ordinary clause. A struct initialiser is now also a
+    contract term -- the record, with unnamed fields zeroed, as in a body --
+    so a `_pure` function can build a struct. `test/rvalue_member_branch`
+    projects a call result twice, once inside a null-guarded branch;
+    `test/rewrites_to_post` covers arithmetic, `_Bool`, `_old(*p)` and a read
+    through a non-const pointer, each once over a body that meets it and once
+    over one that must be rejected for its `rewrites_to`.
+
+    When `E` names one of the postcondition's own witnesses -- `return ==
+    (c->pos < c->len)` on a cursor the call updates -- the result is a term
+    over values the caller only knows existentially. Storing it as it is
+    makes the local's points-to mention them, and in one arm of an `if` the
+    join then abstracts the witnesses apart from the ownership they also
+    index. Such a result is stored as a copy, `value_copy`, equal to it by an
+    ordinary `pure`. `test/bool_condition_call` stores one in a branch and in
+    a loop condition.
+
+51. **A determined call in an assertion.** `_ensures(return ==
+    (_Bool)_inline_pulse(f $(A) $(B)))` is a `rewrites_to` too: the
+    antiquotations are checked for `return`, and the verbatim text for the
+    name the result is bound to (`ret_f`), which inline Pulse can write out;
+    a clause that names it keeps the ordinary equality. That is the only
+    way to say "this function decides that predicate", and it lets an
+    `_assert` name such a call. The rule that nothing is lifted out of an
+    assertion still holds, but Pulse reads a call whose postcondition is a
+    `rewrites_to` as the term it names,
+    without running it, so the call is left in the assertion as a read is.
+    Pulse does not check the callee's precondition when it does this, so the
+    exception is limited to callees whose whole emitted precondition is
+    trivial: no `_requires`, only by-value scalar or struct parameters (no
+    pointer, `_nullable`, `_out`, `_consumes` or refinement), no implicit
+    binders, and nothing but `requires emp` in the signature. Any other call
+    in an assertion is still refused. Divergence is not a precondition: the
+    assertion is about the term `E`, which is what the call would return if
+    it returned. `test/ensures_determines_result` asserts a determined call;
+    `test/ensures_determines_result_requires` is the refusal, for a callee
+    with a `_requires`, for one with a pointer parameter and for one whose
+    inline Pulse names its result; `test/ensures_determines_result_bad`
+    asserts false things of determined calls to callees with real bodies.
+
+    initialized input (whose value the guard would have to name) are left
+    to the author as before. `test/nullable_caller_transfer` supplies,
+    declines and forwards optional outputs, including a local's address,
+    supplies an initialized input and refined structs (one led by a nested
+    struct), and declines an output beside a hand-managed array input.
+
+52. **A caller's pointer slot through an untyped out-parameter.**
+    `f((void const **)&typed_local)` is how every acquire-a-buffer
+    interface is spelled. The old model needed a cell view to carry a
+    `ref (ref T)` across to a `ref core_ref`; under Palow both slots are a
+    `ptr`, so the only thing in the way was the cast, which hid the
+    local's address from the `_out` argument and was refused as "not
+    unwritten storage". A cast is now looked through when the storage it
+    claims has the slot's own Palow type, and nowhere else. What the
+    acquired buffer means is still the callee's `_ensures`: a local whose
+    address a callee with hand-written ownership was handed is
+    dereferenced on the same terms as one a ghost statement names, leaving
+    F* to find the points-to the callee's words grant.
+    `test/core_ref_out_cell` acquires, reads and releases such a buffer;
+    `test/core_ref_out_cell_bad` is the refusal of a cast claiming another
+    Palow type (`(uint32_t *)&int32_local`, `(char **)&int_local`) and of
+    a local array's address.
+
+53. **`size_t` is an unsigned integer type.** `+`, `-` and `*` on `size_t`
+    emitted `SizeT.add`/`sub`/`mul`, which are checked, so C's wrapping was a
+    proof obligation; and `~`, `&`, `|`, `^`, `<<` and `>>` were refused
+    outright, `FStar.SizeT` having no such operations. musl's word-at-a-time
+    string routines are built on `HASZERO(x) = ((x) - ONES) & ~(x) & HIGHS`
+    over `size_t`, which wraps by design. `size_t` now goes through
+    `Pulse.Lib.C.SizeT`, the analogue of `Pulse.Lib.C.UInt64` at the
+    target's abstract width `8 * Target.ptr_bytes`: the arithmetic wraps
+    modulo `Target.addr_limit` with a postcondition that is exact when the
+    result fits, so code that never wraps reasons as before; `~x` is stated
+    as `addr_limit - 1 - x`; `&` and `|` carry their bounds against the
+    operands as well as their `FStar.UInt` meaning; and the shifts owe a
+    count below the width, as for the fixed-width types. Since the width is
+    abstract, a concrete bitwise result such as `12 & 6 == 4` is not
+    computed; what follows from the bounds is. `test/sizet_wrap_bitwise`
+    covers `HASZERO`, wrapping and exact arithmetic, the bitwise bounds and
+    the shifts.
+
+    The wrapping applies in contracts too: `_requires(i + n <= len)` over
+    `size_t` operands is `add_wrap i n <= len`, which a wrapped sum satisfies,
+    so it no longer rules out overflow the way the checked `SizeT.add` did.
+    A contract that means the mathematical bound must say so, e.g.
+    `_requires(n <= len && i <= len - n)`. (An operand that is an integer
+    literal still makes the contract arithmetic mathematical.)
+
+    A shift count wider than 32 bits -- a `size_t` or a 64-bit integer --
+    is narrowed to the `UInt32.t` that F*'s shifts take by the checked
+    `UInt32.uint_to_t (M.v s)`, and the definedness obligation is stated of
+    `M.v s` itself. Elaboration casts every count to `uint32_t`, and that
+    cast truncates: a count of 2^32 used to become 0, so the shift looked
+    defined and `a >> s` verified as `a` (this held for `uint64_t` before
+    `size_t` had shifts). `test/sizet_shift_count_bad` and
+    `test/u64_shift_count_bad` are the regressions. `mul_wrap` and
+    `shift_left` now both state their result as `% Target.addr_limit` of the
+    product, so `y <<= 1` is provably `y * two` when `two == 2`.
+
+54. **Walking a pointer through an array.** musl's string functions move
+    the pointer instead of indexing: `for (a=s; *s; s++); return s-a;`.
+    The ownership of an `_array` parameter stays at its base `var_s`, so
+    `*s` after `s++` used to be refused, or focused as if the current `s`
+    were still the base. The body is now scanned (`walk_map`) for every
+    pointer slot -- a reassigned parameter or a local -- whose values all
+    come from one `_array` parameter through copies, `±` an integer,
+    `++`/`--` and `?:`. A dereference or subscript of such a slot, or of
+    `p++`, `--p`, `p + i` on one, is focused out of the owning array at
+    the pointer's current value (`array_focus_at` and its unfocus
+    counterparts in `Pulse.Lib.C.Palow.Array`), which asks for
+    `walk_ok esize var_s q` -- same provenance, at or above the base, a
+    whole number of elements on -- and for the element index
+    `walk_idx esize var_s q` to be in bounds. Every loop invariant states
+    `walk_ok` for every walked pointer it binds; that much is true by
+    construction and survives `+!`/`-!` of a step. The bounds are the
+    source's `_invariant`, because one past the end is a pointer C lets a
+    loop stop at. A walked pointer the loop does not move is read once
+    before the loop instead of rebound, and a `const` array's sequence is
+    the entry value throughout (it is held at a fraction nothing can write
+    with). In a contract `p - q` between two pointers into the same array
+    is `walk_idx p - walk_idx q`, `<`/`<=` compare those positions, and
+    `p[k]`, `*p` and `p._length` of a walked `p` are relative to where it
+    points. `_old(p)[k]` reads the entry array. `array_walk_base` (emitted
+    for arrays a pointer walks) and `walk_is_add` give the facts a
+    contract needs to tell a returned walked pointer from `NULL` and to
+    match it against `src + i`. `*(unsigned char *)p` on a `char` array is
+    the element read and converted (C11 6.5p7), which is what `strcmp`
+    returns. A slot whose values come from two arrays, or from an array and
+    something else, is refused at the access instead of focused at a
+    guess. `s - a` in the body is `ptr_diff`, whose precondition (the byte
+    distance fits `ptrdiff_t`) is the caller's: wcslen asks for a length
+    bound. A contract comparing or subtracting the array parameter itself
+    and a pointer (`s <= p`, `p - s`) reads the array as the plain pointer
+    it is (elaboration casts across the pointer kinds). A step back,
+    `q -! n`, has its address and provenance from `walk_sub`, triggered on
+    the step itself. A subscript is converted to `size_t`, so `p[-1]` is an
+    out-of-bounds index that does not verify; `*(p - 1)` is the way to
+    read behind a walked pointer. `test/array_pointer_walk` verifies musl's
+    `wcslen`, `strcmp`, `memchr` and `memcpy` loops with functional
+    specifications, a backward walk and offsets either side of a moved
+    pointer; `test/array_pointer_walk_bad` is the refusals.
+
+55. **Positions next to integers.** A position (`p - q` between walked
+    pointers) is an `int`, but the elaborator types it `ptrdiff_t` and
+    converts the `size_t` it meets to `ptrdiff_t`, so `l - _old(l) ==
+    _old(n) - n` came out as an `Int64` conversion of a `SizeT` beside an
+    `int`, and `(l - _old(l)) + n` as signed machine arithmetic refused
+    for want of an overflow obligation. In a contract and in an `_assert`
+    alike, a comparison or `+`/`-`/`*` with a position anywhere inside it
+    is now mathematical, and an integer converted to `ptrdiff_t` beside one
+    is read as the number it is (`has_ptr_diff`, `ptrdiff_conv`). An
+    `_assert` reads a position as `walk_idx` of the pointer's current
+    value, as a contract does, rather than as `ptr_diff` divided by the
+    element size. A `_exists(size_t i, ...)` whose witness is a position --
+    the index where `wcscmp`'s loop stopped -- needs a `SizeT.t` term for
+    the solver to try, which an `int` position is not: `walk_size` is the
+    position as a `SizeT.t` where it is one, and `walk_size_v` puts it next
+    to every `walk_idx` the proof mentions. `test/array_pointer_walk` adds
+    musl's `wmemcmp`, `wcsncmp` and `wcscmp` and a `size_t`-bounded
+    `wcslen` invariant.
+
+    Only a conversion that keeps every distance's value is looked through
+    this way: to `ptrdiff_t`, a signed type of 64 bits or more, or
+    `_specint`. Looking through every cast read `(uint8_t)(p - a)` as the
+    untruncated count, so an invariant `(uint8_t)(p - a) == i` verified at
+    `i == 256`, where C says 0. A distance under a narrowing or unsigned
+    conversion is now refused in a contract (`array_pointer_walk_bad`), and
+    `(int64_t)(p - a)` is read through (`count_wide`). Positions exist only
+    where there are walked pointers -- loop invariants and `_assert` -- so a
+    function's `_requires`/`_ensures` cannot subtract pointers.
+
+56. **Words through byte arrays.** musl's fast string functions cast a
+    walked `const unsigned char *` to a pointer to `size_t` and read (or
+    write) eight elements at once. A walked pointer now stays walked through
+    a cast to a pointer to `uint16_t`/`uint32_t`/`uint64_t`/`size_t` and
+    back (`walk_root`), with its position still in bytes, and `*w` on such a
+    pointer into an array of one-byte elements is a *word access*
+    (`word_walk`, `focus_word`): `array_word_focus_T` in
+    `Pulse.Lib.C.Palow.Word` splits the array around the `W` elements at the
+    position, turns their bytes into the word's `mem_pts_to`, and states the
+    value as `word_bytes ev xs pos W v` -- byte `j` of `v`, `word_byte W v j
+    == v / pow2 (8*j) % 256` on the little-endian target, is element
+    `pos + j`; `array_word_unfocus_T` puts back either the same bytes or the
+    bytes of a written word (`word_upd`). All of this is proved from the byte
+    representation (`bytelike`: a one-byte element is its own byte), and it
+    needs `pos + W <= length` and the word type's alignment. `(uintptr_t)p`
+    in a contract is `uintptr_u64 p`, so alignment can be stated and carried
+    by invariants. The predicates with quantifiers or `pow2` in them
+    (`word_bytes_upto`, `bytelike`, `word_byte`) are opaque to SMT and
+    exposed through pattern lemmas: unfolded at a literal byte index, as an
+    `if` chain over the literal powers at a symbolic one. Left transparent,
+    Z3 spent its time instantiating them and branch-and-bounding over `pow2`.
+
+    The aligned over-read of `strlen` -- a word whose first byte is in the
+    array and whose rest may not be -- is undefined in ISO C and cannot be
+    proved: there is no `mem_pts_to` for bytes past the array. It is
+    *assumed*, in `Pulse.Lib.C.Palow.Overread.fsti` (an interface with no
+    implementation), and only for a word read through a pointer declared
+    `_pal_overread` (`TypeT::Overread`, a wrapper transparent everywhere
+    else; `overreads` checks the declared type of the variable the read
+    steps from), where the read is a call to `array_overread_T`: it needs
+    `pos < length` and alignment and gives `word_bytes_upto` -- the bytes
+    inside the array, nothing about the rest. The marker is on the pointer
+    rather than the function so that the trust covers the one read the
+    hardware argument is about: every other read in the function, word or
+    not, still needs `pos + W <= length` (`test/array_word_overread_bad`
+    marks a sibling pointer and reads through an unmarked one).
+
+    Pulse's join of an unannotated `if` loses every fact about a value an
+    arm computed, so a word loop inside `if (n && *s != c)` left nothing
+    for the byte loop after it -- not even `walk_ok`. A pure `_ensures` on an
+    `if`, previously only a check, is now its join (`join_written`): the
+    slots the arms write are bound existentially with `walk_ok` for walked
+    ones, every other slot is pinned with `with v. assert (...)` to the
+    value it has at the `if`, and the clause is stated over them.
+    `test/array_word_access` has a `memchr`-like search (alignment prologue,
+    word loop in an `if`, byte loop), a word copy, `uint32_t` stores and a
+    `strlen` whose word pointer is `_pal_overread`.
+
+57. **Walk follow-ups from musl.** A contract's `s + i` with a computed
+    `size_t i` and elements wider than a byte is `elem_ptr esize s i`
+    (`Pulse.Lib.C.Palow.Array`), a total ghost pointer: `s +! (esize * i)`
+    when that neither overflows `size_t` nor wraps the address space, else
+    `s` itself. Its pattern lemmas make it a walk (`elem_ptr_walk`: `walk_ok`
+    always, address and `walk_idx == i` in range) and make every walked
+    pointer one (`walk_is_elem`), which is the witness for
+    `_exists(size_t i, return == s + i ...)`. `walk_map` follows a call whose
+    callee's `_ensures` names exactly one pointer parameter as
+    `return == p [+ e]` (`returned_arg`), so `z = wmemchr(s, ...)` is a
+    walked pointer of `s`; `*z` focuses `s` at `z` and has to prove it from
+    the callee's postcondition, which nothing here trusts.
+
+    A loop invariant now keeps `Seq.length inv_val_d == Seq.length val_d`
+    for every owned array, when the loop makes no call (a callee's contract
+    might not preserve the length), and `_old(d._length)` /
+    `_old(d)._length` in an invariant are the entry length (`olds`) rather
+    than this iteration's. A cast of position arithmetic to `_specint`, as
+    the elaborator puts on `d - ret + n + 1`, is read mathematically like
+    the position itself.
+
+    musl's `strncmp` walks `const unsigned char *l = (void *)_l` through a
+    `char` array. A read through a walked pointer whose pointee is the
+    element type at the other signedness reads the element and converts it
+    (`walk_sign_view`, `Body.sign_view`); a write is still refused. The
+    elaborator lets a contract subtract or compare pointers to integer
+    types of one width and different signedness (`l - _l`), reading one side
+    at the other's type. Contract casts accept integer type specifiers in
+    any order (`long unsigned int`, `char unsigned`; `int_specifiers` in
+    `hauntedc.rs`). `test/array_walk_followups` has `wmemchr`, `wcsnlen`, a
+    read through a returned pointer, `s + wcslen(s)`, `wmemset`, `wmemcpy`
+    and `strncmp`; `test/array_walk_followups_bad` the refused write and a
+    callee that may return either of two arrays.
+
+    musl's `while (n--)` and `if (!n--)` decrement a zero `size_t`, which
+    PAL's checked arithmetic refuses; the tests test before decrementing.
+    A contract's `size_t` `-` wraps (item 53), so an invariant
+    `l - _old(l) == _old(n) - n` says only that the position is
+    `_old(n) - n` modulo `2^64` and bounds nothing without `n <= _old(n)`
+    beside it; `l - _old(l) + n == _old(n)` implies that on its own.
+
+58. **musl gaps: loop conditions, lent suffixes, spec asserts, aliases.**
+    A loop's condition is part of every iteration, so `frame` sees
+    `body; cond` when it collects what the loop writes: musl's
+    `while ((*d++ = *s++))` moves `d` and `s` in the condition alone, and
+    pinning them as unwritten made the invariant unprovable. The invariant
+    is still asserted where Pulse's `while` checks it, before each test of
+    the condition. `array_focus_at` now also returns its bound as a pure
+    fact, which the condition's read needs after the focus is closed.
+
+    An argument for an `_array` parameter that is a walked pointer, or
+    `base + i` of an unwalked array parameter (`lent_owner`), lends the
+    callee the suffix of the owner's array: `array_lend_at` splits
+    `array_pts_to a xs` at the walked pointer `q` into the prefix at `a`
+    and `Seq.slice xs (walk_idx a q) len` at `q`, which is what the
+    callee's `requires` asks for; `array_return_at` joins the prefix and
+    whatever the callee returned as `Seq.append`. The callee's
+    `forall (k: SizeT.t)` facts are about the suffix; `index_append_sizet`
+    rewrites `Seq.index (Seq.append xs ys) i` (`i >= length xs`) to an
+    index of `ys` at a `SizeT` term, so they instantiate at the caller's
+    `a[pos + k]`. Only one argument per array is lent in a call, and its
+    pointee must be the array's element type (`test/array_walk_lend_bad`).
+
+    `_assert` first tries the body-style translation; when that refuses
+    (memory read under a quantifier, `c._length`), `spec_assertion`
+    translates it like a one-off loop invariant through `frame` with an
+    empty body: the arrays it mentions are bound to their current values
+    with `with ... . assert (...)`, walked pointers by their current
+    value, and the assertion is a `pure` fact against those
+    (`test/assert_quantified_array`, from musl's `wcscspn`).
+
+    `__attribute__((__alias__("old")))` on a function of `old`'s type
+    declared in the same file (`aliasTarget` in `cpp/impl.cpp`) is no
+    longer refused. The alias is declared with the signature and contract
+    of `old`'s contract-carrying declaration; when only the alias has a
+    contract, `old` is also declared with it, marked `adopts_signature` so
+    that `merge` gives `old`'s definition that declaration's parameter
+    types (the `_array` annotations its contract relies on) rather than
+    reporting a type mismatch. Two differing contracts meet in `merge` as
+    differing redeclarations of the alias.
+
+    `size_t` `/` and `%` in a contract that cannot lean on the `_requires`
+    now state their non-zero divisor as a guard (`definedness`), as signed
+    arithmetic does, instead of refusing the function; so does
+    `(uintptr_t)w % sizeof(size_t)`, whose step lemma `uintptr_rem_step`
+    (`Pulse.Lib.C.Palow.Word`) is stated over the `SizeT.rem` it becomes.
+
+    Proof cost: the walk facts are arithmetic on addresses, and musl-sized
+    specifications push some queries past the default `--z3rlimit 40`:
+    `wcscpy` with its "rest of `d` unchanged" clause needs about 80 and
+    `wcsncpy` with it about 120. The tests leave that clause out.
+
+59. **A walked pointer's step, stated once.** Every loop that moves a
+    walked pointer has to re-establish `walk_ok` for it, and for `p++` that
+    was left to `walk_step`, whose premise -- the new address does not wrap
+    -- the solver had to derive from `walk_ok`'s definition, the array's
+    `addr_of a + esize * len < addr_limit` and the bound on the position:
+    a division by the element size and a product of it with the position.
+    That is cheap alone and timed out in a heavy loop body (musl's
+    `wcsncat`) even with the bound asserted next to it. The emitter now
+    states the step where it happens: before `p++`/`++p` and before
+    `p + e` on a walked pointer, `array_walk_next` (`Pulse.Lib.C.Palow.Array`)
+    takes the array's ownership and gives `walk_ok` and the new `walk_idx`
+    for the stepped pointer, proved once in the library (`walk_next`). Its
+    conclusion is conditional on the step staying within the array -- where
+    C defines it -- so the call adds no obligation; what is left for the
+    solver is that linear bound, which the source's `_invariant` states. A
+    step in the array's elements is the pointer's step scaled to them (a
+    `uint64_t *` walking a byte array steps 8); a computed step `p + k` is
+    stated when the pointer's elements are the array's. The call is skipped
+    while the array is split for an access or a call (`pending_close`), and
+    `p--` is left as it was (`-!` has its own precondition)
+    (`test/array_walk_step`).
+
+60. **Contract casts wrap; early exits keep their condition; `void` byte
+    arrays.**
+    - *Contract casts.* A cast from `_specint` to a C integer type in a
+      contract was read as the number itself, so `(size_t)-1` was `-1` and
+      `_assert((size_t)-1 < 1)` verified. Such a cast now reduces the number
+      into the target's range, as C's conversion does: a literal is folded
+      (`int_literal` also wraps a literal of the target type, so
+      `(uint8_t)300` is `44uy`), anything else is
+      `spec_to_unsigned 2^w n`/`spec_to_signed 2^w n`
+      (`Pulse.Lib.C.Palow.Scalar`), which unfold to `n` when it is already in
+      range. A subscript is the exception: the elaborator's conversion of a
+      `_specint` index to `size_t` is a position, and one outside the
+      sequence fails `Seq.index`'s typing rather than wrapping
+      (`index_num`). The conversion from a pointer difference to `ptrdiff_t`
+      stays mathematical, as before (`test/spec_cast_wrap`).
+    - *Early exits.* Pulse joins the two branches of an `if` and forgets its
+      condition, so after `if (c) { return x; }` in a loop body the rest of
+      the body did not know `!c`. When exactly one branch of an `if` always
+      leaves (return/break/continue/goto), the rest of the enclosing block
+      is moved into the other branch (`fold_exits`), in loop bodies and in
+      the blocks of an `if` inside one; the function's top level already did
+      this for `return`. It is not done when the receiving branch declares
+      names the rest could see, when the `if` has an `_ensures`, or when the
+      rest has labels (`test/if_exit_rest`).
+    - *Equality.* `==` on machine integers is `Int32.eq`/`SizeT.eq`/...,
+      like the other comparisons, rather than `=`.
+    - *`void` arrays.* `_array void *p` is an array of `unsigned char`
+      (`array_elem`); a contract's `((unsigned char *)p)[k]` -- a cast of an
+      array to a pointer to its own element type, under a subscript -- is
+      `p[k]`, and a `void *` compared with an array is compared as a
+      pointer (`test/array_void_bytes`).
+61. **A copy of an array's base is the base.** In musl's `wcsncat`,
+    `wchar_t *a = d;` is taken before `d` moves, and the body's `a[k]` was
+    `Seq.index xs (walk_idx 4 var_d tmp + v k)` -- `tmp` the value read from
+    `a`'s slot -- while the `_ensures`' `d[k]` is `Seq.index xs (v k)`. Even
+    once `walk_idx_self` made the offset `0`, `0 + v k` and `v k` are
+    different terms, so a quantified `_assert` equal to the postcondition
+    never E-matched it. Now:
+    - *Base copies* (`base_copies`): a top-level `T *a = d;` (or a
+      declaration followed directly by that assignment), with `d` an
+      `_array` parameter not yet moved, declared or addressed, and `a`
+      declared once, never reassigned and not addressed, is the base for the
+      whole body. Functions with labels or `goto` have none. The frames of
+      loop invariants and quantified asserts state its slot as
+      `ptr_pts_to loc_a 1.0R var_d` rather than binding a `tmp_loop_ptr`, so
+      `a` is `var_d` there; Pulse checks that equation at every frame, so a
+      wrong analysis fails to verify rather than being unsound.
+    - *Positions* (`walk_pos`, `pos_op`): a pointer that is syntactically
+      the base has position `0`, and `0 + n`, `p + 0` and `p - 0` are not
+      written, in contracts and in bodies (`ptr_pos`, `ptr_diff`,
+      `pointee_at_in`, `length_of`, `pos_diff`, `body_ptr_pos`). So `a[k]`
+      is `Seq.index xs (v k)`, `d - a` is `walk_idx 4 var_d inv_d`, and
+      `a._length` is `Seq.length xs`.
+      Its definedness guard is the contract's `v k < Seq.length xs`, without
+      the `0 <=` a walked position needs.
+    - *`_old` in `_assert`.* A quantified `_assert` that the body cannot
+      translate falls back to the frame reading, but one with an `_old` was
+      refused outright; now only an `_old` naming a parameter a local
+      shadows is, so `_old(d[k])` (the entry element) works as in an
+      `_invariant` (`test/array_walk_base`).
+62. **Integer constant expressions are literals.** musl's
+    `#define ONES ((size_t)-1/UCHAR_MAX)` and `HIGHS (ONES * (UCHAR_MAX/2+1))`
+    were emitted operator by operator, and each `Int32` operation's overflow
+    and division typing obligations timed out in strchrnul's heavy word
+    loop. `trRValue` now first asks clang (`isIntegerConstantExpr`,
+    `EvaluateAsInt` with no side effects, no UB and no notes) for the value
+    of an integer, non-`bool`, non-enum expression with at least one operator
+    and emits it as one literal of the expression's type
+    (`0x0101010101010101sz`, `128l`). Leaves that are names (enumerators),
+    `sizeof`/`_Alignof`/`offsetof` are not folded: PAL keeps `sizeof`
+    symbolic at `size_t`, which allocation patterns rely on. An expression
+    with undefined behaviour stays unfolded, so its obligation still fails
+    (`test/int_const_fold`).
+63. **Contracts promote.** Contract expressions are parsed by PAL, not
+    clang, and were typed at the meet of their operands' types: musl
+    memcmp's `return == ((const unsigned char *)vl)[i] -
+    ((const unsigned char *)vr)[i]` became a byte `sub_wrap` converted to
+    `int`, while the code computes the `int` difference. `elab` now applies
+    the integer promotions to `-`/`~` operands and to arithmetic and
+    comparison operands narrower than `int` (an equality or order between
+    two operands of one narrow type is unaffected and left alone). The
+    item-60 cast semantics (`spec_to_unsigned`) are unchanged
+    (`test/spec_int_promotion`).
+64. **A local copying an `_array void *` is the array.** In
+    `const unsigned char *s = m;` with `m` an `_array const void *`, the
+    initialiser is a cast of an array pointer of `uint8_t` to `uint8_t *`;
+    `refine_decl_pointer_kind` now gives the local (and the cast) the array
+    kind, as for a typed copy, so `s[n]` and `s + n` work (musl's
+    `memrchr`).
+65. **Focus at the walked pointer itself.** `*p` on a walked pointer was
+    focused by `array_focus_at ... q 0sz`, whose element is
+    `Seq.index xs (walk_idx e a q + 0)`; `array_focus_here`,
+    `array_unfocus_here` and `array_unfocus_read_here` state the `i == 0`
+    case with `walk_idx e a q`, the term a contract writes.
+65. **`char` arrays as bytes.** An `_array void *` parameter is an array of
+    `uint8_t`, so passing a `char` array (`int8_t`) to it failed with
+    `seq Int8.t <: seq UInt8.t` (musl's `strrchr` calling `__memrchr`).
+    `array_retype` (`Pulse.Lib.C.Palow.Array`) turns an
+    `array_pts_to t_repr ... xs` into an `array_pts_to u_repr ...
+    (seq_map f xs)` whenever every `t_repr x b` is `u_repr (f x) b`;
+    `array_int8_as_uint8` and `array_uint8_as_int8`
+    (`Pulse.Lib.C.Palow.Word`) are its instances for `int8_to_uint8` and
+    its inverse, which keep the byte. `call` brackets the call with the two
+    (the second after the callee's post-state is rejoined), and the
+    callee's sequence is `seq_map int8_to_uint8` of the caller's, so its
+    `((unsigned char *)p)[k]` is the caller's `(unsigned char)s[k]` and a
+    byte it writes comes back as the `char` with that representation. A
+    pointer the callee returns into the array is a walked pointer of the
+    `char` array (`strnlen` calling `memchr`). Wider element types are
+    refused for now (`test/array_char_as_bytes`,
+    `test/array_wide_as_bytes`).
+66. **`_specint` subscripts carry their guard.** Item 60 dropped the offset
+    from `a[k]` on the array's base, and with it the `0 <= walk_idx + k`
+    guard, leaving `Seq.index xs k` with `k: int`, which needs a `nat`; an
+    invariant `_forall(_specint k, d - a <= k && k < a._length ==> ...)`
+    no longer typechecked. A subscript that may be negative (`_specint`,
+    `ptrdiff_t`, a signed type) is guarded by `0 <= k /\ k < Seq.length xs`
+    again (`test/spec_index_guard`).
+67. **Unsigned contract arithmetic is a number.** In musl's `wcsncat` the
+    postcondition `_exists(size_t m, ... _forall(size_t k, ... d[m + k]
+    ...))` timed out. `m + k` was the machine integer `m `add_wrap` k`
+    (`SizeT.add` where `size_t` does not wrap). Z3 picks `SizeT.v k`-style
+    triggers for the unannotated quantifiers, and every instance made
+    another `size_t` term, `add_wrap m k`, whose typing and equation axioms
+    gave another `SizeT.v` to trigger on: tens of thousands of instances
+    per hypothesis. `Spec::num` now reads unsigned `+`, `-`, `*` as the
+    mathematical result reduced modulo the type's range,
+    `spec_to_unsigned m (v a + v b)`, the form item 59 gives casts. A
+    partial operator adds its definedness guard instead and is the plain
+    sum. Either way the term is an integer and creates nothing to trigger
+    on, and the value is unchanged (`test/spec_unsigned_index`).
+    That alone does not make `wcsncat` verify. Its final `_assert`, the
+    `_ensures` verbatim, seemed to verify while the identical postcondition
+    failed, but Pulse discharges `assert (pure p)` obligations after the
+    statements that follow, so the failing return hid it: with the return
+    admitted the `_assert` times out the same way. The goal is an
+    `exists`/`forall` alternation proved from seven others of that shape,
+    each a refinement hypothesis whose `iff` encoding Z3 keeps instantiating
+    on every `size_t` term in scope.
+68. **Joins PAL supplies for an `if`.** Pulse's own join after an `if`
+    whose arm moves a walked pointer (musl `memchr`: a word loop inside
+    the arm) abstracts the pointer's value and keeps no fact about it, so
+    the next loop's invariant failed on the arm that did not move it. An
+    `if` without `_ensures` that writes locals and is directly followed by a
+    loop with pure invariants now takes those invariants as its `_ensures`
+    (the pure join), which is exactly what the loop needs on
+    entry (`loop_entry_joins`, `test/if_loop_join`). And when an arm has a
+    loop and the `if` is followed only by straight-line code ending in
+    `return` (musl `wmemmove`, a copy loop in each arm), Pulse could not
+    eliminate the `match cond with true -> exists* ... | false -> exists*
+    ...` it built for the join; that tail is now copied into both arms, as
+    `rest` already did for arms that return (`copyable_tail`,
+    `test/if_loops_tail`).
+69. **Bitwise operators in contracts.** `&`, `|`, `^`, `~`, `<<`, `>>` on
+    unsigned operands are `FStar.UInt.logand #w` etc. over the operands'
+    numbers (`~x` is `2^w - 1 - x`, as in the body), `w` the operand's
+    width (pointer width for `size_t`), so body
+    facts about machine words relate to them by the machine operations'
+    specifications. A shift's amount is guarded `0 <= s /\ s < w`; an
+    integer cast on the amount is dropped under that guard. A `_specint`
+    on the left of a shift has no width and is rejected
+    (`test/spec_bitwise`).
+70. **Sign-changing views of local aliases.** A local initialised from an
+    `_array` at the other signedness of its byte element
+    (`const char *src = _src;` on an `_array void *`, musl's `swab`;
+    `const unsigned char *l = (const void *)l0;` on a `char` array,
+    musl's `strverscmp`) was refused with "cannot subscript". The
+    elaborator now sees through pointer casts when it records a local as
+    another name for an array (`strip_ptr_casts`), and an element access
+    through such a local (`place_sign_view`) focuses the array at its own
+    element type and converts: a read is `int8_to_uint8`/`uint8_to_int8` of
+    the element, a write stores the converted value, which is the same
+    byte (`int8_to_uint8_value`, `uint8_to_int8_value` in
+    `Pulse.Lib.C.Palow.Word`). The same conversion makes a write through a
+    walked pointer at the other signedness work, which item 56's
+    `test/array_walk_followups_bad` refused; that case moved to
+    `test/sign_view_alias`.
+71. **Contract casts between machine integers.** `(size_t)n` of an
+    `ssize_t` in a contract was the machine conversion
+    `sizet_of_int64 n`, whose typing needs `n` to be a valid `size_t`
+    already, so `n <= 0 || (size_t)n <= len` did not typecheck. A cast
+    between C integer types is now the source's number when the target
+    holds all its values, and `spec_to_unsigned`/`spec_to_signed` of it
+    (item 59) otherwise.
+72. **The offset bound as a fact.** `array_offset_fits_at` also ensures
+    the bound it requires, `walk_ok a q /\ walk_idx a q + i < length`.
+    The `array_focus_at` that follows needs exactly that as a refinement,
+    and in a loop with quantified invariants (musl's `swab`) re-deriving it
+    for the second call timed out where finding it as a hypothesis does
+    not.
+73. **A loop body ending in an exiting `if` releases on the other arm.**
+    With item 61 the rest of a loop body after `if (c) return ...;` is the
+    `if`'s else arm, but the body's cleanup (releasing its locals) still
+    came after the `if`, so Pulse joined the arms first. Its join forgets
+    the falling-through arm's pure facts (`c == false`) when that arm has
+    a nested `if` of its own (musl's `strverscmp`:
+    `if (!c) return 0; if (...) dp = i+1;`), and the invariant then failed.
+    When the body's last statement is an `if` without `_ensures` exactly one
+    of whose arms exits, the cleanup now goes at the end of the other arm,
+    so the `if` is the body's tail and each arm is checked against the
+    invariant without a join (`test/sign_view_alias`).
+74. **Empty `asm` statements.** `__asm__ __volatile__ ("" : : "r"(d) :
+    "memory")` (musl's `explicit_bzero`) executes no instruction; it only
+    keeps the compiler from dropping the stores before it. An `asm`
+    statement with an empty template, no outputs and no `goto` labels is
+    translated as its input expressions, evaluated for their side
+    effects; clobbers are irrelevant to the model. Any other `asm` is still
+    refused (`test/asm_barrier`, `test/asm_reject`).
+75. **A label's `_ensures` is an assertion like `_assert`.** At each
+    `goto` (and at the fall-through into the label) the label's
+    `_ensures` was translated by the plain statement-assertion path, which
+    loads every object it mentions, so `_length`, quantifiers over array
+    contents, `_old(p)[k]` and `_old(p[k])` were refused. It now goes
+    through the same path as `_assert` (`stmt_assertion`), falling back to
+    reading the clause as a contract over the current frame
+    (`test/label_array_ensures`, modelled on musl's `strlcpy`).
+76. **`_length` in contract arithmetic; dropped clauses say where.**
+    `1 <= s._length - k` was dropped as "this expression in a contract"
+    (issue #449): `_length` is a `_specint`, and specification arithmetic
+    translates its operands with `value`, which only knew `_length` under a
+    `(_specint)` cast. `value` now reads `_length` itself, so the
+    difference is the mathematical one (`test/spec_length_sub`,
+    `test/spec_length_sub_bad`). The diagnostic for a dropped contract was
+    reported at the function definition and named only the kind of
+    expression. A clause's error now carries the location of the clause, or
+    of the offending subexpression where one is known, and the expression's
+    text; `weakenings` reads that location back so the error points into the
+    prototype (`test/spec_dropped_at`).
+77. **Local arrays in contracts.** `bs[0]` for a local array
+    `size_t bs[4]` in an `_invariant`, `_assert` or `if`/label `_ensures`
+    was "`*bs` in a contract": the frame bound the array's contents
+    (`inv_bs`) as a local value, but only global arrays were registered as
+    pointees. `frame()` now registers a local array as a pointee bound to
+    that sequence, so `bs[i]` is `Seq.index inv_bs i` under the usual index
+    guard. An array declared without an initializer is held in the
+    `option` view until it is handed off whole, and is entered in `maybes`:
+    reading a cell is `Some?.v` and claims `Some?`, as for an `_out` array
+    being filled (`test/local_array_spec`, `test/local_array_spec_bad`;
+    musl's `strspn`/`strcspn` byte sets).
+78. **An annotated `if` at the end of an annotated block.** An `if` with
+    `_ensures` that ended an arm of another annotated `if`, or a loop
+    body, was in tail position under an expected postcondition, and Pulse
+    refused it as "Multiple annotated postconditions" (musl's `strlcpy`,
+    where the outer `if` precedes the byte loop). Every annotated `if` is
+    now followed by `();`, which takes the tail position and is checked
+    against the outer expectation from the inner `if`'s postcondition
+    (`test/if_ensures_tail`).
+79. **Sign views in invariants.** A subscript of a local viewing a `char`
+    array as `unsigned char` (`l[i]` with `const unsigned char *l =
+    (const void *)l0`) in an `_invariant` or `_assert` was `Seq.index` of
+    the `char` sequence used at `UInt8`, which does not typecheck (musl's
+    `strverscmp`). The contract read now converts the cell to the view's
+    type, the conversion the body's read makes (`test/sign_view_spec`,
+    `test/sign_view_spec_bad`).
+80. **Current contents of a walked parameter, from its entry position.**
+    No new mechanism: a `_specint` subscript of a walked pointer is
+    already read at `pos + k` with `0 <= pos + k` as its well-formedness,
+    so `d[k - (d - _old(d))]` is the current element `k` of the array
+    `d` was walked through, and musl's `__stpcpy` byte loop states what it
+    has copied with it (`test/array_walk_relative`).
+81. **Fresh heap arrays as return values.** `_allocated _nullable _array
+    T *` on a return was rejected; the contract now returns
+    `unless_null ret (exists* val_return n_return. array_pts_to ...
+    val_return ** freeable ret n_return ** pure (n_return == esize *
+    len val_return))`, with `return[k]` / `return._length` read off
+    `val_return` under the guard. In the body a `char`-sized `malloc(n)`
+    is an `n`-element array block (as `malloc(n * sizeof(T))` already
+    was), and `memcpy(d, s, n)` into such an unfilled block is the byte
+    copy `array_copy_maybe` (machine `memcpy` between the `option` view of
+    `d` and the source's representation), whose value is `d` itself,
+    unbound, so `return memcpy(d, ...)` hands back the block. At the
+    return `array_somes` moves the block to the plain view, which needs
+    every cell written (musl's `strdup`/`strndup`; `test/alloc_array_return`,
+    `test/alloc_array_return_bad`). Callers cannot take over a returned
+    array yet; `wmemcpy` into a block (`wcsdup`) is item 83.
+82. **`_cursor` out-parameters.** `strsep(char **str, ...)` reads a
+    position `*str` into a terminated array, splits a token off it and
+    stores back a pointer into the same array, or null. `_cursor T **p`
+    makes the pointee `_nullable _array T *`, and the contract owns the
+    array under a virtual parameter `p__arr`: `ptr_pts_to var_p 1.0R
+    var_p__arr ** unless_null var_p__arr (array_pts_to ... var_p__arr
+    1.0R val_p__arr)` on entry, the same at the entry base with fresh
+    `var_p__arr'`/`val_p__arr'` on exit. Contract `*p` is `var_p__arr`
+    (`var_p__arr'` in an `_ensures`), `(*p)[k]` reads `val_p__arr`,
+    `_old(*p)[k]` reads `val_p__arr'`, and `*p - _old(*p)` is
+    `walk_idx esize var_p__arr var_p__arr'`. In the body `p__arr` is an
+    array parameter whose base is the erased `var_p__arr`: a local read
+    from `*p` walks it, and its null test asserts it equals `var_p__arr`
+    and opens the guard (`elim_unless_null` plus `array_fits` and
+    `array_walk_base`) in the live arm. Storing a walked pointer or null
+    back into `*p` is a plain pointer store. Two fixes came with it: a
+    `_nullable _array` parameter's contents may be named in a contract,
+    each such clause read under `not (is_null var_a)`; and reading a local
+    that only aliases an array parameter (`char *s = a; return s;`) emitted
+    the unbound `var_s` instead of `var_a`. An `if` whose arm writes an
+    element through a walked pointer (`if (*end) *end++ = 0; else end =
+    0;`) now has its copyable tail copied into both arms, as an `if` with a
+    loop already did: Pulse types the arm's `Seq.upd` at the join, outside
+    the facts that bound the position. Callers of `_cursor` functions are
+    refused for now (musl's `strsep`; `test/cursor_strsep`,
+    `test/cursor_strsep_bad`, `test/cursor_diag`). `strtok_r` is not
+    covered: its token pointer comes from either `s` or `*p`, i.e. two
+    different arrays, depending on the path.
+83. **`wmemcpy` into a fresh heap array.** `wcsdup` copies with
+    `wmemcpy(d, s, l + 1)` into `malloc((l + 1) * sizeof(wchar_t))`. Like
+    `memcpy` (item 81) it is a reserved name with a fixed meaning, the
+    copy of `n` wide chars, so it goes to `array_copy_maybe` with the
+    element size and `n * esize` bytes instead of through a contract that
+    wants an initialised destination. Source and destination must have
+    the same element type (musl's `wcsdup`; `test/alloc_wide_return`,
+    `test/alloc_wide_return_bad`).
+84. **Existential witnesses.** A callee's existential precondition (musl's
+    `strncasecmp` wants some `i < n` where the strings end or differ) is
+    proved by Z3 only if it can guess the instance, and a witness that is
+    a computed term (`t - (h - _old(h))`, `n - 1`) it rarely guesses in a
+    heavy context. `_exists(T i = w, p)` is parser sugar for `_exists(T i,
+    i == w && p)`, and the emitter turns any existential with a top-level
+    conjunct `i == w` (`w` free of `i`, and the comparison reading `i` as
+    its plain number, checked by translating both and comparing) into
+    `let i_wit : int = w in range /\ (let i : T = conv i_wit in p)`:
+    `0 <= w /\ SizeT.fits w` with `SizeT.uint_to_t` for `size_t`,
+    `pow2` bounds with `uint_to_t`/`int_to_t` for fixed-width integers,
+    nothing for `_specint` (`0 <= w` for `_nat`). Contract equality
+    compares numbers, so this is the same proposition as the `exists`,
+    in hypotheses as well as goals; other types keep the `exists`. Both
+    the contract translator and the body assertion translator do this
+    (`test/exists_witness`, `test/exists_witness_bad`).
+85. **Invariant re-establishment per conjunct (`--split-invariants`).**
+    musl's long loop invariants (`strlcpy`'s word loop, `strncat`) make
+    one large query of the invariant check at the end of the body, which
+    times out or is flaky, and a failure does not say which clause broke;
+    this F* has no `--split_queries`. With the flag, where the body falls
+    through to its closing brace (no `_requires` on the loop, the body not
+    always leaving), every conjunct of the invariant -- each `_invariant`
+    clause split at top-level `&&`, under the `_Bool` conversion a clause
+    carries -- is first emitted as its own body assertion
+    (`stmt_assertion`, against the loop head's scope and slots, so a body
+    local cannot capture a name), in order, so later conjuncts have the
+    earlier ones as hypotheses (`s[i - 1]` after `0 < i`). Ownership
+    clauses are skipped; the first conjunct that cannot be written as an
+    assertion ends the list. Pulse's own check of the invariant follows.
+    Measured on musl: `strlcpy` goes from 27 to 53 assertions and reports
+    its one failing clause (`ws - s + n + 1 == _old(n)`) where the whole
+    check reported an earlier alignment clause; `strncat` (24 to 33)
+    reports the quantified clause that fails. It is not on by default: a
+    quantified clause asserted alone can time out where the whole check
+    passes (`test/exists_witness`'s `scan`). Two body-assertion gaps it exposed
+    are fixed for every `_assert`: `p <= q` on pointers into one array
+    compares positions (it was an ill-typed `ptr` comparison), and
+    `(char *)wd - d0` for a view `wd` walked over a `char` array is a
+    position difference; a pointer difference whose positions are unknown
+    is now an error instead of an ill-typed subtraction
+    (`test/invariant_clauses`, `test/invariant_clauses_bad`). A body
+    assertion's `w + n` steps `n` of `w`'s own elements, as a contract's
+    does, and `p - q` between pointers whose element type is not their
+    array's (`wd - w0` for words over bytes) is refused in both: a
+    position counts the array's elements, so it would have been a byte
+    count where C means words (`test/ptr_word_step`,
+    `test/ptr_word_step_bad`, `test/ptr_word_diff_diag`).
+86. **`add_add` has no SMT pattern.** `(a +! m) +! n == a +! SZ.add m n`
+    was keyed on `(a +! m) +! n`, which E-matching finds across every
+    pointer equality in a query: a walked pointer and the base it is
+    lent at (`array_lend_at`/`array_return_at`), `tmp +! 1sz` chains of
+    a loop. On musl's `wcscat` (logged query, Z3 5.3.0) it was
+    instantiated 9-18k times, each instance a new equation and a new
+    `SZ.fits (v m + v n)` term, on which `FStar.SizeT.fits_lte` (a
+    two-pattern `SMTPat` on `fits x; fits y`) fires pairwise: 6.3M
+    instances in 70 s, and the goal did not finish in 300 s; without
+    the axiom all nine goals were unsat in 1.3 s. Z3's rlimit barely
+    counts this work (90 s was about 6 F* rlimit units), so
+    `--z3rlimit` did not bound it either. The lemma is now an ordinary
+    one: `Pun.mem_carve`/`mem_uncarve`, `Aggregate` and the two pool
+    tests' `rewrite each` call it. No generated proof relied on it.
+    The other pointer patterns were checked for the same shape: those
+    on `addr_of (a +! n)`, `prov_of (a +! n)`, `a +! 0sz`,
+    `(a +! n) -? n` and `(a -? n) +! n` produce no new `+!` term, and
+    `walk_is_add`/`walk_is_elem` produce one `a +! d` / `elem_ptr`
+    term per `walk_ok` fact. The `elem_ptr` one is again a `walk_ok`
+    (`elem_ptr_walk`), but it is equal to the pointer it came from as
+    soon as its offset fits, which closes the cycle by congruence; the
+    profile of `wcscat` named only `add_add` and `fits_lte`. Measured
+    with the musl verify flow on a loaded machine (before -> after):
+    `wcscat` 3745 s, failing -> 282 s, verified; `strcat` 197 s ->
+    195 s; `strlcpy` (2447 s -> 2512 s) and `strncat` (3017 s ->
+    2462 s) fail the same way in both (proof gaps in the current
+    annotations, unrelated). `strspn` failed after 2852 s before, with
+    two goals of its 135th query running out of rlimit; afterwards those
+    goals succeed (18 s and 54 s) and checking goes on to the later
+    queries, which take long enough that the run did not finish within
+    the measurement bound.
+87. **Wall-clock bound per Z3 query.** `test/verify.mk` takes an
+    optional `Z3_TIMEOUT_MS` (`make Z3_TIMEOUT_MS=300000 ...`) and passes
+    it to Z3 as `--z3cliopt timeout=<ms>`. Item 86 showed that Z3's
+    rlimit does not bound wall time: a matching loop ran for hours on a
+    few F* rlimit units, and a test (Fermat's n = 3 with
+    `--z3rlimit 1000000`) used about 11 units in 5 s. With the option, Z3
+    cancels such a query, and F* reports an ordinary Error 19 ("The SMT
+    query timed out", query stats `unknown because canceled`) and goes on
+    with the rest of the module. The bound applies to each check-sat, so
+    fuel/ifuel retries multiply it, and a bound so small that Z3 cancels
+    its own setup surfaces as Error 276 ("Unexpected output from Z3"),
+    which is also a failure. Since wall time depends on load, the option
+    is a safety net against runaway queries, not a proof budget; it is
+    unset by default, and test results don't depend on it.
+88. **A flexible struct as a union member, and wide struct views.** A struct
+    ending in a flexible array member was not a union member: it has no
+    size, and an arm needs one. In a union, the tail takes the room the
+    union leaves it -- `(sizeof(union) - offsetof(tail)) / sizeof(elem)`
+    whole elements -- so the arm is given a synthetic struct `S__fill<k>`
+    with a `k`-element array in place of the tail. Reads, writes and
+    contracts through the arm see a fixed-length array, and a subscript
+    past `k` fails its bound (`union_flex_fill`, `union_flex_fill_oob_bad`).
+    Separately, `_reveal`/`_conceal` of a struct with many nested struct or
+    union fields had the solver unfold every nested `_repr`. Those proofs
+    need only congruence, so each is checked under `--using_facts_from`
+    that hides the nested `_repr` definitions; a zero-size field's is left
+    visible, since its proof is the definition.
+89. **`_cursor_from(s)`: a cursor seeded by an array parameter.** musl's
+    `strtok_r(char *s, const char *sep, char **p)` tokenises `s` when it
+    is not null and resumes from `*p` otherwise; on the first call `*p` is
+    uninitialised. `_nullable _array char *s, ..., _cursor_from(s) char
+    **p` says so: the cursor starts at `s` if `s` is not null and at the
+    incoming `*p` if it is, and only then is `*p` read. The slot's entry
+    ownership is `null_or var_s (ptr_pts_to var_p 1.0R var_p__arr)
+    (ptr_pts_to_uninit var_p)` (`Pulse.Lib.C.Palow.Nullable.null_or`:
+    the first resource when `var_s` is null, the second otherwise), and
+    the cursor's array `p__arr` is owned at `var_s` when it is not null,
+    at the incoming `*p` otherwise; `s` owns nothing of its own. On exit
+    the slot is an ordinary `_cursor`'s. In the contract `_old(*p)` and
+    `(*p)` (in a `_requires`) name that effective start, so the clauses are
+    `_cursor` clauses: `_old((*p)[k])` the entry contents, `_old(*p)[k]`
+    the exit contents, `*p - _old(*p)` where the cursor ended up. The body
+    is musl's unchanged: the test `!s && !(s = *p)` is split so that the
+    seed test is an `if` of its own (`split_seed_and`), whose arms settle
+    the slot (`elim_null_or_null` / `elim_null_or`), the seed becomes the
+    array's base where it is not null, and `s = *p` walks it where it is.
+    `**p` and `*(*p)++ = 0` are hoisted into a fresh local read out of the
+    slot (`hoist_cursor_derefs`), so they are walks of the cursor's array;
+    `(*p)++` itself is a walk. Calls of read-only callees on a cursor
+    position (`strspn(s, sep)`) lend the array as for an `_array`
+    parameter, and a lend to a `const` parameter now hands the array back
+    whole at its old value (`array_lend_whole_at` /
+    `array_return_whole_at`) instead of as an append of the lent slices,
+    which the token clauses could not see through (`lent_index_back`,
+    `append_lent_slices` in Palow.Array). Writable lends keep
+    `array_lend_at` without `lent_index_back`, whose extra facts slowed
+    `wcscat`'s postcondition (`test/array_walk_lend`) past its limit.
+    Three contract changes came with it:
+    - `return - X`, where `X` is a position in an array (`_old(*p)`), is
+      the returned pointer's position in that array (`ret_pos`), so a
+      token's start can be named: `_exists(size_t l0 = return -
+      _old(*p), ...)`. Z3 does not find a `SizeT` witness that no term
+      names, such as `l0 + l`.
+    - Guards (the well-formedness conditions of a subscript or a
+      division) that `&&`, `||` or `==>` copy up from the right operand
+      are marked as implied, and only a `forall`'s premise repeats them;
+      conjunctions, `exists` and whole clauses use the unmarked ones.
+      Along a chain of `&&` this kept the clause linear, not quadratic,
+      in its length. The marking is undone where it would be unsound: under
+      `!`, in the left operand of `||` or `==>`, and on both sides of a
+      `_Bool` `==` (`<==>`), where a guard the right operand implied is no
+      longer implied (`test/contract_guard_negation`,
+      `test/contract_guard_iff_bad`), and loop invariants keep only the
+      guards they need, never the marker.
+    - A test case may carry an `fstar_opts` file whose contents the test
+      Makefile appends to the F\* command line (`cursor_strtok` needs
+      `--z3rlimit_factor 5`, as musl's `strtok_r` does).
+    `test/cursor_strtok` states `strtok_r`'s full behaviour (leading
+    separators skipped, token up to a separator or the terminator, the
+    separator overwritten, `*p` past it or null, null when only
+    separators remain) and verifies in about 7.5 min;
+    `test/cursor_strtok_bad` reads `*p` when `s` is not null and fails
+    (`ptr_pts_to var_p` is not held).
+90. **`_base(d)[k]`: a walked parameter's current contents from its entry
+    position.** musl's `__stpcpy` walks `d` itself, so item 80's
+    `d[(_specint)k - (d - _old(d))]` was the only way to name the current
+    element `k` of the array from where `d` started. `_base(d)[k]` is
+    sugar for exactly that, expanded by the parser, for any expression
+    that is a walked array parameter `d`; it is the current contents, not
+    `_old(d)[k]` (the entry contents). Either spelling is emitted as
+    `Seq.index val_d k`, the array's element `k` with `k` as the index
+    term, not `walk_idx .. + (k - walk_idx ..)`: the same term as a base
+    local's `a[k]` and as the contract's `d[k]`, so the quantifiers over
+    `k` trigger alike and the solver has no arithmetic to undo (musl's
+    `__stpcpy` loops timed out on the long form). `test/array_walk_base_sugar` is
+    stpcpy's byte loop `for (; (*d = *s); s++, d++); return d;` with its
+    full contract; `test/array_walk_base_sugar_bad` is off by one.
+91. **`p += k` over wide elements by a variable count.** A walk step
+    `s += wcsspn(s, sep)` on a `wchar_t *` emitted `array_walk_next ... k
+    (4sz `SizeT.mul` k)`, whose conclusion is conditional on
+    `SizeT.v n == 4 * k`; in `wcstok`'s larger context Z3 did not recover
+    that product for `SizeT.mul`, and the token's position in the array was
+    lost. A step by a variable count over elements wider than a byte now
+    emits `array_walk_next_mul ... q k`, whose conclusion states, from the
+    array's ownership, that `esize * k` fits and the stepped pointer
+    `q +! SizeT.mul esize k` is at index `idx + k` (when that is within
+    the array), so the product is never left to the solver. Constant and
+    byte steps are unchanged. With it musl's `wcstok` (item 89's
+    `strtok_r` over `wchar_t`) keeps the token's position, and every
+    obligation but one return's postcondition verifies; that one times
+    out even at `--z3rlimit_factor 20`, although each of its clauses,
+    asserted separately just before it, verifies: the postcondition
+    (an `exists` over five clauses, with `wcscspn`'s `exists m`) is too
+    large a query, not a missing fact.
+92. **Aliases through loaded pointers.** An alias `q = &h->s->seq` was
+    re-evaluated at each use, but `stable_names` only kept the *names* in the
+    place fixed, not the pointers it loads through them. After a call that
+    stored another pointer into `h->s`, `*q = 5` was emitted as a store to the
+    new `h->s->seq` while C stores to the old one, so an `_assert` about
+    `h->s->seq` verified that the program falsifies. Each pointer an alias's
+    place loads (and each index that reads memory) is now bound to a
+    `__pal_snap_<n>` local when the alias is set, and every statement that
+    uses the alias asserts the load still equals it. `*q = f(h)` is split so
+    the check follows the call; other statements that call a function and use
+    such an alias, and loop conditions that use one, are refused. An
+    `_assert` and the `$(...)` of a `_ghost_stmt` read the place too, so they
+    are checked the same way (`alias_loaded_pointer`,
+    `alias_loaded_pointer_bad`, `alias_loaded_pointer_call_bad`,
+    `alias_loaded_pointer_assert_bad`).
+
+93. **Aliases bound by a getter.** `q = get(o); q->a = 1;` was refused ("a
+    dereference of local `q`, whose target the contract does not grant")
+    even when `get` says `_ensures(return == &o->in)`, while `q = &o->in`
+    went through. `alias_map` now reads such a contract (`returned_place`)
+    and makes `q` an alias of `o->in`; the emitter makes the call and asserts
+    `result == &o->in`, snapshots of loads in the place are taken after the
+    call, and `q = NULL; ... q = get(o)` drops the dead init as for `&`. The
+    binding is no longer mistaken for a store through `q` by
+    `split_alias_stores`. The call's arguments are read before it, so an
+    alias with snapshots among them is checked as at any other use
+    (`alias_call_result`, `alias_call_result_bad`,
+    `alias_getter_arg_stale_bad`).
+94. **Literals stored into a struct that holds an overlay union.**
+    `p->in = (struct s){0}` failed in F* ("Identifier not found:
+    struct_s_write"): such a struct has no whole-value writer, but the
+    emitter called one. The store is now split into a store per field, with
+    omitted fields zeroed and an overlay union's part stored to its
+    initialized arm (an omitted union's first member), field by field when
+    the arm is a struct. C leaves the union's other bytes unspecified, so a
+    store to the arm alone, which keeps them, is the C store only when the
+    arm covers every byte of the union with no padding; any other such
+    literal is refused (`overlay_struct_literal`,
+    `overlay_struct_literal_stale_bad`).
+95. **`_assert(p != NULL)` on an owned parameter.** It failed even though the
+    contract grants `p`'s pointee: Pulse does not derive non-nullness from a
+    points-to by itself. Before an assertion, each `p != NULL` conjunct over a
+    parameter whose pointee is granted whole now calls the type's
+    `_pts_to_not_null` lemma, and an overlay union has one
+    (`union_U_pts_to_not_null`) (`assert_param_not_null`).
+96. **Contracts through an `_owning` member.** A contract that read through an
+    owned pointer of an overlay union's `_owning` member, as in
+    `_requires(r->params.ctx->count >= 1)`, was weakened ("whose ownership
+    the contract does not state"), because contract paths looked only for a
+    struct's ownership. The union's ownership is that member's struct's, so
+    such a path now reads it there (`overlay_union_own`).
+97. **Overlay unions of one integer type.** Reading one member of such a union
+    needed that member's bytes to be readable, which callers had no way to know and had to be
+    told through a `_requires` on every function on the way. The union is now
+    the integer (see "Unions of one integer type") (`union_same_type`). A
+    member with a refinement keeps the union an overlay, since one type
+    would lose the refinement or impose it on the other members.
+98. **Getters that may return `NULL`.** `q = get(o)` with `get` declared
+    `_ensures(return == NULL || return == &o->in)` left `q` a pointer object,
+    so `q->a` needed ownership at whatever `q` held, which the caller only had
+    as part of `o`. `returned_place_k` now accepts that form too; `q` becomes
+    an alias that is also stored (`nullable_aliases`), its value is read from
+    its slot, the binding asserts `q == null \/ q == &o->in`, and
+    `guard_nullable_aliases` puts `_assert(q != NULL)` before each statement
+    that uses `q` other than to test it, an `_assert` or a `_ghost_stmt`
+    included (`alias_call_maybe_null`, `alias_call_maybe_null_bad`,
+    `alias_call_maybe_null_eq_bad`, `alias_nullable_assert_bad`).
+99. **Lending a field reached through an owned pointer.** `f(&p->ctx->a.b)`
+    was not lent at all: the address was computed and the call made with
+    nothing for the callee's precondition. It is now opened like a read and
+    closed after the call (`own_deep_lend`, `own_deep_lend_bad`). The checks
+    that a stored alias still names the same place open ownership too; they
+    now close it before the statement runs, since a call in the statement
+    opens what its arguments need without seeing anything opened outside it,
+    and the two would scatter the same ownership twice.
+100. **What an owned pointer reaches is not null.** Scattering an object's
+    ownership hands out a points-to for each object its owned pointers reach,
+    and a points-to rules out null, but nothing said so: a getter returning
+    `&o->ctx->in` could not promise `return != NULL`. The scatter is now
+    followed by each such target's `_pts_to_not_null`
+    (`owned_targets_not_null`), and the struct lemma, which needed a field at
+    offset zero with a lemma of its own, may use any single-object field:
+    the field and the struct share a provenance, and null has none
+    (`null_addr`) (`own_target_not_null`, `own_target_not_null_bad`). The
+    snapshot-check case of 99 is covered by `own_deep_lend`'s `read_asserted`.
+101. **Owned pointers across a loop or an `if` with `_ensures`.** The frame
+    of a loop invariant, or of a conditional's `_ensures`, held a parameter's
+    points-to but not the ownership of what its pointers reach, so a body
+    that used it was not translated. The frame now carries that ownership too:
+    at the entry value for a parameter the body cannot change, and otherwise
+    at a fresh value that is bound along with the parameter's, so a clause
+    such as `r->c->has` reaches through the pointer and `_old` refers to the
+    entry state. As with the points-to, what the clause does not restate is
+    forgotten (`own_frame`, `own_frame_bad`).
+102. **A flexible-array union arm lent as its struct.** A union arm whose
+    type ends in a flexible array, padded out by a wider arm, is modeled at a
+    fixed tail length (`S__fill<k>`), while a callee takes the flexible struct
+    `S`. Passing `&u->arm` now converts the arm to `S` for the call and back
+    afterwards (`S__fill<k>_to_flex`, `_of_flex`, emitted with the fill copy
+    when it has no trailing padding, bitfields or invariant). Since the arm
+    must come back at the same length, every function that takes a flexible
+    struct now ensures its tail length is unchanged: a C object keeps its
+    size. A callee that may store through the arm reopens the enclosing
+    struct for writing, so its value is rebuilt from the arm's new value
+    rather than assumed unchanged. This also works through an owned pointer,
+    and for a pointer that stands for the arm -- `b = &r->c->bm`, or one a
+    getter returns with `_ensures(return == &r->c->bm)` -- which is now lent
+    the way `&r->c->bm` is (`union_flex_lend`, `union_flex_lend_bad`).
+103. **Copying a struct whose tag names its union's live member.** Reading a
+    whole struct read each union through its first member, so a copy needed
+    that member to be live whatever the tag said. When the struct's
+    `_refine` ties a union field to a tag field that precedes it -- clauses
+    of the form `this.k != K || this.u.m._active` (or `k == K ==> ...`) for
+    each case, and `this.k == K || ...` (or `k != K ==> ...`) for the member
+    every other tag uses -- the reader now reads the tag first and then the
+    member it names, and requires only what the `_refine` says. `K` may be
+    an integer literal or an enumerator. Without a clause for the remaining
+    tags, they use the first member, which must then be live
+    (`union_tag_copy`, `union_tag_copy_bad`).
+104. **A result satisfies its type's refinements.** A function whose return
+    type carries a pure `_refine` -- a refined scalar typedef, or a struct
+    returned by value with a `_refine` on its declaration or on its fields --
+    promised nothing about the result, so a caller could not use the
+    refinement and the body never had to establish it. The refinements are
+    now stated in the `ensures`, with `this` bound to the result: the body
+    proves them at its `return`s and the caller is given them. A clause that
+    has no translation at the result is left out rather than costing the
+    function its contract (`return_refine`, `return_refine_bad`,
+    `union_tag_return_bad`; `union_tag_copy` now also reads through a
+    returned copy).
+105. **What a struct owns satisfies its type's refinements.** A `_refine` on a
+    struct, or on a struct embedded in it, was stated for a parameter's
+    pointee but not for an object reached through an owned pointer, so
+    `r->c->lead` could not be read through the member its tag names. A struct
+    with such refinements now has `struct_X__deep_refine` -- its own
+    `_refine` and the deep refinement of each embedded struct -- and the
+    value an owned pointer to it holds in the `_own` spec is refined by it,
+    as an owned `_array`'s extent already is by the field's `_refine`. A
+    reader gets it with the ownership; a write has to keep it, and is
+    checked when the ownership is gathered back (`own_target_refine`,
+    `own_target_refine_bad`).
+106. **A refinement that is just `u.m._active` is kept.** Splitting a
+    `_refine` into its conjuncts peeled value attributes off each clause, so
+    a clause that was nothing but `this.u.m._active` became `this.u` -- a
+    union, not a proposition -- and the struct's whole `_refine` was dropped
+    without a diagnostic, from contracts and from `struct_X__refine` alike.
+    The attribute now stays on the clause, which says which member is live
+    (`anon_union_refine`, `anon_union_refine_bad`).

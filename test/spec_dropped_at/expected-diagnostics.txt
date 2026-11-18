@@ -1,0 +1,2 @@
+# Expected translation diagnostic substrings
+spec_dropped_at.c:8: its contract is weakened: a function call in a contract: `g(x)`

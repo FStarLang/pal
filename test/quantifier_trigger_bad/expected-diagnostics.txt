@@ -1,0 +1,4 @@
+# Expected translation diagnostic substrings
+quantifier_trigger_bad.c:8: a `_trigger` that does not mention the bound variable `k`
+quantifier_trigger_bad.c:12: a `_trigger` that is just the bound variable `k`
+quantifier_trigger_bad.c:16: a `_trigger` that is a proposition, not a term

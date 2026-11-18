@@ -1,0 +1,4 @@
+# Expected translation diagnostic substrings
+the address of block-scope static const 'table' is taken
+the address of block-scope static const 'answer' is taken
+block-scope static storage is not supported

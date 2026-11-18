@@ -7,7 +7,7 @@
 # PAL
 
 
-### Proof Annotated Language for C
+### Proof Annotation Language for C
 
 [![CI](https://github.com/FStarLang/pal/actions/workflows/ci.yml/badge.svg)](https://github.com/FStarLang/pal/actions/workflows/ci.yml)
 [![Rust 2024](https://img.shields.io/badge/Rust-2024_edition-DEA584.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -62,7 +62,7 @@ it passes, the implementation satisfies the spec. More availabe at [`examples/`]
 | LLVM dev headers | 20.x | `llvm-config`, `libclang-cpp20-dev`, `libclang-20-dev` |
 | g++ | recent | builds the C++ FFI ([`cpp/impl.cpp`](cpp/impl.cpp)) |
 | Rust | 2024 edition | compiles the PAL binary |
-| F\*/Pulse | nightly 2026-11-07 | verifies generated `.fst` output |
+| F\*/Pulse | nightly 2026-11-17 | verifies generated `.fst` output |
 
 ### Setup (Ubuntu / Debian)
 
@@ -191,11 +191,9 @@ else the bundled `fstar/bin/fstar.exe`, else `fstar.exe` on `PATH`. With
 that F\* binary distribution (`fstar.exe`, its checked standard and Pulse
 libraries, and F\*'s default z3; `--fstar-z3 VER,...|all` for others), and
 ships `pulse/_cache` checked by it. On macOS, the dylibs that `fstar.exe`
-links (Homebrew's gmp and zstd) are copied next to it. The pinned F\*
-nightly is only built for x86\_64 macOS; an arm64 package could bundle that
-build to run under Rosetta 2 (`FSTAR_LIB_PATH` tells `package.sh` where to
-find x86\_64 dylibs), but the workflow does not build arm64 packages from
-it, since Homebrew no longer ships x86\_64 bottles of gmp.
+links (Homebrew's gmp and zstd) are copied next to it (`FSTAR_LIB_PATH`
+tells `package.sh` where to find them if they are not where `fstar.exe`
+expects them).
 
 Instead of an F\* binary distribution, `--fstar-ref REF [--fstar-repo URL]`
 bundles an F\* built from the sources at a branch, tag or full commit SHA
@@ -221,16 +219,15 @@ of sources. A shipped `pulse/_cache` is only usable
 with the exact F\* that checked it (see `BUILDINFO`); otherwise re-check it
 with `rm -rf pulse/_cache && make -C pulse FSTAR_EXE=fstar.exe`.
 [`.github/workflows/package.yml`](.github/workflows/package.yml) builds the
-packages, with F\* and z3, on Ubuntu 22.04, macOS 15 (x86\_64) and
+packages, with F\* and z3, on Ubuntu 22.04, macOS (15 arm64, 26 x86\_64) and
 Windows, then translates and verifies tests with them on clean machines
 without LLVM or F\* (on Windows, both with MSYS2's MinGW headers and with
 MSVC's), and uploads them as workflow artifacts (run it manually
 from the Actions tab). Its `fstar_ref` input (and `fstar_repo`) builds F\*
 from source at that ref instead of using the pinned nightly: a Linux job
 makes an F\* source package from it (or downloads the one at
-`fstar_src_url`), from which each platform builds F\*, Windows in a
-separate Cygwin job (all cached). (It could then also build and test arm64
-macOS packages, but these are disabled for now.)
+`fstar_src_url`), from which each platform builds F\* (natively on arm64 and
+x86\_64 macOS), Windows in a separate Cygwin job (all cached).
 
 ### Translate a file
 

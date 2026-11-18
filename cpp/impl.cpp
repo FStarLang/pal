@@ -15,6 +15,7 @@
 #endif
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <unordered_set>
 #include <vector>
@@ -84,6 +85,56 @@ static bool hasTopLevelBreak(const Stmt *s) {
     return false;
   for (const Stmt *child : s->children())
     if (hasTopLevelBreak(child))
+      return true;
+  return false;
+}
+
+// The variable an lvalue such as `v`, `v.f` or `v[i].f` designates part of.
+static const VarDecl *lvalueRoot(const Expr *e) {
+  while (e) {
+    e = e->IgnoreParens();
+    if (auto *dre = dyn_cast<DeclRefExpr>(e))
+      return dyn_cast<VarDecl>(dre->getDecl());
+    if (auto *me = dyn_cast<MemberExpr>(e)) {
+      if (me->isArrow())
+        return nullptr;
+      e = me->getBase();
+    } else if (auto *ase = dyn_cast<ArraySubscriptExpr>(e)) {
+      auto *base = dyn_cast<ImplicitCastExpr>(ase->getBase()->IgnoreParens());
+      if (!base || base->getCastKind() != CK_ArrayToPointerDecay)
+        return nullptr;
+      e = base->getSubExpr();
+    } else {
+      return nullptr;
+    }
+  }
+  return nullptr;
+}
+
+// Whether `s` takes the address of (part of) `vd`, either with `&` or by
+// letting an array decay to a pointer anywhere but as the base of a subscript.
+// The operand of `sizeof` or `_Alignof` is not evaluated (a `static const`
+// cannot be a VLA), so nothing in it takes an address: `sizeof(*(a))` in the
+// common `ARRAY_SIZE(a)` macro is fine.
+static bool takesAddressOf(const VarDecl *vd, const Stmt *s) {
+  if (!s || isa<UnaryExprOrTypeTraitExpr>(s))
+    return false;
+  if (auto *uo = dyn_cast<UnaryOperator>(s)) {
+    if (uo->getOpcode() == UO_AddrOf && lvalueRoot(uo->getSubExpr()) == vd)
+      return true;
+  } else if (auto *ice = dyn_cast<ImplicitCastExpr>(s)) {
+    if (ice->getCastKind() == CK_ArrayToPointerDecay &&
+        lvalueRoot(ice->getSubExpr()) == vd)
+      return true;
+  } else if (auto *ase = dyn_cast<ArraySubscriptExpr>(s)) {
+    const Expr *base = ase->getBase()->IgnoreParens();
+    if (auto *ice = dyn_cast<ImplicitCastExpr>(base))
+      if (ice->getCastKind() == CK_ArrayToPointerDecay)
+        base = ice->getSubExpr();
+    return takesAddressOf(vd, base) || takesAddressOf(vd, ase->getIdx());
+  }
+  for (const Stmt *child : s->children())
+    if (takesAddressOf(vd, child))
       return true;
   return false;
 }
@@ -224,6 +275,8 @@ public:
   SnipMap &snippets;
   SourceManager &sm;
   ASTContext *astCtx = nullptr;
+  // Whether the body being translated is a system header's.
+  bool inSystemBody = false;
   std::unordered_set<RecordDecl *>
       alreadyDefined; // guard against recursive structures
   std::unordered_map<RecordDecl *, std::string>
@@ -352,13 +405,61 @@ public:
            d->hasAttr<IFuncAttr>() || d->hasAttr<WeakRefAttr>();
   }
 
+  static bool hasAnnotation(const Decl *decl, llvm::StringRef name) {
+    for (auto *attr : decl->specific_attrs<AnnotateAttr>())
+      if (attr->getAnnotation() == name && attr->args_size() == 0)
+        return true;
+    return false;
+  }
+
+  // Whether `d` names an entity `_pal_ignore` leaves untranslated: a record
+  // whose definition is ignored, or a declaration none of whose
+  // redeclarations (so far) is translated.
+  static bool isIgnored(const Decl *d) {
+    if (auto *rd = dyn_cast<RecordDecl>(d); rd && rd->getDefinition())
+      return hasAnnotation(rd->getDefinition(), "pal-ignore");
+    for (auto *r : d->redecls())
+      if (!hasAnnotation(r, "pal-ignore"))
+        return false;
+    return true;
+  }
+
+  static bool isAdmitted(const FunctionDecl *fd) {
+    for (auto *r : fd->redecls())
+      if (hasAnnotation(r, "pal-admit"))
+        return true;
+    return false;
+  }
+
+  std::set<std::pair<const Decl *, unsigned>> reportedIgnoredUses;
+
+  // Translated code cannot refer to an entity `_pal_ignore` omits. Report the
+  // use once, so the caller can substitute an error node instead of leaving a
+  // dangling name for later passes to trip over.
+  bool reportIgnoredUse(const NamedDecl *d, SourceRange range) {
+    if (!isIgnored(d))
+      return false;
+    auto key = std::make_pair(
+        d, sm.getExpansionLoc(range.getBegin()).getRawEncoding());
+    if (reportedIgnoredUses.insert(key).second)
+      ctx.report_diag(getRange(range), true,
+                      toStr("`" + d->getNameAsString() +
+                            "` is marked _pal_ignore and cannot be used in "
+                            "translated code"));
+    return true;
+  }
+
   void collectLinkage(DeclContext *dc) {
     for (auto *d : dc->decls()) {
       if (d->isInvalidDecl())
         continue;
+      // Ignored declarations are still recorded, so that linkage can reject a
+      // translation unit that ignores an entity another one translates.
+      bool ignored = isIgnored(d);
       auto *function = dyn_cast<FunctionDecl>(d);
       auto *object = dyn_cast<VarDecl>(d);
-      if ((function || object) && isLinkerAlias(d) &&
+      if (!ignored && (function || object) && isLinkerAlias(d) &&
+          !isSupportedFnAlias(d) &&
           (astCtx->getSourceManager().isWrittenInMainFile(
                astCtx->getSourceManager().getExpansionLoc(d->getLocation())) ||
            (function && function->doesThisDeclarationHaveABody()) ||
@@ -381,6 +482,7 @@ public:
                          toStr(fd->getType().getCanonicalType().getAsString()),
                          !fd->hasExternalFormalLinkage(),
                          fd->doesThisDeclarationHaveABody(), fd->isInlined(),
+                         ignored, isAdmitted(fd),
                          getRange(fd->getSourceRange()));
       } else if (auto *vd = dyn_cast<VarDecl>(d); vd && vd->isFileVarDecl()) {
         ctx.add_c_symbol(toStr(vd->getName()), 1,
@@ -388,7 +490,7 @@ public:
                          !vd->hasExternalFormalLinkage(),
                          vd->isThisDeclarationADefinition() !=
                              VarDecl::DeclarationOnly,
-                         false, getRange(vd->getSourceRange()));
+                         false, ignored, false, getRange(vd->getSourceRange()));
       } else if (auto *rd = dyn_cast<RecordDecl>(d);
                  rd && rd->isCompleteDefinition()) {
         if (rd->getIdentifier()) {
@@ -405,21 +507,24 @@ public:
               signature += ":" + std::to_string(field->getBitWidthValue());
           }
           ctx.add_c_symbol(toStr(rd->getName()), rd->isUnion() ? 3 : 2,
-                           toStr(signature), false, false, false,
-                           getRange(rd->getSourceRange()));
+                           toStr(signature), false, false, false, ignored,
+                           false, getRange(rd->getSourceRange()));
         }
-        collectLinkage(rd);
+        if (!ignored)
+          collectLinkage(rd);
       } else if (auto *td = dyn_cast<TypedefNameDecl>(d)) {
         ctx.add_c_symbol(
             toStr(td->getName()), 4,
             toStr(td->getUnderlyingType().getCanonicalType().getAsString()),
-            false, false, false, getRange(td->getSourceRange()));
+            false, false, false, ignored, false,
+            getRange(td->getSourceRange()));
       } else if (auto *ed = dyn_cast<EnumDecl>(d)) {
         for (auto *constant : ed->enumerators()) {
           SmallString<32> value;
           constant->getInitVal().toString(value, 10);
           ctx.add_c_symbol(toStr(constant->getName()), 5,
                            toStr(StringRef(value)), false, false, false,
+                           ignored, false,
                            getRange(constant->getSourceRange()));
         }
       }
@@ -444,7 +549,11 @@ public:
 
   Rc<ir::Ident> symbolIdent(NamedDecl *d, Rc<ir::SourceInfo> loc,
                             bool reference = true) {
-    if (reference && isLinkerAlias(d))
+    // glibc's own inline definitions call functions it renames with
+    // `__REDIRECT` (`atoi` calls `strtol`, which is `__isoc23_strtol` in C2X
+    // mode). Only a reference the program itself makes is diagnosed.
+    if (reference && isLinkerAlias(d) && !isSupportedFnAlias(d) &&
+        !inSystemBody)
       ctx.report_diag(loc.clone(), true, "unsupported linker symbol alias"_rs);
     bool internal = isa<FunctionDecl>(d) && !d->hasExternalFormalLinkage();
     if (auto *vd = dyn_cast<VarDecl>(d))
@@ -550,6 +659,8 @@ public:
 
   void trRecordDecl(Rc<ir::Ident> ident, RecordDecl *decl,
                     AnonNameGen *liftStructs) {
+    if (hasAnnotation(decl, "pal-ignore"))
+      return;
     auto key = recordKey(decl);
     if (!decl->isCompleteDefinition()) {
       if (decl->getTagKind() == TagTypeKind::Struct) {
@@ -590,12 +701,29 @@ public:
       }
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/false);
+        if (hasAnnotation(f, "pal-owning"))
+          reportUnsupported(f->getSourceRange(), getRange(f->getSourceRange()),
+                            "`_owning` is only for a member of an `_overlay` "
+                            "union",
+                            "");
       }
       recordTypeLayout(kLayoutStruct, toStringRef(ident_name(ident)),
                        typeForDecl(*astCtx, decl));
       recordFieldOffsets(kLayoutStruct, toStringRef(ident_name(ident)), decl);
       ctx.add_struct(std::move(builder));
     } else if (decl->getTagKind() == TagTypeKind::Union) {
+      bool overlay = false;
+      if (decl->hasAttrs()) {
+        for (auto *attr : decl->getAttrs()) {
+          if (auto *ann = dyn_cast<AnnotateAttr>(attr)) {
+            if (ann->getAnnotation() == "pal-overlay" &&
+                ann->args_size() == 0) {
+              builder.set_overlay();
+              overlay = true;
+            }
+          }
+        }
+      }
       // Process nested record declarations (inner structs/unions)
       for (auto *D : decl->decls()) {
         if (auto *inner = dyn_cast<RecordDecl>(D)) {
@@ -610,6 +738,14 @@ public:
       }
       for (auto f : decl->fields()) {
         addRecordField(builder, f, liftStructs, /*inUnion=*/true);
+        if (hasAnnotation(f, "pal-owning") && !overlay)
+          reportUnsupported(f->getSourceRange(), getRange(f->getSourceRange()),
+                            "`_owning` is only for a member of an `_overlay` "
+                            "union",
+                            "");
+        else if (hasAnnotation(f, "pal-owning"))
+          builder.set_owning(ctx.mk_ident(toStr(fieldNameStr(f)),
+                                          getRange(f->getSourceRange())));
       }
       recordTypeLayout(kLayoutUnion, toStringRef(ident_name(ident)),
                        typeForDecl(*astCtx, decl));
@@ -661,13 +797,26 @@ public:
     t = t.IgnoreParens();
     auto loc = getRange(range);
 
-    if (t.getAsString() == "size_t") {
+    // By name *and* type: a program may declare its own `size_t`, such as a
+    // block-scope `typedef uint8_t size_t;`, which is not the target's.
+    if (t.getAsString() == "size_t" &&
+        astCtx->hasSameType(t, astCtx->getSizeType())) {
       return mk_sizet(std::move(loc));
     } else if (auto typeOf = dyn_cast<TypeOfType>(t)) {
       return trQualType(typeOf->desugar(), range, liftStructs);
     } else if (auto typeOfExpr = dyn_cast<TypeOfExprType>(t)) {
       return trQualType(typeOfExpr->desugar(), range, liftStructs);
     } else if (auto tydef = dyn_cast<TypedefType>(t)) {
+      if (reportIgnoredUse(tydef->getDecl(), range))
+        return mk_type_err(std::move(loc));
+      // A block-scope typedef is only a local spelling of its underlying
+      // type (see `localTypedefObstacle`), so it is translated as that
+      // type: the IR's typedefs are file-scope names, and two functions may
+      // each declare their own `word`.
+      if (tydef->getDecl()->getDeclContext()->isFunctionOrMethod())
+        return trQualType(
+            tydef->getDecl()->getUnderlyingType(), range, liftStructs,
+            findFnProtoTypeLoc(tydef->getDecl()->getTypeSourceInfo()));
       auto id = ctx.mk_ident(toStr(tydef->getDecl()->getName()), loc.clone());
       return mk_type_typedef(std::move(loc), std::move(id));
 #if LLVM_VERSION_MAJOR < 22
@@ -702,6 +851,8 @@ public:
           trQualType(arr->getElementType(), /* TODO */ range, liftStructs));
     } else if (auto rec = dyn_cast<RecordType>(t)) {
       auto decl = rec->getDecl();
+      if (reportIgnoredUse(decl, range))
+        return mk_type_err(std::move(loc));
       auto key = recordKey(decl);
       Rc<ir::Ident> name;
       if (auto it = structNames.find(key); it != structNames.end()) {
@@ -787,6 +938,30 @@ public:
   Rc<ir::Type> trTypeAttrs(AttrVec const &attrs, Rc<ir::Type> &&ty,
                            QualType declQt = QualType(),
                            SourceRange declRange = SourceRange()) {
+    // `_cursor` on a `T **` is about the inner pointer: `*p` is a
+    // `_nullable _array T *`. The outer pointer's own qualifiers carry no
+    // meaning for the contract, so the type is rebuilt from the pointee.
+    for (auto attr : attrs) {
+      auto ann = dyn_cast<AnnotateAttr>(attr);
+      if (!ann || ann->getAnnotation() != "pal-cursor" || ann->args_size() > 1)
+        continue;
+      auto outer = declQt.isNull()
+                       ? nullptr
+                       : declQt.IgnoreParens()->getAs<PointerType>();
+      auto inner =
+          outer ? outer->getPointeeType()->getAs<PointerType>() : nullptr;
+      if (!inner) {
+        llvm::errs() << "warning: _cursor on a type that is not a pointer to "
+                        "a pointer\n";
+        break;
+      }
+      auto loc = getRange(ann->getRange());
+      auto elem = trQualType(outer->getPointeeType(), declRange);
+      elem = mk_type_nullable(loc.clone(),
+                              mk_type_array(loc.clone(), std::move(elem)));
+      ty = mk_pointer_unknown(std::move(loc), std::move(elem));
+      break;
+    }
     for (auto attr : attrs) {
       if (auto ann = dyn_cast<AnnotateAttr>(attr)) {
         if (isPointerKindAttr(ann)) {
@@ -847,12 +1022,35 @@ public:
         } else if (ann->getAnnotation() == "pal-core-ref" &&
                    ann->args_size() == 0) {
           ty = mk_type_core_ref(std::move(loc), std::move(ty));
+        } else if (ann->getAnnotation() == "pal-overread" &&
+                   ann->args_size() == 0) {
+          ty = mk_type_overread(std::move(loc), std::move(ty));
         }
       }
     }
     (void)sawNullable;
     (void)nullableLoc;
     return ty;
+  }
+
+  // Why a block-scope typedef cannot be read as its underlying type, if it
+  // cannot. A PAL annotation on it would be lost, an alignment attribute
+  // changes the layout of what it names, and a variably modified type is
+  // evaluated where it is declared. Other attributes, such as
+  // `__may_alias__`, only relax what a compiler may assume, so a proof about
+  // the underlying type holds of the typedef too.
+  static std::optional<std::string>
+  localTypedefObstacle(const TypedefNameDecl *td) {
+    if (td->getUnderlyingType()->isVariablyModifiedType())
+      return "has a variably modified type";
+    for (auto *attr : td->attrs()) {
+      if (auto *ann = dyn_cast<AnnotateAttr>(attr);
+          ann && ann->getAnnotation().starts_with("pal-"))
+        return "carries a PAL annotation";
+      if (isa<AlignedAttr>(attr))
+        return "carries an alignment attribute";
+    }
+    return std::nullopt;
   }
 
   // A `_core_ref` parameter carries no ownership: `core_ref` is an
@@ -945,6 +1143,9 @@ public:
     if (auto generic = dyn_cast<GenericSelectionExpr>(e)) {
       return trLValue(generic->getResultExpr());
     } else if (auto dre = dyn_cast<DeclRefExpr>(e)) {
+      if (reportIgnoredUse(dre->getDecl(), e->getSourceRange()))
+        return mk_lvalue_err(std::move(loc),
+                             trQualType(e->getType(), e->getSourceRange()));
       auto id = symbolIdent(dre->getDecl(), loc.clone());
       return mk_lvalue_var(std::move(loc), std::move(id));
     } else if (auto p = dyn_cast<ParenExpr>(e)) {
@@ -959,6 +1160,10 @@ public:
       }
     } else if (auto m = dyn_cast<MemberExpr>(e)) {
       auto *md = m->getMemberDecl();
+      if (auto *rd = dyn_cast<RecordDecl>(md->getDeclContext());
+          rd && reportIgnoredUse(rd, e->getSourceRange()))
+        return mk_lvalue_err(std::move(loc),
+                             trQualType(e->getType(), e->getSourceRange()));
       std::string nameStr;
       if (auto *fd = dyn_cast<FieldDecl>(md))
         nameStr = fieldNameStr(fd);
@@ -1302,8 +1507,50 @@ public:
                          true);
   }
 
+  // Whether `e` is built only out of integer literals and operators: no
+  // names (an enumerator keeps its name), and no `sizeof`/`_Alignof`, which
+  // PAL keeps symbolic at `size_t`. Anything at all is an operator here --
+  // the evaluation below decides whether it is a constant.
+  static bool isFoldableOperand(const Stmt *s, bool &op) {
+    if (isa<DeclRefExpr, UnaryExprOrTypeTraitExpr, OffsetOfExpr>(s))
+      return false;
+    if (!isa<IntegerLiteral, CharacterLiteral, ParenExpr, ImplicitCastExpr>(s))
+      op = true;
+    for (auto *c : s->children())
+      if (!c || !isFoldableOperand(c, op))
+        return false;
+    return true;
+  }
+
+  // A C integer constant expression with at least one operator in it, folded
+  // to its value: `(size_t)-1/UCHAR_MAX` is `72340172838076673sz`, not a
+  // tree of `Int32` operations each of which has to be proved free of
+  // overflow. Only an evaluation without undefined behaviour is folded; one
+  // with it (`INT_MAX + 1`, `1 / 0`) is translated as written, where its
+  // obligation fails as it should.
+  std::optional<Rc<ir::Expr>> foldIntConstant(Expr *e) {
+    auto ty = e->getType();
+    if (!ty->isIntegerType() || ty->isEnumeralType() || isBoolType(ty))
+      return std::nullopt;
+    bool op = false;
+    if (!isFoldableOperand(e, op) || !op || !e->isIntegerConstantExpr(*astCtx))
+      return std::nullopt;
+    Expr::EvalResult res;
+    SmallVector<PartialDiagnosticAt, 1> notes;
+    res.Diag = &notes;
+    if (!e->EvaluateAsInt(res, *astCtx, Expr::SE_NoSideEffects) ||
+        res.HasUndefinedBehavior || !notes.empty())
+      return std::nullopt;
+    auto loc = getRange(e->getSourceRange());
+    return mk_int_lit(std::move(loc), toBigInt(res.Val.getInt()),
+                      trQualType(ty, e->getSourceRange()));
+  }
+
   Rc<ir::Expr> trRValue(Expr *e) {
     auto loc = getRange(e->getSourceRange());
+
+    if (auto folded = foldIntConstant(e))
+      return std::move(*folded);
 
     if (auto *value = ignoreCCleanups(e); value != e) {
       return trRValue(value);
@@ -1495,6 +1742,16 @@ public:
                                            std::move(countExpr));
                   }
                 }
+              }
+              // A byte array: `char *d = malloc(n)`. The count is in bytes,
+              // which for an element of size 1 is the number of elements, so
+              // there is no `sizeof` factor to find.
+              auto pointeeQt = ic->getType()->getPointeeType();
+              if (!pointeeQt.isNull() && pointeeQt->isCharType()) {
+                auto allocTy = trQualType(pointeeQt.getUnqualifiedType(),
+                                          ic->getSourceRange());
+                return mk_malloc_array(std::move(loc), std::move(allocTy),
+                                       trRValue(arg));
               }
             }
             // Detect calloc(n, sizeof(T)) and calloc(1, n * sizeof(T))
@@ -1787,6 +2044,10 @@ public:
         if (auto *dre = dyn_cast<DeclRefExpr>(
                 uo->getSubExpr()->IgnoreParenImpCasts())) {
           if (auto *fd = dyn_cast<FunctionDecl>(dre->getDecl())) {
+            if (reportIgnoredUse(fd, dre->getSourceRange()))
+              return mk_rvalue_err(
+                  std::move(loc),
+                  trQualType(e->getType(), e->getSourceRange()));
             auto id = symbolIdent(fd, loc.clone());
             return mk_rvalue_fnref(std::move(loc), std::move(id));
           }
@@ -1963,6 +2224,9 @@ public:
       }
     } else if (auto *c = dyn_cast<CallExpr>(e)) {
       if (auto fd = c->getDirectCallee()) {
+        if (reportIgnoredUse(fd, c->getCallee()->getSourceRange()))
+          return mk_rvalue_err(std::move(loc),
+                               trQualType(c->getType(), c->getSourceRange()));
         if (fd->getName() == "__builtin_mul_overflow" && c->getNumArgs() == 3) {
           auto lhsType = c->getArg(0)->getType();
           auto rhsType = c->getArg(1)->getType();
@@ -2325,6 +2589,9 @@ public:
       // A bare reference to a function (function-to-pointer decay): produce a
       // function reference, identical to `&func`.
       if (auto *fd = dyn_cast<FunctionDecl>(dre->getDecl())) {
+        if (reportIgnoredUse(fd, e->getSourceRange()))
+          return mk_rvalue_err(std::move(loc),
+                               trQualType(e->getType(), e->getSourceRange()));
         auto id = symbolIdent(fd, loc.clone());
         return mk_rvalue_fnref(std::move(loc), std::move(id));
       }
@@ -2338,6 +2605,10 @@ public:
       // already renders a value base as a record field selection rather than a
       // reference projection.
       auto *md = m->getMemberDecl();
+      if (auto *rd = dyn_cast<RecordDecl>(md->getDeclContext());
+          rd && reportIgnoredUse(rd, e->getSourceRange()))
+        return mk_rvalue_err(std::move(loc),
+                             trQualType(e->getType(), e->getSourceRange()));
       std::string nameStr;
       if (auto *fd = dyn_cast<FieldDecl>(md))
         nameStr = fieldNameStr(fd);
@@ -2446,7 +2717,8 @@ public:
           if (auto *ds = dyn_cast<DeclStmt>(s)) {
             bool allStaticAsserts = true;
             for (auto *d : ds->decls()) {
-              if (!isa<StaticAssertDecl>(d)) {
+              if (!isa<StaticAssertDecl>(d) &&
+                  !hasAnnotation(d, "pal-ignore")) {
                 allStaticAsserts = false;
               }
             }
@@ -2709,6 +2981,8 @@ public:
       hoistRValueMembers(stmts, ifs->getCond());
     } else if (auto *ds = dyn_cast<DeclStmt>(stmt)) {
       for (auto *d : ds->decls()) {
+        if (hasAnnotation(d, "pal-ignore"))
+          continue;
         if (auto *vd = dyn_cast<VarDecl>(d)) {
           hoistAddressedCompoundLiterals(stmts, vd->getInit());
           hoistRValueMembers(stmts, vd->getInit());
@@ -3512,9 +3786,30 @@ public:
       return trStmt(stmts, subStmt);
     } else if (auto *ds = dyn_cast<DeclStmt>(stmt)) {
       for (auto d : ds->decls()) {
+        if (hasAnnotation(d, "pal-ignore"))
+          continue;
         auto dloc = getRange(d->getSourceRange());
         if (auto vd = dyn_cast<VarDecl>(d)) {
-          if (vd->isStaticLocal()) {
+          // A `static const` with an initializer holds the same value on
+          // every call, so it is translated as a local initialized each time.
+          // Only its address could tell the two apart, so one whose address
+          // is taken is rejected: it could escape the call, a local's cannot.
+          if (vd->isStaticLocal() && vd->hasInit() &&
+              astCtx->getBaseElementType(vd->getType()).isConstQualified()) {
+            auto *fn =
+                dyn_cast_or_null<FunctionDecl>(vd->getParentFunctionOrMethod());
+            if (fn && takesAddressOf(vd, fn->getBody())) {
+              ctx.report_diag(
+                  dloc.clone(), true,
+                  toStr("the address of block-scope static const '" +
+                        vd->getName().str() +
+                        "' is taken (only its value may be used, e.g. by "
+                        "subscripting); block-scope static storage is not "
+                        "supported"));
+              stmts.push(mk_stmt_err(dloc.clone()));
+              continue;
+            }
+          } else if (vd->isStaticLocal()) {
             ctx.report_diag(dloc.clone(), true,
                             "block-scope static storage is not supported"_rs);
             stmts.push(mk_stmt_err(dloc.clone()));
@@ -3560,6 +3855,17 @@ public:
           // nested function, which can capture enclosing locals and hence
           // cannot be hoisted; that falls through to the error below.
           HandleDecl(fd);
+        } else if (auto td = dyn_cast<TypedefNameDecl>(d)) {
+          // A block-scope typedef has no runtime effect; uses of it are
+          // translated as its underlying type. Only one that is exactly a
+          // new spelling of that type can be treated so.
+          if (auto why = localTypedefObstacle(td)) {
+            ctx.report_diag(dloc.clone(), true,
+                            toStr("block-scope typedef '" +
+                                  td->getName().str() + "' " + *why +
+                                  "; declare it at file scope"));
+            stmts.push(mk_stmt_err(dloc.clone()));
+          }
         } else {
           reportUnsupported(d->getSourceRange(), dloc,
                             "unsupported variable declaration ",
@@ -3662,6 +3968,23 @@ public:
                               Vec<Rc<ir::Expr>>::new_()));
     } else if (dyn_cast<NullStmt>(stmt) || dyn_cast<IntegerLiteral>(stmt)) {
       return rust::Unit();
+    } else if (auto *as = dyn_cast<GCCAsmStmt>(stmt);
+#if LLVM_VERSION_MAJOR >= 21
+               // Since LLVM 21, the template may be a constant expression
+               // (getAsmStringExpr), and getAsmString returns its value.
+               as && as->getAsmString().empty() &&
+#else
+               as && as->getAsmString()->getString().empty() &&
+#endif
+               as->getNumOutputs() == 0 && as->getNumLabels() == 0) {
+      // An empty template executes no instructions, and without outputs or
+      // labels it cannot change a C variable or jump: it is a compiler
+      // barrier (`__asm__ volatile ("" : : "r"(p) : "memory")`, as in
+      // explicit_bzero), so only its inputs' side effects remain.
+      for (unsigned i = 0; i < as->getNumInputs(); i++) {
+        trStmt(stmts, as->getInputExpr(i));
+      }
+      return rust::Unit();
     }
 
     // An expression evaluated for a value that is then discarded, where
@@ -3711,8 +4034,203 @@ public:
     return {};
   }
 
+  // The function `FD` names through `__attribute__((alias("old")))`, as
+  // musl's `weak_alias(old, new)` declares it, when `old` is a function
+  // declared in this translation unit with the same type. The alias is the
+  // same code under a second symbol, so it is given `old`'s contract (or
+  // `old` is given the alias's, see `handleFnAlias`) instead of being
+  // refused like the other linker aliases.
+  FunctionDecl *aliasTarget(const FunctionDecl *FD) {
+    auto *alias = FD->getAttr<AliasAttr>();
+    if (!alias || FD->hasAttr<AsmLabelAttr>() || FD->hasAttr<IFuncAttr>() ||
+        FD->hasAttr<WeakRefAttr>())
+      return nullptr;
+    auto &id = astCtx->Idents.get(alias->getAliasee());
+    for (auto *nd :
+         astCtx->getTranslationUnitDecl()->lookup(DeclarationName(&id))) {
+      auto *old = dyn_cast<FunctionDecl>(nd);
+      if (old && old != FD && !old->hasAttr<AliasAttr>() &&
+          !isLinkerAlias(old) &&
+          astCtx->hasSameType(old->getType(), FD->getType()))
+        return old;
+    }
+    return nullptr;
+  }
+
+  bool isSupportedFnAlias(const Decl *d) {
+    auto *fd = dyn_cast<FunctionDecl>(d);
+    return fd && aliasTarget(fd);
+  }
+
+  // The first declaration of `FD` that writes a contract itself (rather than
+  // inheriting it), or null if none does.
+  FunctionDecl *contractDecl(FunctionDecl *FD) {
+    for (auto *rd : FD->getFirstDecl()->redecls()) {
+      for (auto *attr : rd->getAttrs()) {
+        if (attr->isInherited())
+          continue;
+        if (auto *ann = dyn_cast<AnnotateAttr>(attr);
+            ann && (ann->getAnnotation() == "pal-requires" ||
+                    ann->getAnnotation() == "pal-ensures"))
+          return rd;
+      }
+    }
+    return nullptr;
+  }
+
+  // `new` aliases `old`: both symbols are `old`'s code. `new` is declared with
+  // the contract `old` is verified against, so calls to it are as sound as
+  // calls to `old`. When only `new` has a contract (musl prepends a spec
+  // header naming the public `stpcpy`, not `__stpcpy`), `old` is declared
+  // with that contract, so its definition is verified against it. When both
+  // have one, the two declarations of `new` must agree, which `merge`
+  // checks like any other pair of redeclarations.
+  void handleFnAlias(FunctionDecl *FD, FunctionDecl *old) {
+    auto *oldC = contractDecl(old);
+    auto *newC = contractDecl(FD);
+    FunctionDecl *sig = oldC ? oldC : newC;
+    if (!sig) {
+      sig = old->getDefinition() ? old->getDefinition() : old;
+    }
+    ctx.add_fn_decl(fnSignature(sig, getDeclName(FD), false));
+    if (!oldC && newC) {
+      auto builder = fnSignature(newC, getDeclName(old), false);
+      builder.set_adopts_signature();
+      ctx.add_fn_decl(std::move(builder));
+    }
+  }
+
+  // The signature and contract of `FD`, under the name `ident`. A linker
+  // alias borrows the signature of the declaration that carries the
+  // contract, which may belong to a different function.
+  DeclBuilder fnSignature(FunctionDecl *FD, Rc<ir::Ident> ident,
+                          bool skipInherited) {
+    auto builder =
+        DeclBuilder::new_(getRange(FD->getSourceRange()), ident.clone());
+    for (auto param : FD->parameters()) {
+      auto ty = trQualType(param->getType(), param->getSourceRange(), nullptr,
+                           findFnProtoTypeLoc(param->getTypeSourceInfo()));
+      ty = trTypeAttrs(param->getAttrs(), std::move(ty), param->getType(),
+                       param->getSourceRange());
+      auto mode = hasConsumesAttr(param->getAttrs()) ? ir::ParamMode::Consumed()
+                  : hasOutAttr(param->getAttrs())
+                      ? ir::ParamMode::Out()
+                      : [&]() {
+                          auto qt = param->getType().IgnoreParens();
+                          if (hasCoreRefAttr(param->getAttrs()) ||
+                              isCoreRefQualType(param->getType()))
+                            return ir::ParamMode::Regular();
+                          // `_mutable` opts a const-qualified parameter out
+                          // of const mode, which a `const` hidden behind a
+                          // typedef otherwise leaves no way to do.
+                          for (auto *attr : param->getAttrs()) {
+                            if (auto *ann = dyn_cast<AnnotateAttr>(attr);
+                                ann && ann->getAnnotation() == "pal-mutable")
+                              return ir::ParamMode::Regular();
+                          }
+                          // A top-level `const` on a parameter passed by
+                          // value says nothing about ownership: the callee
+                          // gets its own copy, and the qualifier only
+                          // forbids reassigning the local. Reading it as a
+                          // borrow gives the parameter a permission
+                          // implicit, and for a scalar -- whose ownership
+                          // predicate is `emp` -- nothing at the call site
+                          // can ever solve it, so the call does not
+                          // elaborate. Only an indirection can be borrowed.
+                          if (qt.getCanonicalType()->isPointerType() &&
+                              qt.getCanonicalType().isConstQualified())
+                            return ir::ParamMode::Const();
+                          // `getAs` desugars through typedefs, so a
+                          // parameter declared with a pointer-to-const
+                          // typedef (`PCFOO`) is recognized just
+                          // like one that writes `const T *` through.
+                          if (auto ptr = qt->getAs<PointerType>()) {
+                            if (ptr->getPointeeType()
+                                    .getCanonicalType()
+                                    .isConstQualified())
+                              return ir::ParamMode::Const();
+                          }
+                          return ir::ParamMode::Regular();
+                        }();
+      if (param->getDeclName().isIdentifier() && param->getName().size() > 0) {
+        builder.arg(ctx.mk_ident(toStr(param->getName()),
+                                 getRange(param->getSourceRange())),
+                    std::move(ty), std::move(mode));
+      } else {
+        builder.arg_anon(std::move(ty), std::move(mode));
+      }
+      // `_cursor_from(s)`: the parameter the cursor starts from when it is
+      // not null.
+      for (auto *attr : param->getAttrs()) {
+        auto *ann = dyn_cast<AnnotateAttr>(attr);
+        if (!ann || ann->getAnnotation() != "pal-cursor" ||
+            ann->args_size() != 1)
+          continue;
+        auto *lit =
+            dyn_cast<StringLiteral>(ann->args_begin()[0]->IgnoreParenCasts());
+        if (!lit)
+          continue;
+        builder.cursor_from(
+            ctx.mk_ident(toStr(lit->getString()), getRange(ann->getRange())));
+        break;
+      }
+    }
+    builder.return_type(trTypeAttrs(
+        FD->getAttrs(),
+        trQualType(FD->getReturnType(), FD->getReturnTypeSourceRange()),
+        FD->getReturnType(), FD->getReturnTypeSourceRange()));
+    for (auto attr : FD->getAttrs()) {
+      if (skipInherited && attr->isInherited())
+        continue;
+      if (auto req = isUnaryAttrOf(attr, "pal-requires")) {
+        builder.requires(std::move(req.value()));
+      }
+      if (auto ens = isUnaryAttrOf(attr, "pal-ensures")) {
+        builder.ensures(std::move(ens.value()));
+      }
+      if (auto dec = isUnaryAttrOf(attr, "pal-decreases")) {
+        builder.decreases(std::move(dec.value()));
+      }
+      if (auto ann = dyn_cast<AnnotateAttr>(attr);
+          ann && ann->getAnnotation() == "pal-pure" && ann->args_size() == 0) {
+        builder.set_pure();
+      }
+      if (auto ann = dyn_cast<AnnotateAttr>(attr);
+          ann && ann->getAnnotation() == "pal-rec" && ann->args_size() == 0) {
+        builder.set_rec();
+      }
+      if (auto ann = dyn_cast<AnnotateAttr>(attr);
+          ann && ann->getAnnotation() == "pal-total" && ann->args_size() == 0) {
+        builder.set_total();
+      }
+      if (auto ctr = isUnaryAttrCounter(attr, "pal-ghost-arg")) {
+        ctx.parse_ghost_arg(builder, getRange(attr->getRange()), ctr.value(),
+                            snippets);
+      }
+    }
+    return builder;
+  }
+
   rust::Unit HandleDecl(Decl *D) {
+    if (hasAnnotation(D, "pal-ignore")) {
+      if (auto *fd = dyn_cast<FunctionDecl>(D);
+          fd && fd->doesThisDeclarationHaveABody()) {
+        for (auto *previous = fd->getPreviousDecl(); previous;
+             previous = previous->getPreviousDecl()) {
+          if (!hasAnnotation(previous, "pal-ignore")) {
+            ctx.report_diag(
+                getRange(D->getSourceRange()), true,
+                "_pal_ignore on a definition leaves an earlier declaration "
+                "translated; use _pal_admit to retain the prototype and "
+                "contract, or put _pal_ignore on the first declaration"_rs);
+            break;
+          }
+        }
+      }
+      return {};
+    }
     if (auto *FD = dyn_cast<FunctionDecl>(D)) {
+      bool admit = hasAnnotation(FD, "pal-admit");
       // Include block
       if (FD->getName().starts_with("__pal_include_anchor")) {
         std::optional<unsigned> code;
@@ -3850,104 +4368,24 @@ public:
         }
       }
 
+      if (auto *old = aliasTarget(FD)) {
+        handleFnAlias(FD, old);
+        return {};
+      }
+
       // Regular function decl
-      auto ident = getDeclName(FD);
-      auto builder =
-          DeclBuilder::new_(getRange(FD->getSourceRange()), ident.clone());
-      for (auto param : FD->parameters()) {
-        auto ty = trQualType(param->getType(), param->getSourceRange(), nullptr,
-                             findFnProtoTypeLoc(param->getTypeSourceInfo()));
-        ty = trTypeAttrs(param->getAttrs(), std::move(ty), param->getType(),
-                         param->getSourceRange());
-        auto mode = hasConsumesAttr(param->getAttrs())
-                        ? ir::ParamMode::Consumed()
-                    : hasOutAttr(param->getAttrs())
-                        ? ir::ParamMode::Out()
-                        : [&]() {
-                            auto qt = param->getType().IgnoreParens();
-                            if (hasCoreRefAttr(param->getAttrs()) ||
-                                isCoreRefQualType(param->getType()))
-                              return ir::ParamMode::Regular();
-                            // `_mutable` opts a const-qualified parameter out
-                            // of const mode, which a `const` hidden behind a
-                            // typedef otherwise leaves no way to do.
-                            for (auto *attr : param->getAttrs()) {
-                              if (auto *ann = dyn_cast<AnnotateAttr>(attr);
-                                  ann && ann->getAnnotation() == "pal-mutable")
-                                return ir::ParamMode::Regular();
-                            }
-                            // A top-level `const` on a parameter passed by
-                            // value says nothing about ownership: the callee
-                            // gets its own copy, and the qualifier only
-                            // forbids reassigning the local. Reading it as a
-                            // borrow gives the parameter a permission
-                            // implicit, and for a scalar -- whose ownership
-                            // predicate is `emp` -- nothing at the call site
-                            // can ever solve it, so the call does not
-                            // elaborate. Only an indirection can be borrowed.
-                            if (qt.getCanonicalType()->isPointerType() &&
-                                qt.getCanonicalType().isConstQualified())
-                              return ir::ParamMode::Const();
-                            // `getAs` desugars through typedefs, so a
-                            // parameter declared with a pointer-to-const
-                            // typedef (`PCFOO`) is recognized just
-                            // like one that writes `const T *` through.
-                            if (auto ptr = qt->getAs<PointerType>()) {
-                              if (ptr->getPointeeType()
-                                      .getCanonicalType()
-                                      .isConstQualified())
-                                return ir::ParamMode::Const();
-                            }
-                            return ir::ParamMode::Regular();
-                          }();
-        if (param->getDeclName().isIdentifier() &&
-            param->getName().size() > 0) {
-          builder.arg(ctx.mk_ident(toStr(param->getName()),
-                                   getRange(param->getSourceRange())),
-                      std::move(ty), std::move(mode));
-        } else {
-          builder.arg_anon(std::move(ty), std::move(mode));
-        }
-      }
-      builder.return_type(trTypeAttrs(
-          FD->getAttrs(),
-          trQualType(FD->getReturnType(), FD->getReturnTypeSourceRange()),
-          FD->getReturnType(), FD->getReturnTypeSourceRange()));
-      for (auto attr : FD->getAttrs()) {
-        if (FD->hasBody() && attr->isInherited())
-          continue;
-        if (auto req = isUnaryAttrOf(attr, "pal-requires")) {
-          builder.requires(std::move(req.value()));
-        }
-        if (auto ens = isUnaryAttrOf(attr, "pal-ensures")) {
-          builder.ensures(std::move(ens.value()));
-        }
-        if (auto dec = isUnaryAttrOf(attr, "pal-decreases")) {
-          builder.decreases(std::move(dec.value()));
-        }
-        if (auto ann = dyn_cast<AnnotateAttr>(attr);
-            ann && ann->getAnnotation() == "pal-pure" &&
-            ann->args_size() == 0) {
-          builder.set_pure();
-        }
-        if (auto ann = dyn_cast<AnnotateAttr>(attr);
-            ann && ann->getAnnotation() == "pal-rec" && ann->args_size() == 0) {
-          builder.set_rec();
-        }
-        if (auto ann = dyn_cast<AnnotateAttr>(attr);
-            ann && ann->getAnnotation() == "pal-total" &&
-            ann->args_size() == 0) {
-          builder.set_total();
-        }
-        if (auto ctr = isUnaryAttrCounter(attr, "pal-ghost-arg")) {
-          ctx.parse_ghost_arg(builder, getRange(attr->getRange()), ctr.value(),
-                              snippets);
-        }
-      }
-      if (FD->hasBody() && ctx.selects_function_body(toStr(FD->getName()))) {
-        return ctx.add_fn_defn(std::move(builder), trStmts(FD->getBody()));
+      auto builder = fnSignature(FD, getDeclName(FD), !admit);
+      if (FD->hasBody() && !admit &&
+          ctx.selects_function_body(toStr(FD->getName()))) {
+        auto &sm = astCtx->getSourceManager();
+        bool outer = inSystemBody;
+        inSystemBody =
+            sm.isInSystemHeader(sm.getExpansionLoc(FD->getLocation()));
+        auto body = trStmts(FD->getBody());
+        inSystemBody = outer;
+        return ctx.add_fn_defn(std::move(builder), std::move(body));
       } else {
-        if (FD->doesThisDeclarationHaveABody()) {
+        if (FD->doesThisDeclarationHaveABody() && !admit) {
           std::string message =
               "--only-function excludes body of `" + FD->getName().str() +
               "`; only its external declaration is translated";
@@ -4171,16 +4609,17 @@ std::string getBinaryForResourcesPath() {
 #endif
 
 #ifdef _WIN32
-// The clang resource directory, in order of preference: $PAL_CLANG_RESOURCE_DIR,
-// <dir of pal.exe>/../lib/clang/<major> (relocatable binary package, see
-// opt/package.sh), and the directory of the clang used to build PAL.
+// The clang resource directory, in order of preference:
+// $PAL_CLANG_RESOURCE_DIR, <dir of pal.exe>/../lib/clang/<major> (relocatable
+// binary package, see opt/package.sh), and the directory of the clang used to
+// build PAL.
 std::string getWindowsResourcesPath() {
   if (const char *env = std::getenv("PAL_CLANG_RESOURCE_DIR"); env && *env)
     return env;
   std::string exe = llvm::sys::fs::getMainExecutable(nullptr, nullptr);
   if (!exe.empty()) {
-    llvm::SmallString<256> dir(llvm::sys::path::parent_path(
-        llvm::sys::path::parent_path(exe)));
+    llvm::SmallString<256> dir(
+        llvm::sys::path::parent_path(llvm::sys::path::parent_path(exe)));
     llvm::sys::path::append(dir, "lib", "clang",
                             std::to_string(LLVM_VERSION_MAJOR));
     llvm::SmallString<256> include(dir);

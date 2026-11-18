@@ -8,8 +8,8 @@ name: Package
 # F* is the pinned nightly (opt/install-fstar.sh), unless fstar_ref or
 # fstar_src_url is given: then the fstar-src job makes (or downloads) an F*
 # source package, and each platform builds F* from it (opt/build-fstar.sh;
-# Windows in its own Cygwin job, fstar-windows), all cached. (arm64 macOS
-# packages, possible only then, are disabled for now: see the macos job.)
+# natively on both arm64 and x86_64 macOS; Windows in its own Cygwin job,
+# fstar-windows), all cached.
 
 on:
   workflow_dispatch:
@@ -194,14 +194,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # arm64 is disabled for now. It is only possible with F* built from
-        # source: the pinned F* nightly has no arm64 macOS build, and Homebrew
-        # no longer ships the x86_64 bottles (gmp) that bundling it for
-        # Rosetta 2 needs. To re-enable it, use (and likewise in macos-test):
-        # include: ${{ fromJSON((inputs.fstar_ref != '' || inputs.fstar_src_url != '') && '[{"runner":"macos-15","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]' || '[{"runner":"macos-26-intel","arch":"x86_64"}]') }}
         include:
-        - runner: macos-26-intel
-          arch: x86_64
+        - { runner: macos-15, arch: arm64 }
+        - { runner: macos-26-intel, arch: x86_64 }
     runs-on: ${{ matrix.runner }}
     steps:
     - uses: actions/checkout@v4
@@ -214,34 +209,15 @@ jobs:
     - name: Install Rust
       run: rustup update stable && rustup default stable
 
-    # The pinned F* nightly is only built for x86_64 macOS (arm64 packages
-    # would bundle it too, to run under Rosetta 2).
-    - name: Install F* (x86_64)
-      if: needs.fstar-src.outputs.id == ''
-      run: arch -x86_64 /bin/bash ./opt/install-fstar.sh --dest "$RUNNER_TEMP/fstar" --no-link
-
-    - name: Fetch the x86_64 Homebrew libraries that F* links
-      if: needs.fstar-src.outputs.id == ''
-      run: |
-        dir="$RUNNER_TEMP/fstar-libs"
-        mkdir -p "$dir"
-        # The libraries' own dependencies too (bundled only if linked).
-        for formula in gmp zstd $(brew deps --formula gmp zstd); do
-          # An x86_64 macOS bottle tag, e.g. sequoia (not arm64_sequoia).
-          tag="$(brew info --json=v2 "$formula" | python3 -c '
-        import json, sys
-        files = json.load(sys.stdin)["formulae"][0]["bottle"]["stable"]["files"]
-        print(next(t for t in files if not t.startswith("arm64_") and "linux" not in t))')"
-          brew fetch --force --bottle-tag="$tag" "$formula"
-          tar -xzf "$(brew --cache --bottle-tag="$tag" "$formula")" -C "$dir"
-        done
-        libdirs="$(find "$dir" -name '*.dylib' -exec dirname {} \; | sort -u | paste -sd: -)"
-        echo "FSTAR_LIB_PATH=$libdirs" >> "$GITHUB_ENV"
-
-    # fstar.exe links Homebrew's gmp and zstd, which the package bundles.
+    # fstar.exe (nightly or built from source) links Homebrew's gmp and zstd,
+    # which package.sh bundles next to it.
     - name: Install the libraries that F* links
-      if: needs.fstar-src.outputs.id != ''
       run: brew install gmp zstd
+
+    # The F* nightly build for this architecture (arm64 or x86_64).
+    - name: Install F*
+      if: needs.fstar-src.outputs.id == ''
+      run: ./opt/install-fstar.sh --dest "$RUNNER_TEMP/fstar" --no-link
 
     - name: Cache F* built from source
       id: fstar-cache
@@ -288,11 +264,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # arm64 is disabled for now, see the macos job. To re-enable it:
-        # include: ${{ fromJSON((inputs.fstar_ref != '' || inputs.fstar_src_url != '') && '[{"runner":"macos-26","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]' || '[{"runner":"macos-26-intel","arch":"x86_64"}]') }}
         include:
-        - runner: macos-26-intel
-          arch: x86_64
+        - { runner: macos-26, arch: arm64 }
+        - { runner: macos-26-intel, arch: x86_64 }
     runs-on: ${{ matrix.runner }}
     steps:
     - uses: actions/checkout@v4

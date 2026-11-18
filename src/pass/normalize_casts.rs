@@ -46,7 +46,8 @@ fn normalize_type(env: &Env, ty: &mut Rc<Type>) {
         | TypeT::FixedArray(inner, _)
         | TypeT::FlexArray(inner)
         | TypeT::Plain(inner)
-        | TypeT::Nullable(inner) => normalize_type(env, inner),
+        | TypeT::Nullable(inner)
+        | TypeT::Overread(inner) => normalize_type(env, inner),
         TypeT::FnPtr { args, ret } => {
             for arg in args {
                 normalize_type(env, arg);
@@ -127,8 +128,11 @@ fn normalize_expr(env: &Env, expr: &mut Expr) {
             normalize_expr(env, Rc::make_mut(value));
             normalize_type(env, ty);
         }
-        ExprT::Forall(_, ty, body) | ExprT::Exists(_, ty, body) => {
+        ExprT::Forall(_, ty, trigs, body) | ExprT::Exists(_, ty, trigs, body) => {
             normalize_type(env, ty);
+            for t in trigs.iter_mut().flatten() {
+                normalize_expr(env, Rc::make_mut(t));
+            }
             normalize_expr(env, Rc::make_mut(body));
         }
         ExprT::ArrayInit { elem_ty, elems, .. } => {
@@ -147,6 +151,7 @@ fn normalize_expr(env: &Env, expr: &mut Expr) {
         | ExprT::Ref(value)
         | ExprT::UnOp(_, value)
         | ExprT::Live(value)
+        | ExprT::Unchanged(value)
         | ExprT::Old(value)
         | ExprT::Free(value)
         | ExprT::PreIncr(value)

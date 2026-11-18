@@ -1,0 +1,4 @@
+# Expected translation diagnostic substrings
+other.c:4: inconsistent _pal_admit on admitted_here across translation units
+other.c:6: inconsistent _pal_admit on admitted_there across translation units
+other.c:11: inconsistent _pal_ignore on ignored_here across translation units

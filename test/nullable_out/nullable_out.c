@@ -68,19 +68,14 @@ void call_nonnull_guarded(_nullable _out int32_t *p)
 
 void call_optional_null(void)
 {
-    _ghost_stmt(intro_unless_null_null null (int32_t_pts_to_uninit null));
     write_optional(NULL);
-    _ghost_stmt(elim_unless_null_null null _);
 }
 
 int32_t call_optional_nonnull(void)
     _ensures(return == 42)
 {
     int32_t value;
-    _ghost_stmt(int32_t_pts_to_uninit_not_null $&(value));
-    _ghost_stmt(intro_unless_null $&(value) (int32_t_pts_to_uninit $&(value)));
     write_optional(&value);
-    _ghost_stmt(elim_unless_null $&(value) _);
     return value;
 }
 
@@ -112,11 +107,6 @@ int32_t call_optional_fields(void)
     _ensures(return == 42)
 {
     struct pair value;
-    _ghost_stmt(struct_pair_scatter_uninit $&(value));
-    _ghost_stmt(int32_t_pts_to_uninit_not_null $&(value.a));
-    _ghost_stmt(struct_pair_gather_uninit $&(value));
-    _ghost_stmt(intro_unless_null $&(value) (struct_pair_pts_to_uninit $&(value)));
     write_optional_fields(&value);
-    _ghost_stmt(elim_unless_null $&(value) _);
     return value.a;
 }
