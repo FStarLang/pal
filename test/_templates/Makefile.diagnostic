@@ -32,7 +32,7 @@ translate: $(OUT_DIR)/.stamp
 
 $(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h $(COMPILE_DB)
 	@mkdir -p $(OUT_DIR)
-	$(C2PULSE) $(PAL_OPTS) --outdir $(OUT_DIR) $(C_FILES)
+	$(C2PULSE) $(PAL_OPTS) --outdir $(OUT_DIR) $(C_FILES) || test $$? -eq 1
 	@touch $@
 
 verify: $(OUT_DIR)/.stamp

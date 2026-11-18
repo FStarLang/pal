@@ -60,7 +60,8 @@ translate: $(OUT_DIR)/.stamp
 
 $(OUT_DIR)/.stamp: $(C_FILES) $(H_FILES) $(C2PULSE) pal.h $(wildcard extra_opts pal_opts)
 	@mkdir -p $(OUT_DIR)
-	$(C2PULSE) $(PAL_OPTS) --outdir $(OUT_DIR) $(C_FILES)
+	$(C2PULSE) $(PAL_OPTS) --outdir $(OUT_DIR) $(C_FILES) || \
+		{ status=$$?; test "$$status" -eq 1 && test -f should-fail; }
 	@touch $@
 
 # A negative test carries a `should-fail` file: verification must fail, and

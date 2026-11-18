@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    process::ExitCode,
     time::Instant,
 };
 
@@ -157,7 +158,18 @@ fn serialize_diags(diags: &Diagnostics) -> String {
     serde_json::to_string_pretty(&result).unwrap()
 }
 
-fn main() {
+fn finish(diags: &Diagnostics, vfs: &mut dyn VFS, quiet: bool) -> ExitCode {
+    if !quiet {
+        diags.print_to_stderr(vfs);
+    }
+    if diags.has_errors() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn main() -> ExitCode {
     #[cfg(target_os = "macos")]
     set_default_sdkroot();
 
@@ -363,7 +375,7 @@ fn main() {
 
     if cli.print_ir {
         println!("{}", combined_tu);
-        return;
+        return finish(&diags, &mut *vfs, cli.quiet);
     }
 
     let t = Instant::now();
@@ -473,7 +485,5 @@ fn main() {
             println!("{}", module.code);
         }
     }
-    if !cli.quiet {
-        diags.print_to_stderr(&mut *vfs);
-    }
+    finish(&diags, &mut *vfs, cli.quiet)
 }
