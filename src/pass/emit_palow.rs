@@ -23028,7 +23028,8 @@ impl<'a> Body<'a> {
     /// held through its `_owning` member may store anywhere in that member,
     /// so the ownership follows the call only as far as the callee promises
     /// the bytes it is keyed on `_unchanged`; `own_follow` asks for exactly
-    /// that. Name the union's value before the member is lent.
+    /// that. Name the union's value before the member is lent. A parameter
+    /// whose contract gives only its bytes has no ownership to follow.
     fn union_own_before_lend(&mut self, lv: &Expr) -> Option<(String, String, String)> {
         let (root, uname, _) = overlay_path(self.tds, &|x| self.ty_of(x).ok(), lv)
             .ok()?
@@ -23050,7 +23051,7 @@ impl<'a> Body<'a> {
             return None;
         };
         let p = v.val.to_string();
-        if !self.owned_here(&p) || !self.params.contains(&p) {
+        if !self.owned_here(&p) || !self.params.contains(&p) || self.bytes_only.contains(&p) {
             return None;
         }
         let at = format!("var_{}", p);
