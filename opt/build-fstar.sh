@@ -187,7 +187,10 @@ fi
 if command -v opam >/dev/null; then eval "$(opam env 2>/dev/null)" || true; fi
 if [[ $INSTALL_DEPS == 1 ]]; then
     echo "== installing F*'s OCaml dependencies"
-    opam install -y --deps-only "$SRC/fstar.opam"
+    opam_file="$SRC/fstar.opam"
+    # opam on Windows is a native program: it does not understand Cygwin paths.
+    [[ $WINDOWS == 0 ]] || opam_file="$(cygpath -m "$opam_file")"
+    opam install -y --deps-only "$opam_file"
     eval "$(opam env)"
 fi
 command -v ocamlfind >/dev/null || command -v dune >/dev/null ||
