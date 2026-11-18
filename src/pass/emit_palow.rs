@@ -21163,6 +21163,11 @@ impl<'a> Body<'a> {
         let ExprT::UnionInit(_, m, _) = &strip_vattr(rhs).val else {
             return;
         };
+        // An island's storage is bytes; reads prove readability from the
+        // representation, not a remembered tag. Do not refocus its address.
+        if self.overlay_of(lhs).is_some() {
+            return;
+        }
         if let Ok(a) = self.addr(lhs) {
             self.active.insert(a, m.val.to_string());
         }
@@ -21922,6 +21927,15 @@ impl<'a> Body<'a> {
                 let Some(si) = self.tds.structs.get(&*n.val) else {
                     return Err(format!("an initialiser for struct {}", n.val));
                 };
+                if let Some((i, _)) = inits
+                    .iter()
+                    .find(|(i, _)| !si.fields.iter().any(|f| *i.val == *f.name))
+                {
+                    return Err(format!(
+                        "an initializer for non-storage field `{}.{}`",
+                        n.val, i.val
+                    ));
+                }
                 let names: Vec<(String, Rc<Type>)> = si
                     .fields
                     .iter()
@@ -26269,7 +26283,44 @@ impl<'a> Body<'a> {
         if let Some(s2) = self.split_byte_field(s)? {
             return self.stmt(&s2);
         }
-        if let Some(parts) = self.split_overlay_init(s) {
+        if let Some(mut parts) = self.split_overlay_init(s) {
+            if let StmtT::Assign(lhs, _) = &s.val
+                && !self.repeatable_init_place(lhs)
+            {
+                return Err(
+                    "an aggregate initialization whose destination may change between field stores"
+                        .into(),
+                );
+            }
+            // C computes the aggregate before replacing the destination.
+            // Snapshot nonconstant inputs before any field store, e.g. when
+            // one initializer reads a field another initializer overwrites.
+            for part in &mut parts {
+                let StmtT::Assign(lhs, rhs) = &part.val else {
+                    unreachable!()
+                };
+                let ty = self
+                    .env
+                    .infer_expr(rhs)
+                    .map_err(|_| "the type of an initializer")?
+                    .to_rc();
+                if const_expr(self.tds, &ty, rhs).is_some() || self.stable_int(rhs) {
+                    continue;
+                }
+                let id = Rc::<str>::from(self.fresh("init'")).with_loc(rhs.loc.clone());
+                self.check_alias_snaps(part)?;
+                let v = self.rvalue(rhs)?;
+                let vt = fstar_type(self.tds, &ty)
+                    .ok_or_else(|| format!("an initializer of {}", describe(&ty)))?;
+                self.lines
+                    .push(format!("let var_{} : {} = {};", id.val, vt, v));
+                self.lines.append(&mut self.pending_close);
+                self.close_own();
+                self.env
+                    .push_var_decl(&id, ty, crate::env::LocalDeclKind::RValue);
+                *part = StmtT::Assign(lhs.clone(), ExprT::Var(id).with_loc(rhs.loc.clone()))
+                    .with_loc(part.loc.clone());
+            }
             for p in &parts {
                 self.stmt(p)?;
             }
@@ -26339,6 +26390,29 @@ impl<'a> Body<'a> {
         }
     }
 
+    // The stores synthesized below revisit this place. Do not duplicate a
+    // call, an increment, or a load through a field one of those stores can change.
+    fn repeatable_init_place(&self, e: &Expr) -> bool {
+        match &strip_vattr(e).val {
+            ExprT::Var(_) => true,
+            ExprT::Member(b, _) => self.repeatable_init_place(b),
+            ExprT::Deref(p) => match &strip_vattr(p).val {
+                ExprT::Var(_) => true,
+                ExprT::Ref(b) => self.repeatable_init_place(b),
+                _ => self.stable_ptr(p),
+            },
+            ExprT::Index(b, i) => {
+                self.stable_int(i)
+                    && (self.stable_ptr(b)
+                        || (self
+                            .ty_of(b)
+                            .is_ok_and(|t| flat_array(self.tds, &t).is_some())
+                            && self.repeatable_init_place(b)))
+            }
+            _ => false,
+        }
+    }
+
     /// `x = (T){...}` for a `T` with an overlay union in it, one field at a
     /// time. Such a value is bytes and has no whole-value writer (see
     /// `holds_overlay`), so the literal is taken apart into a store per
@@ -26355,32 +26429,71 @@ impl<'a> Body<'a> {
         ) -> bool {
             // Inside an arm of an overlay union a struct is taken apart too:
             // a store of a whole member is refused there (C11 6.2.6.1p7).
-            let whole = in_arm || b.ty_of(lhs).is_ok_and(|t| holds_overlay(b.tds, &t));
+            let has_overlay = b.ty_of(rhs).is_ok_and(|t| holds_overlay(b.tds, &t));
             match &strip_vattr(rhs).val {
-                ExprT::StructInit(n, fs) if whole => {
+                ExprT::StructInit(n, fs) if in_arm || has_overlay => {
                     let Some(si) = b.tds.structs.get(&*n.val) else {
                         return false;
                     };
+                    if fs
+                        .iter()
+                        .any(|(i, _)| !si.fields.iter().any(|f| *i.val == *f.name))
+                    {
+                        return false;
+                    }
                     for f in &si.fields {
                         let name = Rc::<str>::from(f.name.as_str()).with_loc(lhs.loc.clone());
                         let m = ExprT::Member(lhs.clone(), name).with_loc(lhs.loc.clone());
                         // C zeroes the fields an initialiser leaves out.
                         let e = match fs.iter().find(|(i, _)| *i.val == *f.name) {
                             Some((_, e)) => e.clone(),
-                            None => match zero_expr(b.tds, &f.ty, &lhs.loc) {
-                                Some(z) => z,
-                                None => return false,
-                            },
+                            None => {
+                                // Initialize the C field, not its storage type: an
+                                // island is stored by writing the original tagged union.
+                                let Some(z) = zero_expr(b.tds, &f.ty, &lhs.loc).or_else(|| {
+                                    let ty = b.env.infer_expr(&m).ok()?.to_rc();
+                                    zero_expr(b.tds, &ty, &lhs.loc)
+                                }) else {
+                                    return false;
+                                };
+                                z
+                            }
                         };
                         if !go(b, &m, &e, loc, in_arm, out) {
                             return false;
                         }
                     }
                 }
-                ExprT::UnionInit(n, arm, e) if whole => {
+                ExprT::UnionInit(n, arm, e) if has_overlay => {
                     let m = ExprT::Member(lhs.clone(), arm.clone()).with_loc(lhs.loc.clone());
-                    let overlay = b.tds.unions.get(&*n.val).is_some_and(|u| u.overlay);
-                    return go(b, &m, e, loc, in_arm || overlay, out);
+                    return go(b, &m, e, loc, in_arm || is_overlay(b.tds, &n.val), out);
+                }
+                ExprT::ArrayInit { elems, .. } => {
+                    let Ok(ty) = b.ty_of(lhs) else { return false };
+                    let TypeT::FixedArray(elem, n) = &peel(b.tds, &ty).val else {
+                        return false;
+                    };
+                    if elems.len() as u64 > *n {
+                        return false;
+                    }
+                    for i in 0..*n {
+                        let idx = ExprT::IntLit(
+                            Rc::new(BigInt::from(i)),
+                            TypeT::SizeT.with_loc(loc.clone()),
+                        )
+                        .with_loc(loc.clone());
+                        let at = ExprT::Index(lhs.clone(), idx).with_loc(loc.clone());
+                        let Some(e) = elems
+                            .get(i as usize)
+                            .cloned()
+                            .or_else(|| zero_expr(b.tds, elem, loc))
+                        else {
+                            return false;
+                        };
+                        if !go(b, &at, &e, loc, in_arm, out) {
+                            return false;
+                        }
+                    }
                 }
                 _ => out.push(StmtT::Assign(lhs.clone(), rhs.clone()).with_loc(loc.clone())),
             }
@@ -26392,7 +26505,7 @@ impl<'a> Body<'a> {
         if !matches!(
             &strip_vattr(rhs).val,
             ExprT::StructInit(..) | ExprT::UnionInit(..)
-        ) || !self.ty_of(lhs).is_ok_and(|t| holds_overlay(self.tds, &t))
+        ) || !self.ty_of(rhs).is_ok_and(|t| holds_overlay(self.tds, &t))
         {
             return None;
         }
@@ -31737,12 +31850,19 @@ fn int_lit(e: &Expr) -> Option<u64> {
 
 /// The C zero of `ty` as an expression: what a field an initialiser leaves
 /// out holds. A union's zero is its first member's, as in C. `None` for a
-/// type with no such expression (an array, a float).
+/// type with no such expression. An empty array list is expanded at its
+/// destination type by `split_overlay_init`.
 fn zero_expr(tds: &Typedefs, ty: &Rc<Type>, loc: &Rc<SourceInfo>) -> Option<Rc<Expr>> {
     let lit = |t: Rc<Type>| ExprT::IntLit(Rc::new(BigInt::from(0)), t).with_loc(loc.clone());
     Some(match &peel(tds, ty).val {
         TypeT::Int { .. } | TypeT::SizeT | TypeT::PtrdiffT => lit(ty.clone()),
         TypeT::Bool => ExprT::BoolLit(false).with_loc(loc.clone()),
+        TypeT::FixedArray(elem, _) => ExprT::ArrayInit {
+            elem_ty: elem.clone(),
+            elems: Vec::new(),
+            is_static: false,
+        }
+        .with_loc(loc.clone()),
         TypeT::Pointer(..) | TypeT::FnPtr { .. } => {
             let int = TypeT::Int {
                 signed: true,

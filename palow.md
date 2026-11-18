@@ -1517,6 +1517,12 @@ field -- the ones the literal leaves out get their C zero -- and, for the
 overlay union's part, a store to the arm the literal initializes, recursively
 while the part still holds an overlay and, inside the arm, down to its scalars,
 since a whole member of an overlay union is not stored (`overlay_struct_literal`).
+For a tagged union stored as an island, the store writes the tagged value
+as a whole: a designator selects its member, and an omitted initializer
+initializes its first member recursively. This also applies to nested
+array elements. The store does not prescribe padding bytes. Inputs that
+read the destination are evaluated before its fields are overwritten;
+the destination itself must be repeatable (`overlay_island_init`).
 
 `_unchanged(lv)` in a postcondition says the object `lv` names has the bytes
 it had on entry. Inside an overlay union it is
