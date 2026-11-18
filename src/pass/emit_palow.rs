@@ -27387,6 +27387,7 @@ impl<'a> Body<'a> {
                     let callee = self.callees.get(&*name.val.to_string());
                     let void = callee.is_some_and(|c| c.void);
                     let noreturn = callee.is_some_and(|c| c.noreturn);
+                    let mark = self.seeded.len();
                     let call = self.call(name, args)?;
                     if std::mem::take(&mut self.copied_call) {
                         return Ok(());
@@ -27396,6 +27397,13 @@ impl<'a> Body<'a> {
                     } else {
                         let t = self.fresh(&name.val);
                         self.lines.push(format!("let {} = {};", t, call));
+                    }
+                    // As for a call in an expression: a validity seeded for
+                    // the arguments is handed back by the callee and put down
+                    // here. Left for the end of the body, it would be lost
+                    // when an enclosing arm restores the outer seeds.
+                    if !noreturn {
+                        self.drop_seeded(mark);
                     }
                     // The call left `pure False` behind, so this point in the
                     // program is not reached. `unreachable` turns that into
