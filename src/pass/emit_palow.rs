@@ -1426,6 +1426,14 @@ fn overlay_path(
                 off += k * es;
                 cur = (**b).clone();
             }
+            // `(&x)->f`, as a store through a pointer to a member reads once
+            // its alias is substituted, is the place `x.f`.
+            ExprT::Deref(a) if matches!(strip_vattr(a).val, ExprT::Ref(_)) => {
+                let ExprT::Ref(x) = &strip_vattr(a).val else {
+                    unreachable!()
+                };
+                cur = (**x).clone();
+            }
             _ => break,
         }
     }
@@ -16789,6 +16797,7 @@ impl<'a> Body<'a> {
     /// ownership reads, it is the same ownership afterwards and `follow_own`
     /// moves it to the new value; when they are, it stays where it was.
     fn union_own_before_write(&mut self, lhs: &Expr) -> Option<(String, String, String)> {
+        let lhs = &*self.unalias_place(lhs);
         let ty = self.ty_of(lhs).ok()?;
         let leaf = palow_name(self.tds, &ty).and_then(|pn| ov_leaf(self.tds, &pn));
         // An island is stored whole, as bytes, like a scalar (`overlay_leaf`).
@@ -16843,9 +16852,22 @@ impl<'a> Body<'a> {
         } else {
             let mut e = strip_vattr(lhs);
             let mut arm = None;
-            while let ExprT::Member(b, f) = &e.val {
-                arm = Some(f.val.to_string());
-                e = strip_vattr(b);
+            loop {
+                match &e.val {
+                    ExprT::Member(b, f) => {
+                        arm = Some(f.val.to_string());
+                        e = strip_vattr(b);
+                    }
+                    // `(&x)->f`, as a store through a pointer to a member
+                    // reads once its alias is substituted, is `x.f`.
+                    ExprT::Deref(a) if matches!(strip_vattr(a).val, ExprT::Ref(_)) => {
+                        let ExprT::Ref(x) = &strip_vattr(a).val else {
+                            unreachable!()
+                        };
+                        e = strip_vattr(x);
+                    }
+                    _ => break,
+                }
             }
             if arm.as_deref() != Some(own.arm.as_str()) {
                 return None;
@@ -17835,10 +17857,9 @@ impl<'a> Body<'a> {
     /// ordinary path then focuses member by member, which needs each arm it
     /// passes through to be readable.
     fn overlay_leaf(&mut self, e: &Expr, writing: bool) -> Result<Option<Focus>, String> {
-        let e = match self.unalias(e) {
-            Some(p) => (*p).clone(),
-            None => e.clone(),
-        };
+        // `q->f`, with `q` an alias of `&r->m`, is `r->m.f`: the bytes of
+        // `r`'s overlay union, wherever the alias is in the path.
+        let e = (*self.unalias_place(e)).clone();
         if !matches!(strip_vattr(&e).val, ExprT::Member(..) | ExprT::Index(..)) {
             return Ok(None);
         }
@@ -23075,16 +23096,13 @@ impl<'a> Body<'a> {
             if !out && !owns_one(i) {
                 continue;
             }
-            // A pointer standing for a union member, `p = &u->m` or one a
-            // getter returned, hands the callee that member just as `&u->m`
-            // does; the arm still has to be focused for it.
+            // A pointer standing for a member, `p = &u->m` or one a getter
+            // returned, hands the callee that member just as `&u->m` does;
+            // the arm or field still has to be focused for it.
             let aliased = lvalue_name(a)
                 .filter(|v| !self.nullable_aliases.contains(v))
                 .and_then(|v| self.aliases.get(&v).cloned())
-                .filter(|p| match &strip_vattr(p).val {
-                    ExprT::Member(b, _) => self.union_of(b).is_some(),
-                    _ => false,
-                });
+                .filter(|p| matches!(&strip_vattr(p).val, ExprT::Member(..)));
             let inner: &Expr = match (&strip_vattr(a).val, &aliased) {
                 (ExprT::Ref(inner), _) => inner,
                 (_, Some(p)) => p,
@@ -26880,6 +26898,7 @@ impl<'a> Body<'a> {
                     let callee = self.callees.get(&*name.val.to_string());
                     let void = callee.is_some_and(|c| c.void);
                     let noreturn = callee.is_some_and(|c| c.noreturn);
+                    let mark = self.seeded.len();
                     let call = self.call(name, args)?;
                     if std::mem::take(&mut self.copied_call) {
                         return Ok(());
@@ -26889,6 +26908,13 @@ impl<'a> Body<'a> {
                     } else {
                         let t = self.fresh(&name.val);
                         self.lines.push(format!("let {} = {};", t, call));
+                    }
+                    // As for a call in an expression: a validity seeded for
+                    // the arguments is handed back by the callee and put down
+                    // here. Left for the end of the body, it would be lost
+                    // when an enclosing arm restores the outer seeds.
+                    if !noreturn {
+                        self.drop_seeded(mark);
                     }
                     // The call left `pure False` behind, so this point in the
                     // program is not reached. `unreachable` turns that into
@@ -29935,10 +29961,25 @@ fn alias_map(
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
 
+    // A local declared `_plain` is a pointer object by request: its uses read
+    // the local, and need no ownership of what it points into. A proof that
+    // lends that object away, piece by piece, needs exactly this.
+    fn plain_decl(ty: &Type) -> bool {
+        match &ty.val {
+            TypeT::Plain(_) => true,
+            TypeT::Refine(inner, _)
+            | TypeT::RefineAlways(inner, _)
+            | TypeT::RefineUninit(inner, _)
+            | TypeT::RefineValue(inner, _, _, _)
+            | TypeT::Nullable(inner)
+            | TypeT::Overread(inner) => plain_decl(inner),
+            _ => false,
+        }
+    }
     let locals: HashSet<String> = body
         .iter()
         .filter_map(|s| match &s.val {
-            StmtT::Decl(n, _) => Some(n.val.to_string()),
+            StmtT::Decl(n, ty) if !plain_decl(ty) => Some(n.val.to_string()),
             _ => None,
         })
         .collect();
