@@ -3017,6 +3017,12 @@ struct FnSurface {
     /// asking Pulse for ownership its own signature no longer states, so the
     /// access is refused and counted instead.
     granted: HashSet<String>,
+    /// Granted parameters whose spliced contract states their bytes
+    /// (`..._pts_to $(P)` on a `_plain` P) and no deep ownership: a load of a
+    /// pointer their `_owning` union member owns is a plain load through
+    /// them, not one that opens that ownership, which the caller may have
+    /// lent out.
+    bytes_only: HashSet<String>,
     /// Whether the contract carries ownership the author wrote by hand. Palow
     /// cannot read such a clause, so it cannot tell which object it covers;
     /// a parameter's dereference already takes one as a grant over everything,
@@ -5764,6 +5770,79 @@ fn pure_let(
 /// A call to an slprop-valued `_let` is the same thing under a name: the
 /// author has given a piece of ownership a word, and a contract that uses the
 /// word means the ownership.
+/// The `_plain` parameters `P` of `decl` that its spliced clauses give only
+/// bytes: some clause states `..._pts_to $(P)` and none mentions an `_own`
+/// predicate (or a word for one, like `..._owned`).
+fn bytes_only_params<'e>(
+    tds: &Typedefs,
+    decl: &FnDecl,
+    clauses: impl Iterator<Item = &'e Rc<Expr>>,
+) -> HashSet<String> {
+    let mut named: HashSet<String> = HashSet::new();
+    for c in clauses {
+        let Some(code) = slprop_refine(tds, c) else {
+            continue;
+        };
+        let mut prev_pts_to = false;
+        for tok in &code.tokens {
+            match tok {
+                InlinePulseToken::Verbatim(ct) => {
+                    if names_own_predicate(&ct.text.val) {
+                        return HashSet::new();
+                    }
+                    prev_pts_to = ct.text.val.trim_end().ends_with("_pts_to");
+                }
+                InlinePulseToken::RValueAntiquot { expr, .. } => {
+                    if prev_pts_to && let ExprT::Var(v) = &strip_vattr(expr).val {
+                        named.insert(v.val.to_string());
+                    }
+                    prev_pts_to = false;
+                }
+                _ => prev_pts_to = false,
+            }
+        }
+    }
+    decl.args
+        .iter()
+        .filter(|a| is_plain_chain(&a.ty))
+        .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
+        .filter(|n| named.contains(n))
+        .collect()
+}
+
+/// Whether `text` names an `_own` predicate (`..._own` as a whole word) or a
+/// word for one (`..._owned`), as opposed to a pure fact about one, like
+/// `..._own_ok`.
+fn names_own_predicate(text: &str) -> bool {
+    text.match_indices("_own").any(|(i, _)| {
+        let rest = &text[i + "_own".len()..];
+        rest.starts_with("ed")
+            || !rest.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// A spliced clause that is a single `pure (...)`: it states no ownership.
+fn is_pure_only_clause(tds: &Typedefs, e: &Rc<Expr>) -> bool {
+    let Some(code) = slprop_refine(tds, e) else {
+        return false;
+    };
+    let mut first = true;
+    for tok in &code.tokens {
+        if let InlinePulseToken::Verbatim(ct) = tok {
+            if first && !ct.text.val.trim_start().starts_with("pure") {
+                return false;
+            }
+            if ct.text.val.contains("**") {
+                return false;
+            }
+        } else if first {
+            return false;
+        }
+        first = false;
+    }
+    !first
+}
+
 fn is_slprop_clause(tds: &Typedefs, e: &Rc<Expr>) -> bool {
     is_own_refine(tds, e)
 }
@@ -5790,7 +5869,11 @@ fn emit_fn(
     // Whether the author's `_ensures` states ownership rather than only
     // propositions. Asked here, ahead of the parameter loop, because it
     // changes what a parameter mode is allowed to promise back.
-    let ens_own = decl.ensures.iter().any(|e| is_slprop_clause(tds, e));
+    // A clause that is only a `pure (...)` states a fact, not ownership.
+    let ens_own = decl
+        .ensures
+        .iter()
+        .any(|e| is_slprop_clause(tds, e) && !is_pure_only_clause(tds, e));
     let mut req: Vec<String> = Vec::new();
     // Hand-written ownership the contract hands back, which unlike the
     // generated kind binds no existential of its own -- the author names
@@ -8202,7 +8285,9 @@ fn emit_fn(
     // parameter it covers is the author's business. So one is taken as a grant
     // over everything, which is the same trust a spliced clause gets
     // everywhere else.
+    let mut bytes_only = HashSet::new();
     if contract_ok && !(req_slprops.is_empty() && ens_slprops.is_empty()) {
+        bytes_only = bytes_only_params(tds, decl, req_slprops.iter().chain(ens_slprops.iter()));
         granted.extend(
             decl.args
                 .iter()
@@ -8233,6 +8318,7 @@ fn emit_fn(
         null_payload,
         null_outs,
         granted,
+        bytes_only,
         spliced_own: contract_ok
             && (!(req_slprops.is_empty() && ens_slprops.is_empty()) || refine_own_spliced.take()),
         contract: contract_ok,
@@ -15858,6 +15944,8 @@ struct Body<'a> {
     outs: &'a [OwnedParam],
     /// Parameters whose pointee the emitted contract owns; see `FnSurface`.
     granted: &'a HashSet<String>,
+    /// See `FnSurface::bytes_only`.
+    bytes_only: &'a HashSet<String>,
     /// See `FnSurface::spliced_own`.
     spliced_own: bool,
     /// Parameters whose struct pointee the contract owns field by field. See
@@ -16784,7 +16872,7 @@ impl<'a> Body<'a> {
             return None;
         };
         let p = v.val.to_string();
-        if !self.params.contains(&p) || !self.owned_here(&p) {
+        if !self.params.contains(&p) || !self.owned_here(&p) || self.bytes_only.contains(&p) {
             return None;
         }
         Some(OwnPath {
@@ -31339,6 +31427,7 @@ fn emit_body(
         owned: &sig.owned,
         outs: &sig.outs,
         granted: &sig.granted,
+        bytes_only: &sig.bytes_only,
         spliced_own: sig.spliced_own,
         pieces: &sig.pieces,
         piece_types: &sig.piece_types,
