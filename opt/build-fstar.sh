@@ -228,13 +228,11 @@ else
     echo "== building F* from the source package (make ADMIT=1; make package)"
     "$MAKE" -C "$SRC" -skj"$JOBS" ADMIT=1
     if [[ $WINDOWS == 1 ]]; then
-        # The libgmp DLL that fstar.exe loads, to ship next to it (which
-        # libgmp-10.dll may find a 32-bit one).
+        # The libgmp DLL to ship next to fstar.exe, a 64-bit MinGW program:
+        # the 64-bit MinGW one (ldd, like which, may also list a 32-bit one).
         ldd_out="$(ldd "$SRC/out/bin/fstar.exe")"
-        LIBGMP="$(sed -n 's/^[[:space:]]*libgmp-10.dll => *\([^ ]*\) .*$/\1/p' <<<"$ldd_out")"
-        # ldd may not list it: then the 64-bit MinGW one on the PATH (fstar.exe
-        # is a 64-bit MinGW program).
-        [[ -n "$LIBGMP" ]] || LIBGMP="$(type -ap libgmp-10.dll | grep -m1 x86_64-w64-mingw32 || true)"
+        LIBGMP="$({ sed -n 's/^[[:space:]]*libgmp-10.dll => *\([^ ]*\) .*$/\1/p' <<<"$ldd_out"
+                    type -ap libgmp-10.dll; } | grep -m1 /x86_64-w64-mingw32/ || true)"
         if [[ ! -f "$LIBGMP" ]]; then
             echo "$ldd_out" >&2
             die "cannot find the libgmp-10.dll that fstar.exe loads"
