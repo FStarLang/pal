@@ -118,7 +118,10 @@ $env:PAL_FSTAR_ROOT = 'C:\tools\fstar'
 
 The Windows build uses the selected C++ compiler's builtin-header directory.
 Keep Clang and `llvm-config` on the same major version, and rebuild PAL after
-moving or changing the toolchain. The MSYS2 packages must provide the shared
+moving or changing the toolchain. At run time, `pal.exe` prefers
+`$PAL_CLANG_RESOURCE_DIR` if set, then `<dir of pal.exe>\..\lib\clang\<N>` if
+it contains `include` (as in the binary package), then that build-time
+directory. The MSYS2 packages must provide the shared
 `clang-cpp` library; the versioned, static-only LLVM packages are not substitutes.
 Linux continues to use its existing resource discovery and setup.
 
@@ -135,6 +138,99 @@ PAL emits code against the [Palow](palow.md) memory model.
 
 82 test directories, each a C file that PAL translates and F\*/Pulse
 verifies. Create a new one with `./test/new.sh my_test`.
+
+### Binary packages
+
+```bash
+make package                              # dist/pal-<version>-<commit>-<os>-<arch>.tar.gz (.zip on Windows)
+make package PACKAGE_OPTS="--fstar DIR"   # bundle F* and z3 from DIR (opt/install-fstar.sh --dest DIR)
+make package PACKAGE_OPTS="--fstar-ref REF"  # bundle F* built from source at REF (Linux, macOS)
+make package PACKAGE_OPTS="--fstar-src SRC"  # ... from an F* checkout or source package (Linux, macOS)
+make package PACKAGE_OPTS=--check-pulse   # without --fstar: ship pulse/_cache, checked by fstar.exe
+make package-test                         # unpack, translate and verify a few tests with the package
+```
+
+[`opt/package.sh`](opt/package.sh) builds a relocatable package on the
+current platform, with `bin/pal`, the libclang-cpp and LLVM libraries it
+loads (and their dependencies), and Clang's builtin headers in
+`lib/clang/<N>/include`:
+
+- **Linux**: needs `patchelf`. `bin/pal` loads its libraries from `lib/`; the
+  package runs on any distribution with a glibc at least as recent as the
+  build host's. `--llvm system` builds a small package that uses the
+  system's libclang-cpp instead.
+- **macOS**: build with Homebrew's `llvm@20`
+  (`LLVM_CONFIG=$(brew --prefix llvm@20)/bin/llvm-config`). The dylibs in
+  `lib/` are found via `@rpath` and ad-hoc signed. Packages are per
+  architecture and need the macOS version of the build host or later, and
+  the Xcode command line tools (PAL finds the SDK with `xcrun`).
+- **Windows**: build from an MSYS2 UCRT64 shell (see above) with `zip`
+  installed. The package is a zip with the DLLs next to `bin\pal.exe`; it
+  needs no MSYS2 installation to run, but it does not include the C library
+  headers (`stdlib.h`, `string.h`, ...). Clang finds them through a MinGW gcc
+  on `PATH`; otherwise, point `pal.exe` to a MinGW-w64 sysroot that has them
+  in `include/`, e.g. from MSYS2's `mingw-w64-ucrt-x86_64-headers`:
+  `PAL_SYSROOT=C:/msys64/ucrt64`. (`PAL_SYSROOT`, passed to Clang as
+  `--sysroot`, works on every platform.) To use the headers of MSVC and the
+  Windows SDK instead, select the MSVC target with a `compile_flags.txt`
+  next to the C sources containing `--target=x86_64-pc-windows-msvc`; Clang
+  then finds the headers from `INCLUDE`, as set by a Visual Studio
+  developer prompt (`vcvars64.bat`). `INCLUDE` is required: `pal.exe` is
+  built with MinGW, and such builds of Clang cannot locate Visual Studio
+  2017 or later by themselves. `opt/package-test.ps1` tests a
+  package this way, with PowerShell only (no MSYS2).
+
+On Linux and macOS, the C library headers come from the system as well
+(`libc6-dev` or equivalent; the macOS SDK).
+
+The package also contains `include/pal.h`, the Pulse support library in
+`pulse/`, and `share/pal/run-fstar.sh` (and `run-fstar.cmd` on Windows),
+which runs F\* with `pulse/` on the include path: `$PAL_FSTAR_EXE` if set,
+else the bundled `fstar/bin/fstar.exe`, else `fstar.exe` on `PATH`. With
+`--fstar DIR`, the package bundles in `fstar/` what verification needs from
+that F\* binary distribution (`fstar.exe`, its checked standard and Pulse
+libraries, and F\*'s default z3; `--fstar-z3 VER,...|all` for others), and
+ships `pulse/_cache` checked by it. On macOS, the dylibs that `fstar.exe`
+links (Homebrew's gmp and zstd) are copied next to it. The pinned F\*
+nightly is only built for x86\_64 macOS; an arm64 package could bundle that
+build to run under Rosetta 2 (`FSTAR_LIB_PATH` tells `package.sh` where to
+find x86\_64 dylibs), but the workflow does not build arm64 packages from
+it, since Homebrew no longer ships x86\_64 bottles of gmp.
+
+Instead of an F\* binary distribution, `--fstar-ref REF [--fstar-repo URL]`
+bundles an F\* built from the sources at a branch, tag or full commit SHA
+(default repository: `https://github.com/FStarLang/FStar.git`), on Linux and
+macOS. [`opt/build-fstar.sh`](opt/build-fstar.sh) builds it the way F\*'s
+nightlies are built (`make package ADMIT=1`; GNU make, `gmake` on macOS),
+which needs OCaml (F\* uses 5.3.0) with F\*'s opam dependencies
+(`build-fstar.sh --install-deps` installs them), gmp, and on macOS zstd
+(`brew install opam make gmp zstd pkg-config`); it can also build into a
+directory for `--fstar`:
+`opt/build-fstar.sh --ref REF --dest DIR [--install-deps]`.
+`--fstar-src SRC` builds F\* from a local F\* git checkout (in place;
+uncommitted changes are recorded as `<commit>-dirty` with the sha256 of the
+diff) or from an F\* source package, `fstar-src.tar.gz` or unpacked: the
+OCaml sources of a bootstrapped F\*, made on Linux or macOS by F\*'s
+`make package-src` or by `opt/build-fstar.sh --ref REF --make-src-package
+OUTDIR`. On Windows, F\* builds from a source package only, in a Cygwin
+shell with OCaml from opam (as F\*'s Windows builds do):
+`opt/build-fstar.sh --src-package fstar-src.tar.gz --dest DIR`, then
+`make package PACKAGE_OPTS="--fstar DIR"` from the MSYS2 shell.
+`BUILDINFO` and `fstar/SOURCE` record the repository, ref, commit and kind
+of sources. A shipped `pulse/_cache` is only usable
+with the exact F\* that checked it (see `BUILDINFO`); otherwise re-check it
+with `rm -rf pulse/_cache && make -C pulse FSTAR_EXE=fstar.exe`.
+[`.github/workflows/package.yml`](.github/workflows/package.yml) builds the
+packages, with F\* and z3, on Ubuntu 22.04, macOS 15 (x86\_64) and
+Windows, then translates and verifies tests with them on clean machines
+without LLVM or F\* (on Windows, both with MSYS2's MinGW headers and with
+MSVC's), and uploads them as workflow artifacts (run it manually
+from the Actions tab). Its `fstar_ref` input (and `fstar_repo`) builds F\*
+from source at that ref instead of using the pinned nightly: a Linux job
+makes an F\* source package from it (or downloads the one at
+`fstar_src_url`), from which each platform builds F\*, Windows in a
+separate Cygwin job (all cached). (It could then also build and test arm64
+macOS packages, but these are disabled for now.)
 
 ### Translate a file
 
