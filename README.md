@@ -144,6 +144,8 @@ verifies. Create a new one with `./test/new.sh my_test`.
 ```bash
 make package                              # dist/pal-<version>-<commit>-<os>-<arch>.tar.gz (.zip on Windows)
 make package PACKAGE_OPTS="--fstar DIR"   # bundle F* and z3 from DIR (opt/install-fstar.sh --dest DIR)
+make package PACKAGE_OPTS="--fstar-ref REF"  # bundle F* built from source at REF (Linux, macOS)
+make package PACKAGE_OPTS="--fstar-src SRC"  # ... from an F* checkout or source package (Linux, macOS)
 make package PACKAGE_OPTS=--check-pulse   # without --fstar: ship pulse/_cache, checked by fstar.exe
 make package-test                         # unpack, translate and verify a few tests with the package
 ```
@@ -191,15 +193,41 @@ libraries, and F\*'s default z3; `--fstar-z3 VER,...|all` for others), and
 ships `pulse/_cache` checked by it. On macOS, the dylibs that `fstar.exe`
 links (Homebrew's gmp and zstd) are copied next to it (`FSTAR_LIB_PATH`
 tells `package.sh` where to find them if they are not where `fstar.exe`
-expects them). A shipped `pulse/_cache` is only usable
+expects them).
+
+Instead of an F\* binary distribution, `--fstar-ref REF [--fstar-repo URL]`
+bundles an F\* built from the sources at a branch, tag or full commit SHA
+(default repository: `https://github.com/FStarLang/FStar.git`), on Linux and
+macOS. [`opt/build-fstar.sh`](opt/build-fstar.sh) builds it the way F\*'s
+nightlies are built (`make package ADMIT=1`; GNU make, `gmake` on macOS),
+which needs OCaml (F\* uses 5.3.0) with F\*'s opam dependencies
+(`build-fstar.sh --install-deps` installs them), gmp, and on macOS zstd
+(`brew install opam make gmp zstd pkg-config`); it can also build into a
+directory for `--fstar`:
+`opt/build-fstar.sh --ref REF --dest DIR [--install-deps]`.
+`--fstar-src SRC` builds F\* from a local F\* git checkout (in place;
+uncommitted changes are recorded as `<commit>-dirty` with the sha256 of the
+diff) or from an F\* source package, `fstar-src.tar.gz` or unpacked: the
+OCaml sources of a bootstrapped F\*, made on Linux or macOS by F\*'s
+`make package-src` or by `opt/build-fstar.sh --ref REF --make-src-package
+OUTDIR`. On Windows, F\* builds from a source package only, in a Cygwin
+shell with OCaml from opam (as F\*'s Windows builds do):
+`opt/build-fstar.sh --src-package fstar-src.tar.gz --dest DIR`, then
+`make package PACKAGE_OPTS="--fstar DIR"` from the MSYS2 shell.
+`BUILDINFO` and `fstar/SOURCE` record the repository, ref, commit and kind
+of sources. A shipped `pulse/_cache` is only usable
 with the exact F\* that checked it (see `BUILDINFO`); otherwise re-check it
 with `rm -rf pulse/_cache && make -C pulse FSTAR_EXE=fstar.exe`.
 [`.github/workflows/package.yml`](.github/workflows/package.yml) builds the
-packages, with F\* and z3, on Ubuntu 22.04, macOS 15 (arm64 and x86\_64) and
+packages, with F\* and z3, on Ubuntu 22.04, macOS 26 (arm64 and x86\_64) and
 Windows, then translates and verifies tests with them on clean machines
 without LLVM or F\* (on Windows, both with MSYS2's MinGW headers and with
 MSVC's), and uploads them as workflow artifacts (run it manually
-from the Actions tab).
+from the Actions tab). Its `fstar_ref` input (and `fstar_repo`) builds F\*
+from source at that ref instead of using the pinned nightly: a Linux job
+makes an F\* source package from it (or downloads the one at
+`fstar_src_url`), from which each platform builds F\* (natively on arm64 and
+x86\_64 macOS), Windows in a separate Cygwin job (all cached).
 
 ### Translate a file
 
