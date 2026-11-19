@@ -7948,3 +7948,9 @@ Limitations:
     without a diagnostic, from contracts and from `struct_X__refine` alike.
     The attribute now stays on the clause, which says which member is live
     (`anon_union_refine`, `anon_union_refine_bad`).
+104. **By-value bit-field initializers.** Designators name source fields,
+    not the synthetic storage unit. Start the unit at an unspecified value
+    and apply the field-store bit updates to each named member, using zero
+    for omitted members. An explicitly false flag does not imply a zero
+    storage byte (`bitfield_init_padding_bad`). This does not publish new
+    bit-field constants for static objects.

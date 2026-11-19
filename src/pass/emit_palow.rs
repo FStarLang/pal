@@ -5446,6 +5446,15 @@ impl<'a> Spec<'a> {
                 let Some(si) = self.tds.structs.get(&*n.val) else {
                     return Err(format!("an initialiser for struct {} in a contract", n.val));
                 };
+                if inits
+                    .iter()
+                    .any(|(i, _)| !si.fields.iter().any(|f| *i.val == *f.name))
+                {
+                    return Err(format!(
+                        "a non-storage field initializer for {} in a contract",
+                        n.val
+                    ));
+                }
                 let mut vals = Vec::new();
                 for f in si.fields.iter() {
                     let v = match inits.iter().find(|(i, _)| *i.val == *f.name) {
@@ -21927,15 +21936,16 @@ impl<'a> Body<'a> {
                 let Some(si) = self.tds.structs.get(&*n.val) else {
                     return Err(format!("an initialiser for struct {}", n.val));
                 };
-                if let Some((i, _)) = inits
-                    .iter()
-                    .find(|(i, _)| !si.fields.iter().any(|f| *i.val == *f.name))
-                {
+                if let Some((i, _)) = inits.iter().find(|(i, _)| {
+                    !si.fields.iter().any(|f| *i.val == *f.name)
+                        && !si.bitfields.iter().any(|(name, _)| *i.val == **name)
+                }) {
                     return Err(format!(
                         "an initializer for non-storage field `{}.{}`",
                         n.val, i.val
                     ));
                 }
+                let bitfields = si.bitfields.clone();
                 let names: Vec<(String, Rc<Type>)> = si
                     .fields
                     .iter()
@@ -21943,6 +21953,28 @@ impl<'a> Body<'a> {
                     .collect();
                 let mut vals = Vec::new();
                 for (fname, fty) in names {
+                    let members: Vec<_> = bitfields
+                        .iter()
+                        .filter(|(_, bf)| bf.unit == fname)
+                        .collect();
+                    if !members.is_empty() {
+                        let seed = self.fresh("bits");
+                        self.lines.push(format!(
+                            "let {seed} = unspecified_bits {};",
+                            zero_initializer(self.tds, &fty)?
+                        ));
+                        let mut packed = seed;
+                        for (name, bf) in members {
+                            let value = match inits.iter().find(|(i, _)| *i.val == **name) {
+                                Some((_, e)) => self.rvalue(e)?,
+                                None if bf.pos.boolean => "false".to_string(),
+                                None => zero_initializer(self.tds, &fty)?,
+                            };
+                            packed = bf.pos.put(&packed, &value);
+                        }
+                        vals.push(format!("fld_{fname} = {packed}"));
+                        continue;
+                    }
                     let given = inits.iter().find(|(i, _)| *i.val == *fname);
                     let v = match given {
                         Some((_, e)) => self.init_value(&fty, e)?,

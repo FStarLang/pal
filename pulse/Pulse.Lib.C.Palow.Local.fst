@@ -25,6 +25,16 @@ module SZ = FStar.SizeT
 module T = Pulse.Lib.C.Palow.Target
 module Seq = FStar.Seq
 
+(* A bit-field initializer sets the named bits, not the padding in their
+   storage unit. The caller learns no value for the unit before those puts. *)
+fn unspecified_bits (#a: Type0) (witness: a)
+  requires emp
+  returns r: a
+  ensures emp
+{
+  witness
+}
+
 fn array_stack_alloc (#t: Type0) (t_repr: t -> bytes -> prop) (esize: SZ.t) (ealign: SZ.t { SZ.v ealign > 0 }) (n: SZ.t)
                      (nbytes: SZ.t { SZ.v nbytes == SZ.v esize * SZ.v n })
   requires pure (SZ.v esize % SZ.v ealign == 0 /\ pow2 32 % SZ.v ealign == 0

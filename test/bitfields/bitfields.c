@@ -79,6 +79,18 @@ void write_nibble(struct bits *s, unsigned char v)
     s->nibble = v;
 }
 
+struct bits init_bits(_Bool flag, unsigned char value)
+  _ensures(return.flag == flag && return.nibble == value % 16)
+{
+    return (struct bits){ .flag = flag, .nibble = value };
+}
+
+struct bits init_flag(_Bool flag)
+  _ensures(return.flag == flag && return.nibble == 0)
+{
+    return (struct bits){ .flag = flag };
+}
+
 // A bit-field whose declared type is a typedef (`uint16_t` = unsigned short).
 // The typedef must be resolved to its underlying machine width so the cell
 // still carries the `< pow2 n` refinement.
