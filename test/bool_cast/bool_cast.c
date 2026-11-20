@@ -59,3 +59,9 @@ bool cast_pointer_to_bool(_plain int *x)
 {
     return x;
 }
+
+bool cast_array_to_bool(void)
+    _ensures(return)
+{
+    return (bool)"ok";
+}

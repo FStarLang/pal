@@ -66,6 +66,12 @@ struct point {
 
 struct point origin;
 
+/* Publishing the address does not borrow the struct. */
+struct point *origin_address(void)
+    _ensures(_inline_pulse(pure ($(return) == Global_origin.addr_var_origin))) {
+  return &origin;
+}
+
 void move_x(uint32_t dx) _requires(_live(origin)) _requires(origin.px < 100)
     _requires(dx < 100) _ensures(_live(origin))
     _ensures(origin.px == _old(origin.px) + dx)

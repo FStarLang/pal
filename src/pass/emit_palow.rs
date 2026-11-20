@@ -13790,6 +13790,9 @@ fn witness_holes(n: usize) -> String {
 /// is recovered by walking the body.
 #[derive(Default)]
 struct Touched {
+    /// Only when inferring global permissions: returning `&g` does not
+    /// access the storage of `g`, although the address still escapes.
+    inferring_globals: bool,
     vars: HashSet<String>,
     calls: HashSet<String>,
     /// The functions whose address is taken. Only these need a `__fp`
@@ -14177,6 +14180,15 @@ fn touch_exprs(es: &Exprs, t: &mut Touched) {
 fn touch_stmts(ss: &Stmts, t: &mut Touched) {
     for s in ss.iter() {
         match &s.val {
+            StmtT::Return(Some(e))
+                if t.inferring_globals
+                    && let ExprT::Ref(x) = &strip_vattr(e).val
+                    && let Some(n) = lvalue_name(x)
+                    && !t.aliases.contains_key(&n) =>
+            {
+                t.addressed.insert(n);
+                touch_write(x, t);
+            }
             StmtT::Call(e) | StmtT::Assert(e) | StmtT::Return(Some(e)) => touch_expr(e, t),
             StmtT::Let(x, _, e) => {
                 t.declared.insert(x.val.to_string());
@@ -14682,6 +14694,7 @@ pub fn emit_palow(
             continue;
         };
         let mut t = Touched {
+            inferring_globals: true,
             aliases: {
                 let mut e = base.clone();
                 e.push_fn_decl_args_for_body(&d.decl);
@@ -28571,7 +28584,7 @@ fn convert_scalar(from: &Type, to: &Type, v: &str, ptr_bytes: u64) -> Result<Str
         // A pointer is true exactly when it is not null, which is the one
         // question the model lets a program ask about an address it does not
         // own.
-        (TypeT::Pointer(..) | TypeT::FnPtr { .. }, TypeT::Bool) => {
+        (TypeT::Pointer(..) | TypeT::FnPtr { .. } | TypeT::FixedArray(..), TypeT::Bool) => {
             Ok(format!("(not (is_null {}))", v))
         }
         // An integer converted to a pointer type. The integer carries no
