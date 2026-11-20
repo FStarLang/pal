@@ -18294,8 +18294,8 @@ impl<'a> Body<'a> {
     /// its value -- which is the guarantee the pattern rests on.
     ///
     /// `None` when the path is not of that shape -- no overlay union on it, a
-    /// subscript that is not a constant, a bit-field, a pointer -- and the
-    /// ordinary path then focuses member by member, which needs each arm it
+    /// subscript that is not a constant -- and the ordinary path then
+    /// focuses member by member, which needs each arm it
     /// passes through to be readable.
     fn overlay_leaf(&mut self, e: &Expr, writing: bool) -> Result<Option<Focus>, String> {
         // `q->f`, with `q` an alias of `&r->m`, is `r->m.f`: the bytes of
@@ -18307,8 +18307,30 @@ impl<'a> Body<'a> {
         let Ok(ety) = self.ty_of(&e) else {
             return Ok(None);
         };
-        let Some(pn) = palow_name(self.tds, &ety) else {
-            return Ok(None);
+        // A bit-field has no byte address of its own. Read/modify/write its
+        // layout-selected storage unit, just as a non-overlay field does.
+        // Do not change overlay_path for contracts or address-taking.
+        let unit = if let ExprT::Member(base, f) = &strip_vattr(&e).val {
+            let bty = self.ty_of(base)?;
+            bitfield_at(self.tds, &bty, &f.val).and_then(|bf| {
+                let TypeT::TypeRef(TypeRefKind::Struct(sn)) = &peel(self.tds, &bty).val else {
+                    return None;
+                };
+                let storage = self.tds.structs.get(&*sn.val)?.fields.iter()
+                    .find(|field| *field.name == *bf.unit)?;
+                Some((base.as_ref(), storage.offset, bf.unit_pn(), bf.pos.clone()))
+            })
+        } else {
+            None
+        };
+        let (place, displacement, pn, bits) = match unit {
+            Some((base, offset, pn, pos)) => (base, offset, pn, Some(pos)),
+            None => {
+                let Some(pn) = palow_name(self.tds, &ety) else {
+                    return Ok(None);
+                };
+                (&e, 0, pn, None)
+            }
         };
         // An island is loaded and stored whole, aligned as its union is.
         let island = match &peel(self.tds, &ety).val {
@@ -18327,16 +18349,20 @@ impl<'a> Body<'a> {
             (None, Some(OvLeaf { size, .. })) => (size, size),
             (None, None) => return Ok(None),
         };
-        let root = overlay_path(self.tds, &|x| self.ty_of(x).ok(), &e)?.root;
+        let root = overlay_path(self.tds, &|x| self.ty_of(x).ok(), place)?.root;
         let Some((root, uname, o)) = root else {
             return Ok(None);
         };
+        let o = o + displacement;
         let ui = &self.tds.unions[&uname];
         let known = match &island {
             Some(i) => ui.islands.contains(i),
             None => ui.ints.contains(&pn),
         };
         if !known || o % al != 0 || o + n > ui.size {
+            if bits.is_some() {
+                return Ok(None);
+            }
             return Err(format!(
                 "a {} at byte {} of the overlay union `{}`, which it has no aligned access for",
                 pn, o, uname
@@ -18382,7 +18408,7 @@ impl<'a> Body<'a> {
         Ok(Some(Focus {
             at: format!("{} {}sz", a, o),
             pn: format!("{}_{}", un, pn),
-            bits: None,
+            bits,
             write_fn: format!("{}_{}_write", un, pn),
             unaligned: false,
             open_read: Vec::new(),
