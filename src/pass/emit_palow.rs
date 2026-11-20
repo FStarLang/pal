@@ -20772,6 +20772,7 @@ impl<'a> Body<'a> {
                 && matches!(strip_vattr(&place).val, ExprT::Member(_, _))
                 && self.ty_of(&place).is_ok_and(|ty| {
                     (scalar_shape(self.tds, &ty).is_some()
+                        || matches!(peel(self.tds, &ty).val, TypeT::Pointer(..) | TypeT::SizeT)
                         || (self.union_of(&place).is_some() && self.overlay_of(&place).is_none()))
                         && palow_name(self.tds, &ty).as_deref() == Some(sn)
                 })

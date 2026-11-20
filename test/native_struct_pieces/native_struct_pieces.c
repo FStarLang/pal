@@ -1,6 +1,7 @@
 #include "pal.h"
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 struct trailer {
   int counter;
@@ -21,6 +22,24 @@ struct link {
   _plain struct link *next;
   _plain struct link *prev;
 };
+
+struct indexed_link {
+  struct link node;
+  size_t offset;
+};
+
+bool saved_link_matches(_plain const void *base, _plain struct link *q, size_t i)
+  _ghost_arg(struct link *saved) _ghost_arg(size_t index)
+  _preserves(_inline_pulse(ptr_pts_to ($(base) +! Struct_indexed_link.struct_indexed_link_offsetof_node
+    +! Struct_link.struct_link_offsetof_next) 0.5R $(saved) **
+    size_t_pts_to ($(base) +! Struct_indexed_link.struct_indexed_link_offsetof_offset) 0.5R $(index)))
+  _ensures(_inline_pulse(pure ($(return) <==> ($(saved) == $(q) /\ $(index) == $(i)))))
+{
+  const struct indexed_link *p = base;
+  _assert(_inline_pulse(ptr_pts_to $&(p->node.next) 0.5R $(saved)));
+  _assert(_inline_pulse(size_t_pts_to $&(p->offset) 0.5R $(index)));
+  return p->node.next == q && p->offset == i;
+}
 
 void unlink_front(_plain struct link *head, _plain struct link *replacement)
   _ghost_arg(struct link *first)
