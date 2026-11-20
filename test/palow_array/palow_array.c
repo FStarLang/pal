@@ -8,6 +8,20 @@
 // These cases exist to pin that translation down for reads, for writes, and for
 // the two together.
 
+typedef struct {
+  _arrayptr uint32_t *items;
+} item_span;
+
+uint32_t read_span(_plain item_span s, size_t i)
+  _preserves(_inline_pulse(
+    array_pts_to uint32_t_repr 4 (SizeT.v uint32_t_alignof) $(s.items) 0.5R $`values **
+    pure (SizeT.v $(i) < Seq.length $`values)))
+  _ensures(_inline_pulse(pure (SizeT.v $(i) < Seq.length $`values
+    /\ $(return) == Seq.index $`values (SizeT.v $(i)))))
+{
+  return s.items[i];
+}
+
 uint32_t get(uint32_t a[], size_t i, size_t n)
   _requires(a._length == n && i < n)
   _preserves_value(a._length)

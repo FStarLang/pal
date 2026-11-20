@@ -20257,6 +20257,11 @@ impl<'a> Body<'a> {
                     Some(FieldShape::Array { pn, esize, .. } | FieldShape::Flex { pn, esize }) => {
                         (pn, esize)
                     }
+                    _ if extent(self.tds, &fty) == Some(Extent::Array) => {
+                        // A shallow container does not grant ownership of the
+                        // target. The usual array access checks the separate loan.
+                        return self.pointer_array_place(e);
+                    }
                     _ => {
                         return Err(format!(
                             "a subscript of a field of type {}",
