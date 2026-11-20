@@ -1619,6 +1619,8 @@ struct Typedefs<'a> {
     /// `double` arm has no `_pts_to` here, but its size is still the size
     /// clang would compile, and a contract may say so.
     aggregate_layouts: HashMap<String, (u64, u64)>,
+    /// Layout-only fixed tails, not fields that C aggregate initialization writes.
+    sized_flex_tails: HashSet<String>,
     /// Addressable members of structs without a whole-object model.
     layout_fields: HashMap<String, HashMap<String, u64>>,
     /// Structs declared `_plain`. The annotation says the struct's ownership
@@ -1669,6 +1671,13 @@ struct Typedefs<'a> {
 }
 
 impl<'a> Typedefs<'a> {
+    fn check_literal_layout(&self, name: &str) -> Result<(), String> {
+        if self.sized_flex_tails.contains(name) {
+            return Err(format!("aggregate initialization does not initialize the flexible tail of {name}"));
+        }
+        Ok(())
+    }
+
     /// The size and alignment clang reports for an aggregate, whether or not
     /// Palow models it.
     fn aggregate_layout(&self, key: &str) -> Option<(u64, u64)> {
@@ -1693,6 +1702,7 @@ impl<'a> Typedefs<'a> {
             structs: HashMap::new(),
             unions: HashMap::new(),
             aggregate_layouts: HashMap::new(),
+            sized_flex_tails: HashSet::new(),
             layout_fields: HashMap::new(),
             plain_structs: tu
                 .decls
@@ -5459,6 +5469,7 @@ impl<'a> Spec<'a> {
                 let Some(si) = self.tds.structs.get(&*n.val) else {
                     return Err(format!("an initialiser for struct {} in a contract", n.val));
                 };
+                self.tds.check_literal_layout(&n.val)?;
                 if inits
                     .iter()
                     .any(|(i, _)| !si.fields.iter().any(|f| *i.val == *f.name))
@@ -9195,6 +9206,9 @@ fn sized_flex_members(
             .collect();
         let bitfields = si.bitfields.clone();
         let views = flex_fill_views(si, &n.val, &name, k);
+        if k != 0 {
+            tds.sized_flex_tails.insert(name.clone());
+        }
         tds.aggregate_layouts
             .insert(format!("struct {}", name), (ssize, align));
         let mut chunk = finish_struct(
@@ -13327,6 +13341,7 @@ fn const_expr(tds: &Typedefs, ty: &Type, e: &Expr) -> Option<String> {
             let TypeT::TypeRef(TypeRefKind::Struct(tn)) = &target.val else {
                 return None;
             };
+            tds.check_literal_layout(&tn.val).ok()?;
             if *tn.val != *n.val {
                 return None;
             }
@@ -22213,6 +22228,7 @@ impl<'a> Body<'a> {
                 let Some(si) = self.tds.structs.get(&*n.val) else {
                     return Err(format!("an initialiser for struct {}", n.val));
                 };
+                self.tds.check_literal_layout(&n.val)?;
                 if let Some((i, _)) = inits.iter().find(|(i, _)| {
                     !si.fields.iter().any(|f| *i.val == *f.name)
                         && !si.bitfields.iter().any(|(name, _)| *i.val == **name)
@@ -26934,6 +26950,7 @@ impl<'a> Body<'a> {
             }
             ExprT::StructInit(n, fs) => {
                 let si = &self.tds.structs[&*n.val];
+                self.tds.check_literal_layout(&n.val)?;
                 if !si.bitfields.is_empty()
                     || fs
                         .iter()
@@ -27006,6 +27023,9 @@ impl<'a> Body<'a> {
             let has_overlay = b.ty_of(rhs).is_ok_and(|t| holds_overlay(b.tds, &t));
             match &strip_vattr(rhs).val {
                 ExprT::StructInit(n, fs) if in_arm || has_overlay => {
+                    if b.tds.check_literal_layout(&n.val).is_err() {
+                        return false;
+                    }
                     let Some(si) = b.tds.structs.get(&*n.val) else {
                         return false;
                     };
@@ -29375,6 +29395,7 @@ fn zero_initializer(tds: &Typedefs, ty: &Type) -> Result<String, String> {
         let Some(si) = tds.structs.get(&*name.val) else {
             return Err(format!("a zeroed struct {}", name.val));
         };
+        tds.check_literal_layout(&name.val)?;
         let mut vals = Vec::new();
         for f in &si.fields {
             if matches!(&f.shape, FieldShape::Flex { .. }) {
