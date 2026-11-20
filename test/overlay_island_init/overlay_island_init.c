@@ -26,6 +26,19 @@ word reset_group(struct group *p)
     return p->entries[1].saved;
 }
 
+void fresh_group(_plain struct group *p)
+    _requires(_inline_pulse(struct_group_pts_to_uninit $(p)))
+    _ensures(_inline_pulse(exists* g. struct_group_pts_to $(p) 1.0R g **
+        pure (g.fld_tag == 9ul
+              /\ (FStar.Seq.index g.fld_entries 0).fld_count == 3ul
+              /\ Union_word.union_word_repr (Union_word.Union_word_bits 13UL)
+                   (FStar.Seq.index g.fld_entries 0).fld_saved
+              /\ (FStar.Seq.index g.fld_entries 1).fld_count == 0ul)))
+{
+    _ghost_stmt($unfold-uninit(struct group) $(p));
+    *p = (struct group){ .tag = 9, .entries = {{ .count = 3, .saved.bits = 13 }} };
+}
+
 word replace(union view *p, int32_t lo)
     _ensures(_inline_pulse(pure (Union_word.union_word_repr
         (Union_word.Union_word__unnamed0 { fld_lo = $(lo); fld_hi = 0ul }) $(p->entry.saved))))

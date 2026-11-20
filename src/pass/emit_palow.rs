@@ -26659,6 +26659,59 @@ impl<'a> Body<'a> {
             return self.stmt(&s2);
         }
         if let StmtT::Assign(lhs, rhs) = &s.val {
+            if self.literal_overlay_array(lhs, rhs) {
+                self.check_alias_snaps(s)?;
+                self.union_values.clear();
+                self.clear_fn_notes(lhs);
+                let ap = self.whole_array_place(lhs)?;
+                let ty = self.ty_of(lhs)?;
+                let TypeT::FixedArray(elem, n) = &peel(self.tds, &ty).val else {
+                    unreachable!()
+                };
+                let ExprT::ArrayInit { elems, .. } = &strip_vattr(rhs).val else {
+                    unreachable!()
+                };
+                let repr = if ap.maybe {
+                    format!("(maybe_repr {}_repr (SizeT.v {}))", ap.pn, ap.esize)
+                } else {
+                    format!("{}_repr", ap.pn)
+                };
+                for i in 0..*n {
+                    let v = elems
+                        .get(i as usize)
+                        .cloned()
+                        .or_else(|| zero_expr(self.tds, elem, &rhs.loc))
+                        .ok_or("an array element without a C zero initializer")?;
+                    let off = format!("({} `SizeT.mul` {i}sz)", ap.esize);
+                    let at = format!("({} +! {off})", ap.addr);
+                    let args = format!(
+                        "{repr} {} {} {}_alignof {i}sz {off}",
+                        ap.addr, ap.esize, ap.pn
+                    );
+                    self.lines.push(format!("array_focus {args};"));
+                    if ap.maybe {
+                        self.lines.push(format!(
+                            "elem_maybe_reveal {}_repr {} {at};",
+                            ap.pn, ap.esize
+                        ));
+                        self.lines.push(format!("{}_claim_uninit {at};", ap.pn));
+                    } else {
+                        self.lines.push(format!("{}_of_elem {at};", ap.pn));
+                        self.lines.push(format!("{}_forget {at};", ap.pn));
+                    }
+                    self.write_literal_storage(elem, &v, &at)?;
+                    self.lines.push(format!("{}_to_elem {at};", ap.pn));
+                    if ap.maybe {
+                        self.lines
+                            .push(format!("elem_maybe_put {}_repr {} {at};", ap.pn, ap.esize));
+                    }
+                    self.lines.push(format!("array_unfocus {args};"));
+                }
+                self.lines.extend(ap.close_write);
+                self.lines.append(&mut self.pending_close);
+                self.close_own();
+                return Ok(());
+            }
             if self.atomic_literal_field(lhs, rhs) {
                 self.check_alias_snaps(s)?;
                 self.union_values.clear();
@@ -26737,7 +26790,7 @@ impl<'a> Body<'a> {
                 let StmtT::Assign(lhs, rhs) = &part.val else {
                     unreachable!()
                 };
-                if self.atomic_literal_field(lhs, rhs) {
+                if self.atomic_literal_field(lhs, rhs) || self.literal_overlay_array(lhs, rhs) {
                     continue;
                 }
                 let ty = self
@@ -26854,25 +26907,52 @@ impl<'a> Body<'a> {
         }
     }
 
+    fn storage_literal(e: &Expr) -> bool {
+        match &strip_vattr(e).val {
+            ExprT::StructInit(_, fs) => fs.iter().all(|(_, v)| Self::storage_literal(v)),
+            ExprT::UnionInit(_, _, v) | ExprT::Cast(v, _) => Self::storage_literal(v),
+            ExprT::ArrayInit { elems, .. } => elems.iter().all(|v| Self::storage_literal(v)),
+            ExprT::IntLit(..) | ExprT::BoolLit(_) => true,
+            _ => false,
+        }
+    }
+
+    fn literal_overlay_array(&self, lhs: &Expr, rhs: &Rc<Expr>) -> bool {
+        let ExprT::Member(base, _) = &strip_vattr(lhs).val else {
+            return false;
+        };
+        let ExprT::ArrayInit { elems, .. } = &strip_vattr(rhs).val else {
+            return false;
+        };
+        let Ok(ty) = self.ty_of(lhs) else {
+            return false;
+        };
+        let TypeT::FixedArray(elem, n) = &peel(self.tds, &ty).val else {
+            return false;
+        };
+        let Some(z) = zero_expr(self.tds, elem, &rhs.loc) else {
+            return false;
+        };
+        self.struct_of(base).is_ok()
+            && holds_overlay(self.tds, elem)
+            && elems.len() as u64 <= *n
+            && Self::storage_literal(rhs)
+            && elems
+                .iter()
+                .chain(std::iter::once(&z))
+                .all(|v| self.clone().write_literal_storage(elem, v, "a").is_ok())
+    }
+
     // Keep a constant tagged literal together: its arm need not have been
     // live before the assignment. Dynamic inputs still need the snapshot pass.
     fn atomic_literal_field(&self, lhs: &Expr, rhs: &Rc<Expr>) -> bool {
-        fn literal(e: &Expr) -> bool {
-            match &strip_vattr(e).val {
-                ExprT::StructInit(_, fs) => fs.iter().all(|(_, v)| literal(v)),
-                ExprT::UnionInit(_, _, v) | ExprT::Cast(v, _) => literal(v),
-                ExprT::ArrayInit { elems, .. } => elems.iter().all(|v| literal(v)),
-                ExprT::IntLit(..) | ExprT::BoolLit(_) => true,
-                _ => false,
-            }
-        }
         matches!(&strip_vattr(lhs).val, ExprT::Member(base, _) if self.struct_of(base).is_ok())
             && matches!(
                 &strip_vattr(rhs).val,
                 ExprT::UnionInit(..) | ExprT::StructInit(..)
             )
             && self.ty_of(lhs).is_ok_and(|t| holds_overlay(self.tds, &t))
-            && literal(rhs)
+            && Self::storage_literal(rhs)
             && self
                 .ty_of(lhs)
                 .is_ok_and(|t| self.clone().write_literal_storage(&t, rhs, "a").is_ok())
@@ -27014,7 +27094,7 @@ impl<'a> Body<'a> {
             in_arm: bool,
             out: &mut Vec<Rc<Stmt>>,
         ) -> bool {
-            if b.atomic_literal_field(lhs, rhs) {
+            if b.atomic_literal_field(lhs, rhs) || b.literal_overlay_array(lhs, rhs) {
                 out.push(StmtT::Assign(lhs.clone(), rhs.clone()).with_loc(loc.clone()));
                 return true;
             }
