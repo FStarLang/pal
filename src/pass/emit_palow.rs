@@ -32353,6 +32353,39 @@ fn emit_body(
         returned_arg(&env, g)
     });
     let bases = base_copies(&defn.body, &arrays.keys().cloned().collect());
+    // A stable local loaded from a split node's self-link denotes another
+    // node accessed in pieces. Keep the actual pointer load: it is not an
+    // address alias and the source link can subsequently change.
+    let mut pieces = sig.pieces.clone();
+    if !pieces.is_empty() {
+        let mut touched = Touched::default();
+        touch_stmts(&defn.body, &mut touched);
+        for st in defn.body.iter() {
+            let (name, rhs, writes) = match &st.val {
+                StmtT::Let(n, _, rhs) => (n.val.to_string(), rhs, 0),
+                StmtT::Assign(lhs, rhs) => match lvalue_name(lhs) {
+                    Some(n) => (n, rhs, 1),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            if touched.declared.contains(&name)
+                && touched.rebound.get(&name).copied().unwrap_or(0) == writes
+                && !touched.addressed.contains(&name)
+                && let ExprT::Member(base, _) = &strip_vattr(rhs).val
+                && let ExprT::Deref(p) = &strip_vattr(base).val
+                && let Some(src) = lvalue_name(p)
+                && sig.pieces.contains(&src)
+                && let Ok(link) = env.infer_expr(rhs)
+                && let Some(target) = pointee(tds, peel(tds, &link.to_rc()))
+                    .and_then(|t| palow_name(tds, t))
+                && let Ok(node) = env.infer_expr(base)
+                && palow_name(tds, &node.to_rc()).as_ref() == Some(&target)
+            {
+                pieces.insert(name);
+            }
+        }
+    }
     let mut b = Body {
         tds,
         ghost_args: &sig.ghost_args,
@@ -32407,7 +32440,7 @@ fn emit_body(
         granted: &sig.granted,
         bytes_only: &sig.bytes_only,
         spliced_own: sig.spliced_own,
-        pieces: &sig.pieces,
+        pieces: &pieces,
         piece_types: &sig.piece_types,
         ghost_piece_types: ghost_stmt_pieces(&defn.body),
         asserted_pieces: HashMap::new(),

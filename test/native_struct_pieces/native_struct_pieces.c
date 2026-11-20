@@ -17,6 +17,23 @@ struct envelope {
   struct packet core;
 };
 
+struct link {
+  _plain struct link *next;
+  _plain struct link *prev;
+};
+
+void unlink_front(_plain struct link *head, _plain struct link *replacement)
+  _ghost_arg(struct link *first)
+  _requires(_inline_pulse(ptr_pts_to ($(head) +! Struct_link.struct_link_offsetof_next) 1.0R $(first) **
+    ptr_pts_to ($(first) +! Struct_link.struct_link_offsetof_prev) 1.0R $(head)))
+  _ensures(_inline_pulse(ptr_pts_to ($(head) +! Struct_link.struct_link_offsetof_next) 1.0R $(replacement) **
+    ptr_pts_to ($(first) +! Struct_link.struct_link_offsetof_prev) 1.0R $(replacement)))
+{
+  struct link *saved = head->next;
+  head->next = replacement;
+  saved->prev = replacement;
+}
+
 int read_nested_offset(_plain const struct envelope *p)
   _ghost_arg(int x)
   _requires(_inline_pulse(int32_t_pts_to
