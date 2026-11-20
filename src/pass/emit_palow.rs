@@ -26851,9 +26851,10 @@ impl<'a> Body<'a> {
             }
         }
         matches!(&strip_vattr(lhs).val, ExprT::Member(base, _) if self.struct_of(base).is_ok())
-            && (matches!(&strip_vattr(rhs).val, ExprT::UnionInit(n, _, _) if !is_overlay(self.tds, &n.val)
-                && self.ty_of(rhs).is_ok_and(|t| holds_overlay(self.tds, &t)))
-                || self.zero_byte_arm_size(rhs).is_some())
+            && matches!(
+                &strip_vattr(rhs).val,
+                ExprT::UnionInit(..) | ExprT::StructInit(..)
+            )
             && self.ty_of(lhs).is_ok_and(|t| holds_overlay(self.tds, &t))
             && literal(rhs)
             && self
@@ -26888,6 +26889,14 @@ impl<'a> Body<'a> {
         at: &str,
     ) -> Result<(), String> {
         let pn = palow_name(self.tds, ty).ok_or("an initializer without aligned storage")?;
+        if let ExprT::UnionInit(n, _, _) = &strip_vattr(rhs).val
+            && pn == format!("union_{}", island_name(&n.val))
+        {
+            let value = self.rvalue(rhs)?;
+            self.lines.push(format!("{pn}_of_uninit {at};"));
+            self.lines.push(format!("{pn}_write {at} {value};"));
+            return Ok(());
+        }
         if let Some(size) = self.zero_byte_arm_size(rhs) {
             self.lines.extend([
                 format!("unfold {pn}_pts_to_uninit {at};"),
@@ -26910,10 +26919,12 @@ impl<'a> Body<'a> {
                     .find(|f| f.name == *arm.val)
                     .ok_or("an unknown union initializer member")?;
                 let ft = field.ty.clone();
+                if !matches!(field.shape, FieldShape::One { .. }) {
+                    return Err("a union initializer without a typed member switch".into());
+                }
                 if u.overlay {
-                    if field.size != u.size {
-                        return Err("a short whole-member initializer inside a tagged arm".into());
-                    }
+                    // Start with unspecified bytes, even on replacement. Bytes
+                    // outside a short arm do not retain their old values.
                     self.lines.push(format!("{pn}_of_uninit {at};"));
                 }
                 let switch = if u.overlay { "switch" } else { "switch_uninit" };
@@ -26940,16 +26951,30 @@ impl<'a> Body<'a> {
                         .map(|(_, v)| v.clone())
                         .or_else(|| zero_expr(self.tds, &f.ty, &rhs.loc))
                         .ok_or("a field without a C zero initializer")?;
+                    let dest = format!("({at} +! {pn}_offsetof_{})", f.name);
+                    if let FieldShape::Array { .. } = &f.shape
+                        && let TypeT::FixedArray(elem, _) = &peel(self.tds, &f.ty).val
+                        && matches!(peel(self.tds, elem).val, TypeT::Int { .. })
+                        && let ExprT::ArrayInit { elems, .. } = &strip_vattr(&v).val
+                    {
+                        let vs = if elems.is_empty() {
+                            zero_initializer(self.tds, &f.ty)?
+                        } else {
+                            self.init_value(&f.ty, &v)?
+                        };
+                        self.lines.push(format!(
+                            "Struct_{}.{} {dest} {vs};",
+                            n.val,
+                            f.shape.write_fn()
+                        ));
+                        continue;
+                    }
                     if !matches!(f.shape, FieldShape::One { .. })
                         || f.shape.pn() != palow_name(self.tds, &f.ty).unwrap_or_default()
                     {
                         return Err("a non-scalar storage representation in a nested overlay aggregate initializer".into());
                     }
-                    self.write_literal_storage(
-                        &f.ty,
-                        &v,
-                        &format!("({at} +! {pn}_offsetof_{})", f.name),
-                    )?;
+                    self.write_literal_storage(&f.ty, &v, &dest)?;
                 }
                 self.lines.push(format!("{pn}_gather {at};"));
             }
@@ -32510,6 +32535,22 @@ fn zero_expr(tds: &Typedefs, ty: &Rc<Type>, loc: &Rc<SourceInfo>) -> Option<Rc<E
             ExprT::StructInit(n.clone(), Vec::new()).with_loc(loc.clone())
         }
         TypeT::TypeRef(TypeRefKind::Union(n)) => {
+            // An island is storage for a C tagged union, not the C type
+            // whose first member supplies an omitted initializer.
+            if let Some(original) = n.val.strip_suffix("__island")
+                && tds.unions.get(original).is_some_and(|u| !u.overlay)
+                && tds
+                    .unions
+                    .get(&*n.val)
+                    .is_some_and(|u| u.overlay && u.members.is_empty())
+            {
+                let name = Rc::<str>::from(original).with_loc(n.loc.clone());
+                return zero_expr(
+                    tds,
+                    &TypeT::TypeRef(TypeRefKind::Union(name)).with_loc(loc.clone()),
+                    loc,
+                );
+            }
             let m = tds.unions.get(&*n.val)?.members.first()?;
             let z = zero_expr(tds, &m.ty, loc)?;
             let arm = Rc::<str>::from(m.name.as_str()).with_loc(loc.clone());

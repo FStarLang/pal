@@ -76,3 +76,24 @@ uint32_t clear_payload(struct payload_field *p)
     _assert(p->u.bytes[15] == 0);
     return p->u.words[1];
 }
+
+union _overlay links { struct pair first; uint64_t wide; };
+struct embedded_links { uint32_t id; union links links; unsigned char reserved[4]; };
+struct fresh_links { struct embedded_links embedded; uint32_t end; };
+
+uint32_t initialize_short_arm(_out struct fresh_links *p)
+{
+    *p = (struct fresh_links){ .embedded.links.first = { .hi = 7 } };
+    _assert(p->embedded.links.first.lo == 0);
+    _assert(p->embedded.reserved[3] == 0);
+    _assert(p->end == 0);
+    return p->embedded.links.first.hi;
+}
+
+void initialize_array_member(_out struct fresh_links *p)
+{
+    *p = (struct fresh_links){ .embedded = { .reserved = {1, 2, (unsigned char)259}, .id = 17 } };
+    _assert(p->embedded.id == 17);
+    _assert(p->embedded.reserved[2] == 3);
+    _assert(p->embedded.reserved[3] == 0);
+}
