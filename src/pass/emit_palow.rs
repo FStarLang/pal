@@ -8395,8 +8395,11 @@ fn emit_fn(
         );
     }
     bytes_only.extend(decl.args.iter().filter_map(|a| {
-        let pt = pointee(tds, &a.ty)?;
-        is_plain(tds, pt).then(|| a.name.as_ref().map(|n| n.val.to_string()))?
+        let shallow = match pointee(tds, &a.ty) {
+            Some(pt) => is_plain(tds, pt),
+            None => is_plain(tds, &a.ty) || is_plain_chain(&a.ty),
+        };
+        shallow.then(|| a.name.as_ref().map(|n| n.val.to_string()))?
     }));
 
     let trivial_pre = perms.is_empty()
@@ -17303,7 +17306,7 @@ impl<'a> Body<'a> {
                     fields: Vec::new(),
                 })
             }
-            ExprT::Var(v) if self.params.contains(&*v.val.to_string()) => Some(OwnPath {
+            ExprT::Var(v) if self.params.contains(&*v.val) && !self.bytes_only.contains(&*v.val) => Some(OwnPath {
                 root: Rc::new(e.clone()),
                 root_sn: sn,
                 union: None,
