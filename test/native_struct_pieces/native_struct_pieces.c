@@ -253,3 +253,71 @@ int read_message_after_handback(_plain struct message message)
     Struct_envelope.struct_envelope_pts_to $(message.owner) 0.5R $(saved)));
   return message.owner->tag;
 }
+
+int read_loaned_leaf(_plain struct message message)
+  _ghost_arg(int x)
+  _preserves(_inline_pulse(int32_t_pts_to
+    (($(message.owner) +! Struct_envelope.struct_envelope_offsetof_core)
+      +! Struct_packet.struct_packet_offsetof_header) 0.5R $(x)))
+  _ensures(return == x)
+{
+  const struct packet *p = &message.owner->core;
+  _assert(_inline_pulse(int32_t_pts_to $&(p->header) 0.5R $(x)));
+  return p->header;
+}
+
+struct mutable_message {
+  _plain struct envelope *owner;
+};
+
+union reply {
+  int code;
+  unsigned word;
+};
+
+struct response {
+  int prefix;
+  union reply result;
+};
+
+union response_storage {
+  struct response message;
+  unsigned char buffer[32];
+};
+
+int read_loaned_response(_plain const union response_storage *s)
+  _ghost_arg(struct response saved)
+  _preserves(_inline_pulse(Struct_response.struct_response_pts_to $(s) 0.5R $(saved)))
+  _requires(_inline_pulse(pure (Union_reply.Union_reply_code? $(saved).Struct_response.fld_result)))
+  _ensures(_inline_pulse(pure ($(saved).Struct_response.fld_result == Union_reply.Union_reply_code $(return))))
+{
+  _assert(_inline_pulse(Struct_response.struct_response_pts_to $&(s->message) 0.5R $(saved)));
+  return s->message.result.code;
+}
+
+union reply read_reply(_plain const struct response *p)
+  _ghost_arg(int code)
+  _preserves(_inline_pulse(Union_reply.union_reply_pts_to
+    ($(p) +! Struct_response.struct_response_offsetof_result) 0.5R (Union_reply.Union_reply_code $(code))))
+  _ensures(_inline_pulse(pure ($(return) == Union_reply.Union_reply_code $(code))))
+{
+  _assert(_inline_pulse(Union_reply.union_reply_pts_to $&(p->result) 0.5R (Union_reply.Union_reply_code $(code))));
+  return p->result;
+}
+
+struct trailer replace_loaned_trailer(_plain struct mutable_message message, struct trailer next)
+  _ghost_arg(struct trailer before)
+  _requires(_inline_pulse(Struct_trailer.struct_trailer_pts_to
+    (($(message.owner) +! Struct_envelope.struct_envelope_offsetof_core)
+      +! Struct_packet.struct_packet_offsetof_trailer) 1.0R $(before)))
+  _ensures(_inline_pulse(Struct_trailer.struct_trailer_pts_to
+    (($(message.owner) +! Struct_envelope.struct_envelope_offsetof_core)
+      +! Struct_packet.struct_packet_offsetof_trailer) 1.0R $(next)))
+  _ensures(return.counter == before.counter)
+{
+  _assert(_inline_pulse(Struct_trailer.struct_trailer_pts_to
+    $&(message.owner->core.trailer) 1.0R $(before)));
+  struct trailer old = message.owner->core.trailer;
+  message.owner->core.trailer = next;
+  return old;
+}

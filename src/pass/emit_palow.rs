@@ -1619,6 +1619,8 @@ struct Typedefs<'a> {
     /// `double` arm has no `_pts_to` here, but its size is still the size
     /// clang would compile, and a contract may say so.
     aggregate_layouts: HashMap<String, (u64, u64)>,
+    /// Addressable members of structs without a whole-object model.
+    layout_fields: HashMap<String, HashMap<String, u64>>,
     /// Structs declared `_plain`. The annotation says the struct's ownership
     /// is the author's business and not the generator's, so no `_own`
     /// predicate is made for one: whatever it owns is written by hand in a
@@ -1673,6 +1675,11 @@ impl<'a> Typedefs<'a> {
         self.aggregate_layouts.get(key).copied()
     }
 
+    fn layout_offset(&self, name: &str, field: &str) -> Option<(String, u64)> {
+        let off = *self.layout_fields.get(name)?.get(field)?;
+        Some((format!("Struct_{name}.struct_{name}_offsetof_{field}"), off))
+    }
+
     fn new(tu: &'a TranslationUnit) -> Self {
         let mut m = HashMap::new();
         for decl in &tu.decls {
@@ -1686,6 +1693,7 @@ impl<'a> Typedefs<'a> {
             structs: HashMap::new(),
             unions: HashMap::new(),
             aggregate_layouts: HashMap::new(),
+            layout_fields: HashMap::new(),
             plain_structs: tu
                 .decls
                 .iter()
@@ -3006,6 +3014,8 @@ struct FnSurface {
     /// whose guard also encloses a refinement is not here -- the payload would
     /// have to restate it -- so a body still cannot dereference one.
     null_payload: HashMap<String, String>,
+    /// Entry payloads of read-only nullable parameters, in declaration order.
+    fixed_nullable: Vec<(String, String)>,
     /// Nullable single-object outputs, whose guarded payload changes from
     /// uninitialised storage to a value. The type also supplies the arbitrary
     /// ghost value used on a null path, where either payload is empty.
@@ -5032,6 +5042,9 @@ impl<'a> Spec<'a> {
                         describe(self.tds.resolve(ty))
                     ));
                 };
+                if let Some((offset, _)) = self.tds.layout_offset(&sname.val, &field.val) {
+                    return Ok(sub_offset(self.value(inner, w)?, &offset));
+                }
                 if !self.tds.structs.contains_key(&*sname.val) {
                     return Err(format!(
                         "`_container_of` of {}",
@@ -5835,7 +5848,10 @@ fn names_own_predicate(text: &str) -> bool {
     text.match_indices("_own").any(|(i, _)| {
         let rest = &text[i + "_own".len()..];
         rest.starts_with("ed")
-            || !rest.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !rest
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
     })
 }
 
@@ -5865,6 +5881,32 @@ fn is_slprop_clause(tds: &Typedefs, e: &Rc<Expr>) -> bool {
     is_own_refine(tds, e)
 }
 
+// At a statement join C uses && for both pure and spatial clauses. Keep
+// pure subtrees together (their left side may guard the right side).
+fn frame_clauses(tds: &Typedefs, clauses: &Exprs) -> Exprs {
+    fn split(tds: &Typedefs, e: &Rc<Expr>, out: &mut Exprs) {
+        match &e.val {
+            ExprT::BinOp(BinOp::LogAnd, l, r) if refine_states_own(tds, e) => {
+                split(tds, l, out);
+                split(tds, r, out);
+            }
+            ExprT::Cast(inner, to)
+                if matches!(tds.resolve(to).val, TypeT::Bool | TypeT::SLProp)
+                    && matches!(inner.val, ExprT::BinOp(BinOp::LogAnd, ..))
+                    && refine_states_own(tds, inner) =>
+            {
+                split(tds, inner, out);
+            }
+            _ => out.push(e.clone()),
+        }
+    }
+    let mut out = Vec::new();
+    for e in clauses {
+        split(tds, e, &mut out);
+    }
+    out
+}
+
 /// Build the Pulse declaration for one C function, or explain why we cannot.
 fn emit_fn(
     tds: &Typedefs,
@@ -5884,14 +5926,31 @@ fn emit_fn(
     // an address to a *flat* spec, so every one of them has to become a
     // component of the explicit witness the caller passes.
     let mut wits: Vec<(String, String, bool)> = Vec::new();
-    // Whether the author's `_ensures` states ownership rather than only
-    // propositions. Asked here, ahead of the parameter loop, because it
-    // changes what a parameter mode is allowed to promise back.
-    // A clause that is only a `pure (...)` states a fact, not ownership.
-    let ens_own = decl
-        .ensures
-        .iter()
-        .any(|e| is_slprop_clause(tds, e) && !is_pure_only_clause(tds, e));
+    // A spatial postcondition can replace the default `_out` ownership
+    // for the parameters it names, not for unrelated outputs.
+    let mut explicit_outputs = HashSet::new();
+    for e in &decl.ensures {
+        if is_slprop_clause(tds, e) && !is_pure_only_clause(tds, e) {
+            let mut touched = Touched::default();
+            touch_expr(e, &mut touched);
+            explicit_outputs.extend(touched.vars);
+            spliced_reads(e, &mut explicit_outputs);
+            spliced_names(e, &mut explicit_outputs);
+            if let Some(code) = slprop_refine(tds, e) {
+                for tok in &code.tokens {
+                    if let InlinePulseToken::Verbatim(t) = tok {
+                        explicit_outputs.extend(
+                            t.text
+                                .val
+                                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                                .filter_map(|s| s.strip_prefix("var_"))
+                                .map(str::to_owned),
+                        );
+                    }
+                }
+            }
+        }
+    }
     let mut req: Vec<String> = Vec::new();
     // Hand-written ownership the contract hands back, which unlike the
     // generated kind binds no existential of its own -- the author names
@@ -5980,6 +6039,7 @@ fn emit_fn(
     // Parameters whose ownership the contract puts behind `unless_null`.
     let mut guarded: HashSet<String> = HashSet::new();
     let mut null_payload: HashMap<String, String> = HashMap::new();
+    let mut fixed_nullable = Vec::new();
     let mut null_outs: HashMap<String, Rc<Type>> = HashMap::new();
     // These values are available only inside the nullness guard. Keep them
     // separate from the map that permits ordinary specification dereferences.
@@ -6265,9 +6325,13 @@ fn emit_fn(
         // two are separate predicates here, so the contract states both. A
         // struct with no owned pointer field has nothing to add and gets
         // nothing, which is why this is an option rather than a conjunct.
-        let own_info: Option<(String, String)> = (extent(tds, &arg.ty) == Some(Extent::One))
-            .then(|| own_for(pt))
-            .flatten();
+        // A pointer to a `_plain` value owns that value's storage, not
+        // what its fields point at. `_plain` on the pointer itself is
+        // different: it gives no storage at all.
+        let own_info: Option<(String, String)> = (extent(tds, &arg.ty) == Some(Extent::One)
+            && !is_plain(tds, pt))
+        .then(|| own_for(pt))
+        .flatten();
         let oname = format!("own_{}", base);
 
         // A nullable struct pointer owns what its pointer fields reach on the
@@ -6391,7 +6455,7 @@ fn emit_fn(
                             own: None,
                         });
                     }
-                    if !ens_own {
+                    if !explicit_outputs.contains(&base) {
                         fresh.push((
                             format!("{}'", vname),
                             vty,
@@ -6411,6 +6475,13 @@ fn emit_fn(
                     ghosts.push(format!("(#{}: erased ({}))", vname, vty));
                     wits.push((vname.clone(), vty.clone(), true));
                     let v = format!("(reveal {})", vname);
+                    if null_payload.contains_key(&base) {
+                        let mut payload = raw_pts_to(&perm, &v);
+                        if let Some((sn, _)) = &own_info {
+                            payload += &format!(" ** {}_own {} {} (reveal {})", sn, v, perm, oname);
+                        }
+                        fixed_nullable.push((base.clone(), payload));
+                    }
                     if let Some((_, osty)) = &own_info {
                         ghosts.push(format!("(#{}: erased ({}))", oname, osty));
                         wits.push((oname.clone(), osty.clone(), true));
@@ -6488,7 +6559,7 @@ fn emit_fn(
                 // unless the author wrote an `_ensures` that states ownership
                 // itself -- then the object has been handed somewhere, and
                 // promising it back as well would be promising it twice.
-                if !ens_own {
+                if !explicit_outputs.contains(&base) {
                     fresh.push((
                         format!("{}'", vname),
                         vty,
@@ -8312,6 +8383,10 @@ fn emit_fn(
                 .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string())),
         );
     }
+    bytes_only.extend(decl.args.iter().filter_map(|a| {
+        let pt = pointee(tds, &a.ty)?;
+        is_plain(tds, pt).then(|| a.name.as_ref().map(|n| n.val.to_string()))?
+    }));
 
     let trivial_pre = perms.is_empty()
         && ghosts.is_empty()
@@ -8334,6 +8409,7 @@ fn emit_fn(
         outs,
         guarded,
         null_payload,
+        fixed_nullable,
         null_outs,
         granted,
         bytes_only,
@@ -8840,7 +8916,7 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
             i = j;
         }
         let origin = origin_of(decl);
-        let chunk = finish_struct(
+        let mut chunk = finish_struct(
             tds,
             env,
             &reach,
@@ -8851,6 +8927,20 @@ fn collect_structs(tu: &TranslationUnit, tds: &mut Typedefs, env: &Env) -> Vec<C
             if ok { None } else { Some(bad) },
             origin,
         );
+        if !tds.structs.contains_key(&name) {
+            let offsets = tds.layout_fields.entry(name.clone()).or_default();
+            for f in &sd.fields {
+                let field = f.val.name().val.to_string();
+                if f.val.bit_width().is_none()
+                    && let Some(off) = layouts.offset_of(&key, &field)
+                {
+                    offsets.insert(field.clone(), off);
+                    chunk.code.push_str(&format!(
+                        "let struct_{}_offsetof_{} : SizeT.t = {}sz\n", name, field, off
+                    ));
+                }
+            }
+        }
         code.push(chunk);
     }
     code
@@ -10442,15 +10532,27 @@ fn emit_overlay_union(tds: &Typedefs, name: &str) -> String {
             fty: mt,
             ok,
         } = ov_leaf(tds, t).unwrap();
+        let read_offset = if t == "ptr" {
+            format!("SizeT.t {{ SizeT.v o + {n} <= {n_all} }}")
+        } else {
+            "SizeT.t".to_string()
+        };
+        let address_rewrite = if t == "ptr" {
+            format!(
+                " **\n           rewrites_to x (ptr_of_bytes (slice u (SizeT.v o) (SizeT.v o + {n})))"
+            )
+        } else {
+            String::new()
+        };
         c += &format!(
             "(* A {t} at byte `o`, through whichever members name it. *)\n\
-             fn {un}_{t}_read (a: ptr) (o: SizeT.t) (#p: perm) (#u: erased {un})\n\
+             fn {un}_{t}_read (a: ptr) (o: {read_offset}) (#p: perm) (#u: erased {un})\n\
              \x20 preserves {un}_pts_to a p u\n\
              \x20 requires pure (SizeT.v o + {n} <= {n_all} /\\ SizeT.v o % {n} == 0 /\\\n\
              \x20                {ok} (slice u (SizeT.v o) (SizeT.v o + {n})))\n\
              \x20 returns  x : {mt}\n\
              \x20 ensures  pure (SizeT.v o + {n} <= {n_all} /\\\n\
-             \x20                x == {t}_of_bytes (slice u (SizeT.v o) (SizeT.v o + {n})))\n\
+             \x20                x == {t}_of_bytes (slice u (SizeT.v o) (SizeT.v o + {n}))){address_rewrite}\n\
              {{\n  \
              unfold {un}_pts_to a p u;\n  \
              SizeT.fits_at_least_16 (SizeT.v o + {n});\n  \
@@ -15775,6 +15877,7 @@ struct BranchResult {
     union_values: HashMap<String, String>,
     out_params: Vec<String>,
     asserted_uninit: HashSet<(String, String)>,
+    asserted_pieces: HashMap<(String, String), bool>,
 }
 
 fn indent(line: &str) -> String {
@@ -15917,6 +16020,8 @@ struct OpenOwn {
 #[derive(Clone)]
 struct Body<'a> {
     tds: &'a Typedefs<'a>,
+    ghost_args: &'a [String],
+    addressed_locals: HashSet<String>,
     env: Env,
     /// Functions emitted earlier in this module, by C name. A call to anything
     /// else -- a function defined further down the file, or one whose
@@ -16032,8 +16137,9 @@ struct Body<'a> {
     /// (`ghost_stmt_pieces`): a local pointer to one that a ghost statement
     /// names is accessed field by field.
     ghost_piece_types: HashSet<String>,
-    /// Places a checked native field-hole assertion owns in pieces.
-    asserted_pieces: HashSet<(String, String)>,
+    /// Checked storage assertions at an exact place: true for a split
+    /// aggregate, false for a member already available as a whole cell.
+    asserted_pieces: HashMap<(String, String), bool>,
     /// Dynamic pointees whose checked storage assertion selects a first store.
     asserted_uninit: HashSet<(String, String)>,
     /// Parameters whose ownership sits behind a nullness guard, so a loop
@@ -16041,6 +16147,7 @@ struct Body<'a> {
     guarded: &'a HashSet<String>,
     /// See `FnSurface::null_payload`.
     null_payload: &'a HashMap<String, String>,
+    fixed_nullable: &'a [(String, String)],
     /// See `FnSurface::null_outs`.
     null_outs: &'a HashMap<String, Rc<Type>>,
     /// Guarded parameters a null test has opened on the current path: their
@@ -16205,7 +16312,8 @@ struct Body<'a> {
     /// fact is in context here, written in the callee's own words, so
     /// the call is left to slprop matching exactly as a contract-stated
     /// one is: if nothing granted the validity, F* rejects it.
-    fp_from_call: HashSet<String>,
+    locals_from_call: HashSet<String>,
+    storage_call_locals: HashSet<String>,
     /// Locals that are another name for an array: `T *p = a;`. A subscript of
     /// one is a subscript of the array it names. See `array_alias_map`.
     array_aliases: HashMap<String, String>,
@@ -16551,7 +16659,7 @@ impl<'a> Body<'a> {
             me.lines.truncate(mark);
             me.pending_close.truncate(closing);
         };
-        let Ok(addr) = self.inline(e) else {
+        let Ok(mut addr) = self.inline(e) else {
             rollback(self);
             return;
         };
@@ -16562,8 +16670,23 @@ impl<'a> Body<'a> {
         if self.slots.iter().any(|s| s.addr == addr) {
             return;
         }
+        // A pointer local has storage of its own. Track the pointed-to object
+        // at a snapshot, not at a computation such as `(ptr_read loc_p)`.
+        // Every subsequent use still loads the local and proves it unchanged.
+        let mut name = format!("*{}", addr);
+        if let ExprT::Var(v) = &strip_vattr(e).val
+            && self.storage_call_locals.contains(v.val.as_ref())
+            && let Some(local) = self.slots.iter().rev().find(|s| s.name == *v.val)
+            && local.palow_ty == "ptr"
+            && addr == format!("(ptr_read {})", local.addr)
+        {
+            name = format!("*snapshot:{}", local.addr);
+            let snapshot = self.fresh("storage_base");
+            self.lines.push(format!("let {snapshot} = {addr};"));
+            addr = snapshot;
+        }
         self.slots.push(Slot {
-            name: format!("*{}", addr),
+            name,
             addr,
             palow_ty: pn,
             fstar_ty: fty,
@@ -17051,7 +17174,7 @@ impl<'a> Body<'a> {
             return None;
         };
         let p = v.val.to_string();
-        if !self.owned_here(&p) || !self.params.contains(&p) {
+        if !self.owned_here(&p) || !self.params.contains(&p) || self.bytes_only.contains(&p) {
             return None;
         }
         let at = format!("var_{}", p);
@@ -17087,7 +17210,8 @@ impl<'a> Body<'a> {
                     return None;
                 };
                 let p = v.val.to_string();
-                if !self.params.contains(&p) || !self.owned_here(&p) {
+                if !self.params.contains(&p) || !self.owned_here(&p) || self.bytes_only.contains(&p)
+                {
                     return None;
                 }
                 Some(OwnPath {
@@ -17606,6 +17730,9 @@ impl<'a> Body<'a> {
             // Every member of a union is at the union's own address.
             ExprT::Member(base, _) if self.union_of(base).is_some() => self.addr(base),
             ExprT::Member(base, f) => {
+                if let Some((offset, _)) = self.layout_field(base, f) {
+                    return Ok(format!("({} +! {})", self.addr(base)?, offset));
+                }
                 let (sn, _) = self.struct_of(base)?;
                 self.field_ty(base, f)?;
                 let a = self.addr(base)?;
@@ -17687,7 +17814,7 @@ impl<'a> Body<'a> {
     fn in_pieces(&self, base: &Expr) -> bool {
         if self
             .place_path(base)
-            .is_some_and(|key| self.asserted_pieces.contains(&key))
+            .is_some_and(|key| self.asserted_pieces.get(&key) == Some(&true))
         {
             return true;
         }
@@ -17752,9 +17879,17 @@ impl<'a> Body<'a> {
             return self.addr(e);
         }
         match &strip_vattr(e).val {
+            ExprT::Var(v)
+                if self.env.lookup_var(v).is_none() && self.env.addressable_global(v).is_some() =>
+            {
+                Ok(format!("addr_var_{}", v.val))
+            }
             // Every member of a union is at the union's own address.
             ExprT::Member(base, _) if self.union_of(base).is_some() => self.addr_only(base),
             ExprT::Member(base, f) => {
+                if let Some((offset, _)) = self.layout_field(base, f) {
+                    return Ok(format!("({} +! {})", self.addr_only(base)?, offset));
+                }
                 let (sn, _) = self.struct_of(base)?;
                 self.field_ty(base, f)?;
                 let a = self.addr_only(base)?;
@@ -17917,6 +18052,32 @@ impl<'a> Body<'a> {
         if let Some(p) = self.unalias(e) {
             return self.place(&p, writing);
         }
+        if let ExprT::Member(base, f) = &strip_vattr(e).val
+            && (((self
+                .place_path(e)
+                .is_some_and(|k| self.asserted_pieces.get(&k) == Some(&false))
+                || (self.spliced_own && self.inside_layout_field(base)
+                    && self.field_ty(base, f).is_ok_and(|t| scalar_shape(self.tds, &t).is_some())))
+                && self.struct_of(base).is_ok_and(|(sn, ty)| {
+                    bitfield_at(self.tds, &ty, &f.val.to_string()).is_none()
+                        && !self.unaligned_field(&sn, &f.val.to_string())
+                })) || (self.spliced_own
+                    && self.layout_field(base, f).is_some_and(|(_, aligned)| aligned)))
+            && let ty = self.ty_of(e)?
+            && let Some(pn) = palow_name(self.tds, &ty)
+        {
+            return Ok(Focus {
+                write_fn: format!("{}_write", pn),
+                pn,
+                unaligned: false,
+                bits: None,
+                at: self.addr_only(e)?,
+                open_read: Vec::new(),
+                open_write: Vec::new(),
+                close_read: Vec::new(),
+                close_write: Vec::new(),
+            });
+        }
         if !writing
             && let ExprT::Member(base, f) = &strip_vattr(e).val
             && let Some(focus) = self.punned_field(base, f)
@@ -17949,7 +18110,7 @@ impl<'a> Body<'a> {
                             f.val
                         ));
                     }
-                    if ff.bits.is_some() {
+                    if writing && ff.bits.is_some() {
                         return Err(format!(
                             "a bit-field of `{}`, whose storage the contract holds in pieces",
                             f.val
@@ -17959,7 +18120,7 @@ impl<'a> Body<'a> {
                         write_fn: format!("{}_write", pn),
                         unaligned: false,
                         pn,
-                        bits: None,
+                        bits: ff.bits,
                         at: ff.at,
                         open_read: Vec::new(),
                         open_write: Vec::new(),
@@ -18275,6 +18436,34 @@ impl<'a> Body<'a> {
             ));
         };
         let pn = shape.pn().to_string();
+        // An out call initializing an arm also initializes its enclosing union
+        // field. Keep the surrounding struct scattered until the call returns.
+        if writing
+            && let ExprT::Member(parent, field) = &strip_vattr(base).val
+            && let Some(key) = self.tracked_place_key(parent)
+            && let Some(target) = self.scatter_target(&key)
+            && !self.scattered_set(target).contains(&*field.val)
+        {
+            let ff = self.open_field(parent, field, true)?;
+            if ff.a != key {
+                return Err("a changed address for a union field being initialized".to_string());
+            }
+            if let Some(outer) = self.scattered_field(&ff, field, &un, true) {
+                let mut close_write = vec![format!("{}_unfocus_{} {};", un, f.val, ff.at)];
+                close_write.extend(outer.close_write);
+                return Ok(Focus {
+                    bits: None,
+                    write_fn: shape.write_fn(),
+                    pn,
+                    unaligned: false,
+                    at: ff.at.clone(),
+                    open_read: Vec::new(),
+                    open_write: vec![format!("{}_switch_uninit_{} {};", un, f.val, ff.at)],
+                    close_read: Vec::new(),
+                    close_write,
+                });
+            }
+        }
         let (a, mut base_close_read, base_close_write) =
             self.base_addr(base, writing || self.mut_lend)?;
         if self.mut_lend {
@@ -18617,6 +18806,25 @@ impl<'a> Body<'a> {
         })
     }
 
+    fn layout_field(&self, base: &Expr, f: &Ident) -> Option<(String, bool)> {
+        let ty = self.ty_of(base).ok()?;
+        let TypeT::TypeRef(TypeRefKind::Struct(n)) = &peel(self.tds, &ty).val else {
+            return None;
+        };
+        let (offset, off) = self.tds.layout_offset(&n.val, &f.val)?;
+        let ty = self.field_ty(base, f).ok()?;
+        let (_, align) = self.tds.aggregate_layout(&format!("struct {}", n.val))?;
+        let aligned = scalar_shape(self.tds, &ty).is_some()
+            && palow_alignof(self.tds, &ty).is_some_and(|a| a != 0 && off % a == 0 && align % a == 0);
+        Some((offset, aligned))
+    }
+
+    fn inside_layout_field(&self, e: &Expr) -> bool {
+        matches!(&strip_vattr(e).val, ExprT::Member(base, f)
+            if self.layout_field(base, f).is_some()
+                || (self.struct_of(base).is_ok() && self.inside_layout_field(base)))
+    }
+
     /// Whether a field of a struct is one a packed layout left misaligned.
     fn unaligned_field(&self, sn: &str, field: &str) -> bool {
         sn.strip_prefix("struct_")
@@ -18854,6 +19062,13 @@ impl<'a> Body<'a> {
         }
     }
 
+    fn snapshot_base(&self, local_addr: &str) -> Option<String> {
+        self.slots.iter().rev().find_map(|s| {
+            (!s.init && s.name.strip_prefix("*snapshot:") == Some(local_addr))
+                .then(|| s.addr.clone())
+        })
+    }
+
     // A bookkeeping key, not an emitted address. The subsequent open_field
     // checks the actual pointer before using the tracked object.
     fn tracked_place_key(&self, e: &Expr) -> Option<String> {
@@ -18865,6 +19080,11 @@ impl<'a> Body<'a> {
                 let ExprT::Var(v) = &strip_vattr(inner).val else {
                     return None;
                 };
+                if let Some(local) = self.slots.iter().rev().find(|s| s.name == *v.val)
+                    && let Some(base) = self.snapshot_base(&local.addr)
+                {
+                    return Some(base);
+                }
                 let at = format!("var_{}", v.val);
                 self.slots.iter().any(|s| s.addr == at).then_some(at)
             }
@@ -19049,6 +19269,15 @@ impl<'a> Body<'a> {
     ) -> Result<(String, Vec<String>, Vec<String>), String> {
         if let Some(p) = self.unalias(base) {
             return self.base_addr(&p, writing);
+        }
+        // A loan of an aggregate member covers reads of its fields without
+        // also owning its enclosing aggregate. Inner field/tag checks remain.
+        if !writing
+            && matches!(strip_vattr(base).val, ExprT::Member(_, _))
+            && self.struct_of(base).is_ok()
+            && self.place_path(base).is_some_and(|k| self.asserted_pieces.get(&k) == Some(&false))
+        {
+            return Ok((self.addr_only(base)?, Vec::new(), Vec::new()));
         }
         // Probe storage on a copy: naming a nested array element may open
         // ownership, which must not escape an unsuccessful activation probe.
@@ -20490,10 +20719,27 @@ impl<'a> Body<'a> {
                 && let Some(key) = self.place_path(&place)
             {
                 if partial {
-                    self.asserted_pieces.insert(key);
+                    self.asserted_pieces.insert(key, true);
                 } else {
-                    self.asserted_pieces.remove(&key);
+                    let below = format!("{}.", key.1);
+                    self.asserted_pieces.retain(|(root, path), _| {
+                        *root != key.0
+                            || (!key.1.is_empty() && *path != key.1 && !path.starts_with(&below))
+                    });
+                    if matches!(strip_vattr(&place).val, ExprT::Member(_, _)) {
+                        self.asserted_pieces.insert(key, false);
+                    }
                 }
+            } else if !partial
+                && matches!(strip_vattr(&place).val, ExprT::Member(_, _))
+                && self.ty_of(&place).is_ok_and(|ty| {
+                    (scalar_shape(self.tds, &ty).is_some()
+                        || (self.union_of(&place).is_some() && self.overlay_of(&place).is_none()))
+                        && palow_name(self.tds, &ty).as_deref() == Some(sn)
+                })
+                && let Some(key) = self.place_path(&place)
+            {
+                self.asserted_pieces.insert(key, false);
             }
             return;
         }
@@ -21121,6 +21367,20 @@ impl<'a> Body<'a> {
                     // is refused because splicing one would run it.
                     let v = match (&strip_vattr(expr).val, &self.ret_binding) {
                         (ExprT::Var(n), Some(r)) if &*n.val == "return" => r.clone(),
+                        (ExprT::Var(n), _)
+                            if self.ghost_args.contains(&format!("var_{}", n.val))
+                                && self.ty_of(expr).is_ok_and(|ty| {
+                                    matches!(
+                                        &peel(self.tds, &ty).val,
+                                        TypeT::TypeRef(
+                                            TypeRefKind::Struct(_) | TypeRefKind::Union(_)
+                                        )
+                                    )
+                                })
+                                && !self.slots.iter().any(|s| s.name == n.val.as_ref()) =>
+                        {
+                            format!("reveal var_{}", n.val)
+                        }
                         // Inside a `break`ing loop's `ensures`, a mirrored
                         // local is spelled by its ghost reference: see
                         // `mirrors`.
@@ -21716,6 +21976,10 @@ impl<'a> Body<'a> {
                         .ok_or_else(|| format!("`{}` has an unsupported type", v.val))?;
                     let t = self.fresh(&v.val);
                     self.lines.push(format!("let {} = {}_read {};", t, pn, a));
+                    if pn == "ptr" && let Some(base) = self.snapshot_base(&a) {
+                        self.lines.push(format!("assert (pure ({t} == {base}));"));
+                        return Ok(base);
+                    }
                     Ok(t)
                 } else if self.is_array_alias(&v.val) {
                     // A second name for an array has no storage of its own:
@@ -22001,6 +22265,12 @@ impl<'a> Body<'a> {
             // member the value is tagged with -- which is the same thing C
             // means by it becoming the live one.
             ExprT::UnionInit(n, m, e) => {
+                if is_overlay(self.tds, &n.val) {
+                    return Err(format!(
+                        "an overlay initializer for `{}` without a destination",
+                        n.val
+                    ));
+                }
                 if !self.tds.unions.contains_key(&*n.val) {
                     return Err(format!("an initialiser for union {}", n.val));
                 }
@@ -22496,7 +22766,7 @@ impl<'a> Body<'a> {
                     && (valid_field
                         || self.valid_fps.contains(&base)
                         || self.local_valid_fps.contains(&base)
-                        || self.fp_from_call.contains(&base))
+                        || self.locals_from_call.contains(&base))
                 {
                     // The pointer itself, when the contract named it, and
                     // otherwise a load of the field holding it. A load is
@@ -22589,7 +22859,7 @@ impl<'a> Body<'a> {
                     // is done: this body never owned the pointer, so there is
                     // no ownership for the fact to travel out with.
                     if self.consumed.contains(&base)
-                        || (self.fp_from_call.contains(&base)
+                        || (self.locals_from_call.contains(&base)
                             && matches!(&strip_vattr(f).val, ExprT::Var(_)))
                     {
                         self.lines.push("drop_is_valid _ _ _;".to_string());
@@ -22661,6 +22931,9 @@ impl<'a> Body<'a> {
                         describe(self.tds.resolve(ty))
                     ));
                 };
+                if let Some((offset, _)) = self.tds.layout_offset(&sname.val, &field.val) {
+                    return Ok(sub_offset(self.rvalue(inner)?, &offset));
+                }
                 if !self.tds.structs.contains_key(&*sname.val) {
                     return Err(format!(
                         "`_container_of` of {}",
@@ -22798,7 +23071,18 @@ impl<'a> Body<'a> {
         // A `$witness` before a direct call names the callee's `_ghost_arg`s,
         // which appear only inside `pure`s and so cannot be read off the
         // ownership being handed over. Everything else is still inferred.
-        let witness = self.fp_witness.take();
+        // In f(g(x)), when only g takes ghost arguments the target is
+        // unambiguous. Leave its witness pending while evaluating g.
+        let nested_witness = self.fp_witness.is_some()
+            && ghost_args.is_empty()
+            && args.len() == 1
+            && matches!(&strip_vattr(&args[0]).val, ExprT::FnCall(g, _)
+                if self.callees.get(&*g.val.to_string()).is_some_and(|c| !c.ghost_args.is_empty()));
+        let witness = if nested_witness {
+            None
+        } else {
+            self.fp_witness.take()
+        };
         if witness.is_some() && ghost_args.is_empty() {
             return Err(format!(
                 "a `$witness` before a call to `{}`, which has no ghost arguments",
@@ -23118,6 +23402,9 @@ impl<'a> Body<'a> {
         if args.is_empty() {
             out += " ()";
         }
+        if nested_witness && self.fp_witness.is_some() {
+            return Err("the nested call did not consume its `$witness`".into());
+        }
         if let Some(w) = witness {
             let n = ghost_args.len();
             let mut imps: Vec<String> = vec!["#_".to_string(); implicits.len()];
@@ -23413,6 +23700,20 @@ impl<'a> Body<'a> {
                 self.lines.truncate(mark);
                 self.pending_close.truncate(closes);
                 self.own_open.truncate(opens);
+                // Reading the same pointer local creates different temporary
+                // names, not different parents. Group its field loans before
+                // emitting any of the opens.
+                if !out
+                    && let ExprT::Deref(p) = &strip_vattr(base).val
+                    && let Some(n) = lvalue_name(p)
+                {
+                    let key = format!("*local:{n}");
+                    match groups.iter_mut().find(|g| g.0 == key) {
+                        Some(g) => g.2.push((i, f.clone())),
+                        None => groups.push((key, base.clone(), vec![(i, f.clone())])),
+                    }
+                    continue;
+                }
                 // The place is reached through a pointer read out of memory,
                 // `&p->ctx->f`: it has no fixed key to group by, so it is
                 // opened on its own, the way a read of it would be -- the
@@ -25274,9 +25575,8 @@ impl<'a> Body<'a> {
         // the generated frame would otherwise claim as well, and two claims to
         // one object is not a frame. So whatever such a clause names is left
         // out of the generated half and taken from the author's words instead.
-        let (own_clauses, prop_clauses): (Exprs, Exprs) = clause
-            .iter()
-            .cloned()
+        let (own_clauses, prop_clauses): (Exprs, Exprs) = frame_clauses(self.tds, clause)
+            .into_iter()
             .partition(|e| is_slprop_clause(self.tds, e));
         let mut stated: HashSet<String> = HashSet::new();
         for e in own_clauses.iter() {
@@ -25500,6 +25800,20 @@ impl<'a> Body<'a> {
             }
         }
         let mut deep: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        // An explicit branch postcondition, unlike a loop invariant, has no
+        // implicit frame. Keep an optional input guarded unless an enclosing
+        // non-null branch has already opened it.
+        if body.is_none() {
+            for (name, payload) in self.fixed_nullable {
+                if !stated.contains(name) {
+                    if self.unguarded.contains(name) {
+                        owns.push(payload.clone());
+                    } else {
+                        owns.push(format!("unless_null var_{} ({})", name, payload));
+                    }
+                }
+            }
+        }
         for o in self.owned {
             if stated.contains(&o.base) {
                 continue;
@@ -25650,7 +25964,7 @@ impl<'a> Body<'a> {
             walks,
         };
         for e in own_clauses.iter() {
-            let ExprT::InlinePulse(code, _) = &strip_vattr(e).val else {
+            let Some(code) = slprop_refine(self.tds, e) else {
                 return Err(format!(
                     "{} with an ownership clause that is not inline Pulse",
                     what
@@ -26328,6 +26642,69 @@ impl<'a> Body<'a> {
         if let Some(s2) = self.split_byte_field(s)? {
             return self.stmt(&s2);
         }
+        if let StmtT::Assign(lhs, rhs) = &s.val {
+            if self.atomic_literal_field(lhs, rhs) {
+                self.check_alias_snaps(s)?;
+                self.union_values.clear();
+                self.clear_fn_notes(lhs);
+                let f = self.place(lhs, true)?;
+                self.lines.extend(f.open_write);
+                if f.write_fn == format!("{}_write", f.pn) {
+                    self.lines.push(format!("{}_forget {};", f.pn, f.at));
+                } else if f.write_fn != format!("{}_write_uninit", f.pn) {
+                    return Err("a tagged union initializer in non-aligned storage".into());
+                }
+                self.write_literal_storage(&self.ty_of(lhs)?, rhs, &f.at)?;
+                self.lines.extend(f.close_write);
+                self.lines.append(&mut self.pending_close);
+                self.close_own();
+                return Ok(());
+            }
+            let arm_store = match (&strip_vattr(lhs).val, &strip_vattr(rhs).val) {
+                (_, ExprT::UnionInit(n, arm, init)) if is_overlay(self.tds, &n.val) => {
+                    Some((lhs, arm, init))
+                }
+                (ExprT::Member(base, arm), _) if self.overlay_of(base).is_some() => {
+                    Some((base, arm, rhs))
+                }
+                _ => None,
+            };
+            // No tail from a different arm may survive a whole-member store.
+            // The struct writer supplies its own unspecified padding bits.
+            if let Some((base, arm, init)) = arm_store
+                && let ExprT::Var(name) = &strip_vattr(base).val
+                && let Some(i) = self.slots.iter().rposition(|s| s.name == *name.val)
+                && !self.slots[i].global
+                && !self.mirrors.contains_key(&name.val.to_string())
+                && let ty = self.field_ty(base, arm)?
+                && matches!(
+                    peel(self.tds, &ty).val,
+                    TypeT::TypeRef(TypeRefKind::Struct(_))
+                )
+                && !holds_overlay(self.tds, &ty)
+                && let Some(size) = palow_sizeof(self.tds, &ty)
+                && Some(size) == palow_sizeof(self.tds, self.ty_of(base)?.as_ref())
+                && let Some(tp) = palow_name(self.tds, &ty)
+            {
+                self.check_alias_snaps(s)?;
+                let value = self.rvalue(init)?;
+                self.lines.append(&mut self.pending_close);
+                self.close_own();
+                let slot = &mut self.slots[i];
+                let (un, a, f) = (&slot.palow_ty, &slot.addr, &arm.val);
+                self.union_values.remove(a);
+                if !slot.init {
+                    self.lines.push(format!("{un}_of_uninit {a};"));
+                }
+                self.lines.extend([
+                    format!("{un}_switch_{f} {a};"),
+                    format!("{tp}_write_uninit {a} {value};"),
+                    format!("{un}_unfocus_{f} {a};"),
+                ]);
+                slot.init = true;
+                return Ok(());
+            }
+        }
         if let Some(mut parts) = self.split_overlay_init(s) {
             if let StmtT::Assign(lhs, _) = &s.val
                 && !self.repeatable_init_place(lhs)
@@ -26344,6 +26721,9 @@ impl<'a> Body<'a> {
                 let StmtT::Assign(lhs, rhs) = &part.val else {
                     unreachable!()
                 };
+                if self.atomic_literal_field(lhs, rhs) {
+                    continue;
+                }
                 let ty = self
                     .env
                     .infer_expr(rhs)
@@ -26458,6 +26838,126 @@ impl<'a> Body<'a> {
         }
     }
 
+    // Keep a constant tagged literal together: its arm need not have been
+    // live before the assignment. Dynamic inputs still need the snapshot pass.
+    fn atomic_literal_field(&self, lhs: &Expr, rhs: &Rc<Expr>) -> bool {
+        fn literal(e: &Expr) -> bool {
+            match &strip_vattr(e).val {
+                ExprT::StructInit(_, fs) => fs.iter().all(|(_, v)| literal(v)),
+                ExprT::UnionInit(_, _, v) | ExprT::Cast(v, _) => literal(v),
+                ExprT::ArrayInit { elems, .. } => elems.iter().all(|v| literal(v)),
+                ExprT::IntLit(..) | ExprT::BoolLit(_) => true,
+                _ => false,
+            }
+        }
+        matches!(&strip_vattr(lhs).val, ExprT::Member(base, _) if self.struct_of(base).is_ok())
+            && (matches!(&strip_vattr(rhs).val, ExprT::UnionInit(n, _, _) if !is_overlay(self.tds, &n.val)
+                && self.ty_of(rhs).is_ok_and(|t| holds_overlay(self.tds, &t)))
+                || self.zero_byte_arm_size(rhs).is_some())
+            && self.ty_of(lhs).is_ok_and(|t| holds_overlay(self.tds, &t))
+            && literal(rhs)
+            && self
+                .ty_of(lhs)
+                .is_ok_and(|t| self.clone().write_literal_storage(&t, rhs, "a").is_ok())
+    }
+
+    fn zero_byte_arm_size(&self, rhs: &Expr) -> Option<u64> {
+        let ExprT::UnionInit(n, arm, value) = &strip_vattr(rhs).val else {
+            return None;
+        };
+        let u = self.tds.unions.get(&*n.val)?;
+        let f = u.members.iter().find(|f| f.name == *arm.val)?;
+        let FieldShape::Array { pn, esize: 1, len } = &f.shape else {
+            return None;
+        };
+        let ExprT::ArrayInit { elems, .. } = &strip_vattr(value).val else {
+            return None;
+        };
+        (u.overlay
+            && *len == u.size
+            && matches!(pn.as_str(), "uint8_t" | "int8_t")
+            && elems.len() as u64 <= *len
+            && elems.iter().all(|e| int_lit(e) == Some(0)))
+        .then_some(*len)
+    }
+
+    fn write_literal_storage(
+        &mut self,
+        ty: &Rc<Type>,
+        rhs: &Rc<Expr>,
+        at: &str,
+    ) -> Result<(), String> {
+        let pn = palow_name(self.tds, ty).ok_or("an initializer without aligned storage")?;
+        if let Some(size) = self.zero_byte_arm_size(rhs) {
+            self.lines.extend([
+                format!("unfold {pn}_pts_to_uninit {at};"),
+                format!("memset_zero {at} {size}sz;"),
+                format!("fold ({pn}_pts_to {at} 1.0R (zeroed {size}));"),
+            ]);
+            return Ok(());
+        }
+        if !holds_overlay(self.tds, ty) {
+            let value = self.rvalue(rhs)?;
+            self.lines.push(format!("{pn}_write_uninit {at} {value};"));
+            return Ok(());
+        }
+        match &strip_vattr(rhs).val {
+            ExprT::UnionInit(n, arm, value) => {
+                let u = &self.tds.unions[&*n.val];
+                let field = u
+                    .members
+                    .iter()
+                    .find(|f| f.name == *arm.val)
+                    .ok_or("an unknown union initializer member")?;
+                let ft = field.ty.clone();
+                if u.overlay {
+                    if field.size != u.size {
+                        return Err("a short whole-member initializer inside a tagged arm".into());
+                    }
+                    self.lines.push(format!("{pn}_of_uninit {at};"));
+                }
+                let switch = if u.overlay { "switch" } else { "switch_uninit" };
+                self.lines.push(format!("{pn}_{switch}_{} {at};", arm.val));
+                self.write_literal_storage(&ft, value, at)?;
+                self.lines.push(format!("{pn}_unfocus_{} {at};", arm.val));
+            }
+            ExprT::StructInit(n, fs) => {
+                let si = &self.tds.structs[&*n.val];
+                if !si.bitfields.is_empty()
+                    || fs
+                        .iter()
+                        .any(|(i, _)| !si.fields.iter().any(|f| f.name == *i.val))
+                {
+                    return Err(
+                        "a packed bit-field in a nested overlay aggregate initializer".into(),
+                    );
+                }
+                self.lines.push(format!("{pn}_scatter_uninit {at};"));
+                for f in &si.fields {
+                    let v = fs
+                        .iter()
+                        .find(|(i, _)| *i.val == *f.name)
+                        .map(|(_, v)| v.clone())
+                        .or_else(|| zero_expr(self.tds, &f.ty, &rhs.loc))
+                        .ok_or("a field without a C zero initializer")?;
+                    if !matches!(f.shape, FieldShape::One { .. })
+                        || f.shape.pn() != palow_name(self.tds, &f.ty).unwrap_or_default()
+                    {
+                        return Err("a non-scalar storage representation in a nested overlay aggregate initializer".into());
+                    }
+                    self.write_literal_storage(
+                        &f.ty,
+                        &v,
+                        &format!("({at} +! {pn}_offsetof_{})", f.name),
+                    )?;
+                }
+                self.lines.push(format!("{pn}_gather {at};"));
+            }
+            _ => return Err("a nested overlay initializer with no selected member".into()),
+        }
+        Ok(())
+    }
+
     /// `x = (T){...}` for a `T` with an overlay union in it, one field at a
     /// time. Such a value is bytes and has no whole-value writer (see
     /// `holds_overlay`), so the literal is taken apart into a store per
@@ -26472,6 +26972,10 @@ impl<'a> Body<'a> {
             in_arm: bool,
             out: &mut Vec<Rc<Stmt>>,
         ) -> bool {
+            if b.atomic_literal_field(lhs, rhs) {
+                out.push(StmtT::Assign(lhs.clone(), rhs.clone()).with_loc(loc.clone()));
+                return true;
+            }
             // Inside an arm of an overlay union a struct is taken apart too:
             // a store of a whole member is refused there (C11 6.2.6.1p7).
             let has_overlay = b.ty_of(rhs).is_ok_and(|t| holds_overlay(b.tds, &t));
@@ -26914,6 +27418,7 @@ impl<'a> Body<'a> {
                 self.active.clear();
                 self.union_values.clear();
                 self.asserted_uninit.clear();
+                self.asserted_pieces.clear();
                 Ok(())
             }
             // A `switch` whose cases all end in `break` reaches the IR as a
@@ -26997,6 +27502,11 @@ impl<'a> Body<'a> {
                 restore(self);
                 self.out_params = outs;
                 self.asserted_uninit = last.asserted_uninit.clone();
+                self.asserted_pieces = last.asserted_pieces.clone();
+                self.asserted_pieces.retain(|key, val| {
+                    arms.iter()
+                        .all(|(_, arm)| arm.asserted_pieces.get(key) == Some(val))
+                });
                 self.asserted_uninit.retain(|key| {
                     arms.iter()
                         .all(|(_, arm)| arm.asserted_uninit.contains(key))
@@ -27400,7 +27910,8 @@ impl<'a> Body<'a> {
                     let pn = palow_name(self.tds, ty)
                         .ok_or_else(|| format!("a nonzero `memset` of {}", describe(ty)))?;
                     let a = self.rvalue(p)?;
-                    self.lines.push(format!("assert ({}_pts_to_uninit ({}));", pn, a));
+                    self.lines
+                        .push(format!("assert ({}_pts_to_uninit ({}));", pn, a));
                     Ok(())
                 }
                 _ => Err(format!(
@@ -27425,7 +27936,9 @@ impl<'a> Body<'a> {
                 // function pointer weakened from two different callees is the
                 // case that matters -- and then only the author's own words
                 // name the shape they have in common.
-                let states_own = ensures.iter().any(|e| is_slprop_clause(self.tds, e));
+                let states_own = frame_clauses(self.tds, ensures)
+                    .iter()
+                    .any(|e| is_slprop_clause(self.tds, e));
                 let mut fps: Vec<(String, String)> = Vec::new();
                 let nt = self.null_test(cond);
                 let pt = if nt.is_none() {
@@ -27627,7 +28140,10 @@ impl<'a> Body<'a> {
                 }
                 self.out_params = live_res.out_params.clone();
                 self.asserted_uninit = live_res.asserted_uninit.clone();
+                self.asserted_pieces = live_res.asserted_pieces.clone();
                 if surviving.is_none() {
+                    self.asserted_pieces
+                        .retain(|key, val| els.asserted_pieces.get(key) == Some(val));
                     self.asserted_uninit
                         .retain(|key| els.asserted_uninit.contains(key));
                 }
@@ -27761,6 +28277,49 @@ impl<'a> Body<'a> {
             if self.diverged {
                 return Ok(false);
             }
+            if let StmtT::If {
+                cond,
+                then_branch,
+                else_branch,
+                ensures,
+            } = &s.val
+                && ensures.is_empty()
+                && let [ret] = &stmts[i + 1..]
+                && let StmtT::Return(Some(e)) = &ret.val
+                && let Some(n) = lvalue_name(cond)
+                && lvalue_name(e).as_ref() == Some(&n)
+                && !self.addressed_locals.contains(&n)
+                && self
+                    .slots
+                    .iter()
+                    .any(|slot| slot.name == n && !slot.global && slot.palow_ty == "bool_t")
+            {
+                let mut t = Touched::default();
+                touch_stmts(then_branch, &mut t);
+                touch_stmts(else_branch, &mut t);
+                if !t.written.contains(&n) && !t.declared.contains(&n) {
+                    // The returned local is still the tested value. Keep the
+                    // return path-specific (e.g. a success-only output) and
+                    // prove the literal against the actual C read on each arm.
+                    let finish = |arm: &Stmts, b: bool| {
+                        let mut arm = arm.clone();
+                        let lit = ExprT::BoolLit(b).with_loc(e.loc.clone());
+                        let eq =
+                            ExprT::BinOp(BinOp::Eq, e.clone(), lit.clone()).with_loc(e.loc.clone());
+                        arm.push(StmtT::Assert(eq).with_loc(ret.loc.clone()));
+                        arm.push(StmtT::Return(Some(lit)).with_loc(ret.loc.clone()));
+                        Rc::new(arm)
+                    };
+                    let branch = StmtT::If {
+                        cond: cond.clone(),
+                        then_branch: finish(then_branch, true),
+                        else_branch: finish(else_branch, false),
+                        ensures: ensures.clone(),
+                    }
+                    .with_loc(s.loc.clone());
+                    return self.rest(&[branch]);
+                }
+            }
             if matches!(s.val, StmtT::Return(Some(_)))
                 && let Some(s2) = self.split_byte_field(s)?
             {
@@ -27839,7 +28398,8 @@ impl<'a> Body<'a> {
                         && (has_loop(then_branch)
                             || has_loop(else_branch)
                             || self.writes_walked(then_branch)
-                            || self.writes_walked(else_branch))
+                            || self.writes_walked(else_branch)
+                            || branches_on_return(cond, then_branch, else_branch, &stmts[i + 1..]))
                         && copyable_tail(then_branch, else_branch, &stmts[i + 1..])) =>
                 {
                     self.active.clear();
@@ -28037,6 +28597,7 @@ impl<'a> Body<'a> {
         let outer_lines = std::mem::take(&mut self.lines);
         let outer_out = self.out_params.clone();
         let outer_uninit = self.asserted_uninit.clone();
+        let outer_pieces = self.asserted_pieces.clone();
         let outer_slots = self.slots.clone();
         let outer_seeded = self.seeded.clone();
         let outer_open = self.open_elems.clone();
@@ -28060,6 +28621,7 @@ impl<'a> Body<'a> {
         self.slots = outer_slots;
         self.out_params = outer_out;
         self.asserted_uninit = outer_uninit;
+        self.asserted_pieces = outer_pieces;
         self.env = outer_env;
         self.union_values = outer_union_values;
         self.lines = outer_lines;
@@ -28099,6 +28661,7 @@ impl<'a> Body<'a> {
         let outer_lines = std::mem::take(&mut self.lines);
         let outer_out = self.out_params.clone();
         let outer_uninit = self.asserted_uninit.clone();
+        let outer_pieces = self.asserted_pieces.clone();
         let outer_seeded = self.seeded.clone();
         let outer_open = self.open_elems.clone();
         let outer_nested = self.nested_scatter.clone();
@@ -28195,6 +28758,7 @@ impl<'a> Body<'a> {
                 union_values: self.union_values.clone(),
                 out_params: std::mem::take(&mut self.out_params),
                 asserted_uninit: std::mem::take(&mut self.asserted_uninit),
+                asserted_pieces: std::mem::take(&mut self.asserted_pieces),
             })
         })();
 
@@ -28212,6 +28776,7 @@ impl<'a> Body<'a> {
         self.union_values = outer_union_values;
         self.lines = outer_lines;
         self.asserted_uninit = outer_uninit;
+        self.asserted_pieces = outer_pieces;
         if out.is_err() {
             self.out_params = outer_out;
         }
@@ -30658,7 +31223,7 @@ fn ptr_source_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
 /// Locals bound exactly once, from a call. What the call returned is what
 /// the name holds, so anything the callee's contract said about its result is
 /// a fact about this name.
-fn call_bound_map(body: &Stmts) -> HashSet<String> {
+fn call_bound_map(body: &Stmts, storage_snapshot: bool) -> HashSet<String> {
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
     let locals: HashSet<String> = body
@@ -30669,18 +31234,35 @@ fn call_bound_map(body: &Stmts) -> HashSet<String> {
         })
         .collect();
     let mut out = HashSet::new();
-    for st in body.iter() {
+    let mut initialized_null = HashSet::new();
+    for (i, st) in body.iter().enumerate() {
         let StmtT::Assign(lhs, rhs) = &st.val else {
             continue;
         };
         let Some(q) = lvalue_name(lhs) else {
             continue;
         };
-        if !locals.contains(&q) || t.rebound.get(&q) != Some(&1) {
+        if !locals.contains(&q) {
+            continue;
+        }
+        if storage_snapshot && is_zero(strip_casts(rhs)) {
+            initialized_null.insert(q);
+            continue;
+        }
+        // Only snapshot the extra NULL-then-call case when the annotation
+        // names this very result immediately after the assignment. A later
+        // annotation may instead describe storage already split by its owner.
+        let noted_result = storage_snapshot && body.get(i + 1).is_some_and(|s| {
+            matches!(&s.val, StmtT::GhostStmt(code)
+                if matches!(aux_fn_kind(code), Some(AuxFnKind::UnfoldUninit))
+                    && uninit_open_arg(code).and_then(lvalue_name).as_ref() == Some(&q))
+        });
+        let expected = 1 + usize::from(noted_result && initialized_null.contains(&q));
+        if t.rebound.get(&q).copied() != Some(expected) {
             continue;
         }
         if !matches!(
-            &strip_vattr(rhs).val,
+            &(if noted_result { strip_casts(rhs) } else { strip_vattr(rhs) }).val,
             ExprT::FnCall(..) | ExprT::FnPtrCall(..)
         ) {
             continue;
@@ -31624,6 +32206,12 @@ fn emit_body(
     let bases = base_copies(&defn.body, &arrays.keys().cloned().collect());
     let mut b = Body {
         tds,
+        ghost_args: &sig.ghost_args,
+        addressed_locals: {
+            let mut t = Touched::default();
+            touch_stmts(&defn.body, &mut t);
+            t.addressed
+        },
         env,
         callees,
         diverged: false,
@@ -31673,10 +32261,11 @@ fn emit_body(
         pieces: &sig.pieces,
         piece_types: &sig.piece_types,
         ghost_piece_types: ghost_stmt_pieces(&defn.body),
-        asserted_pieces: HashSet::new(),
+        asserted_pieces: HashMap::new(),
         asserted_uninit: HashSet::new(),
         guarded: &sig.guarded,
         null_payload: &sig.null_payload,
+        fixed_nullable: &sig.fixed_nullable,
         null_outs: &sig.null_outs,
         unguarded: Vec::new(),
         valid_fps: &sig.valid_fps,
@@ -31729,7 +32318,8 @@ fn emit_body(
         alias_snaps,
         ptr_src: ptr_source_map(&defn.body),
         byte_bases: byte_base_map(&defn.body),
-        fp_from_call: call_bound_map(&defn.body),
+        locals_from_call: call_bound_map(&defn.body, false),
+        storage_call_locals: call_bound_map(&defn.body, true),
         array_aliases: array_alias_map(tds, &defn.body),
         walks,
         bases,
@@ -31945,6 +32535,19 @@ fn may_exit(stmts: &Stmts) -> bool {
         StmtT::GotoBlock { body, .. } => may_exit(body),
         _ => false,
     })
+}
+
+// A direct or nested conditional may leave an output initialized only on
+// success. Carry the actual return read into each path rather than joining.
+fn branches_on_return(cond: &Expr, then_branch: &Stmts, else_branch: &Stmts, after: &[Rc<Stmt>]) -> bool {
+    let [ret] = after else { return false };
+    let StmtT::Return(Some(e)) = &ret.val else { return false };
+    let Some(name) = lvalue_name(e) else { return false };
+    lvalue_name(cond).as_ref() == Some(&name)
+        || [then_branch, else_branch].iter().all(|arm| {
+            matches!(arm.last().map(|s| &s.val), Some(StmtT::If { cond, .. })
+                if lvalue_name(cond).as_ref() == Some(&name))
+        })
 }
 
 /// Whether the straight-line `return` that ends a function may be copied into

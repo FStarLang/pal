@@ -73,6 +73,14 @@ unsigned char read_nibble(struct bits *s)
     return s->nibble;
 }
 
+unsigned char read_loaned_nibble(_plain const struct bits *s)
+  _ghost_arg(unsigned char storage)
+  _preserves(_inline_pulse(uint8_t_pts_to ($(s) +! Struct_bits.struct_bits_offsetof_bits0) 0.5R $(storage)))
+  _ensures(_inline_pulse(pure ($(return) == Pulse.Lib.C.Palow.Bits.get8 $(storage) 1 4)))
+{
+    return s->nibble;
+}
+
 void write_nibble(struct bits *s, unsigned char v)
   _ensures(s->nibble == v % 16)
 {

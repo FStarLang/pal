@@ -97,6 +97,49 @@ _ensures(_inline_pulse(exists* v. struct_head_pts_to $(h) 1.0R v))
 	h->lock = 0;
 }
 
+static struct head *storage_address(_plain struct head *h)
+_ensures(_inline_pulse(rewrites_to $(return) $(h)))
+{
+	return h;
+}
+
+void fill_returned_storage(_plain struct head *h)
+_requires(_inline_pulse(struct_head_pts_to_uninit $(h)))
+_ensures(_inline_pulse(exists* v. struct_head_pts_to $(h) 1.0R v))
+{
+	struct head *local = storage_address(h);
+	_ghost_stmt($unfold-uninit(struct head) $(local));
+	local->qlen = 3;
+	local->lock = 0;
+	local->list.next = 0;
+	local->list.prev = 0;
+}
+
+union item { int number; struct lnk links; };
+struct entry { union item payload; };
+
+static void init_links(_out struct lnk *links)
+{
+	links->next = 0;
+	links->prev = 0;
+}
+
+static void *entry_address(_plain struct entry *entry)
+_ensures(_inline_pulse(rewrites_to $(return) $(entry)))
+{
+	return entry;
+}
+
+void fill_union_output(_plain struct entry *entry)
+_requires(_inline_pulse(struct_entry_pts_to_uninit $(entry)))
+_ensures(_inline_pulse(exists* v. struct_entry_pts_to $(entry) 1.0R v))
+{
+	struct entry *local = NULL;
+	local = (struct entry *)entry_address(entry);
+	_ghost_stmt($unfold-uninit(struct entry) $(local));
+	init_links(&local->payload.links);
+}
+
 /* A freshly allocated block. */
 unsigned int alloc_nested(void)
 {

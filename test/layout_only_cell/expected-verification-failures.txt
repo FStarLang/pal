@@ -1,0 +1,3 @@
+# The whole array layout is unsupported; the scalar read/write above is not.
+TranslationErrors
+Func_mark_with_read_share

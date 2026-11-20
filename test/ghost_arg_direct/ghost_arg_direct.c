@@ -36,3 +36,23 @@ void caller2(void)
   _ghost_stmt($witness (hide (1ul, 2ul, 3ul)));
   uint32_t r = sum3();
 }
+
+uint32_t keep(uint32_t value) _ensures(return == value) { return value; }
+
+uint32_t nested_caller(void) _ensures(return == 0)
+{
+  _ghost_stmt($witness (hide (1ul, 2ul, 3ul)));
+  return keep(sum3());
+}
+
+typedef struct { uint8_t bytes[16]; } ghost_buffer;
+
+_ghost_arg(ghost_buffer value)
+void forward_buffer(void) { }
+
+_ghost_arg(ghost_buffer snapshot)
+void forward_snapshot(void)
+{
+  _ghost_stmt($witness (hide $(snapshot)));
+  forward_buffer();
+}

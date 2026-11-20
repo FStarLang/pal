@@ -1,0 +1,4 @@
+at Func_read_without_loan.fst(
+Cannot prove:
+union_reply_pts_to (var_p +! struct_response_offsetof_result)
+int32_t_pts_to (var_p +! struct_response_offsetof_prefix)
