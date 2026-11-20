@@ -87,6 +87,31 @@ void check_y_address(void) {
               assert pure yes);
 }
 
+static _plain uint32_t *identity(_plain uint32_t *p) _ensures(return == p) { return p; }
+
+_plain uint32_t *publish_y(void)
+    _ensures(_inline_pulse(rewrites_to $(return) (Global_screen.addr_var_screen +!
+        Struct_point.struct_point_offsetof_py))) {
+  return identity(&screen.inner.py);
+}
+
+void check_publish_y(void) {
+  _ghost_stmt(let p = Func_publish_y.func_publish_y ();
+              let yes = Func_is_y_address.func_is_y_address p;
+              assert pure yes);
+}
+
+static uint32_t read_plain(_plain uint32_t *p)
+    _ghost_arg(uint32_t value)
+    _preserves(_inline_pulse(uint32_t_pts_to $(p) 1.0R $(value)))
+    _ensures(return == value) {
+  return *p;
+}
+
+uint32_t read_counter_via_call(void) {
+  return read_plain(&counter);
+}
+
 /* Publishing the address does not borrow the struct. */
 struct point *origin_address(void)
     _ensures(_inline_pulse(pure ($(return) == Global_origin.addr_var_origin))) {

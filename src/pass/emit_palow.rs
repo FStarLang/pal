@@ -13910,6 +13910,7 @@ struct Touched {
     /// Only when inferring global permissions: returning `&g` does not
     /// access the storage of `g`, although the address still escapes.
     inferring_globals: bool,
+    address_args: Option<Rc<HashMap<String, HashSet<usize>>>>,
     vars: HashSet<String>,
     calls: HashSet<String>,
     /// The functions whose address is taken. Only these need a `__fp`
@@ -14050,7 +14051,13 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         }
         ExprT::FnCall(n, args) => {
             t.calls.insert(n.val.to_string());
-            for a in args.iter() {
+            for (i, a) in args.iter().enumerate() {
+                if t.address_args.as_ref().and_then(|m| m.get(&*n.val))
+                    .is_some_and(|indices| indices.contains(&i))
+                    && touch_address_value(a, t)
+                {
+                    continue;
+                }
                 touch_expr(a, t);
             }
         }
@@ -14829,12 +14836,49 @@ pub fn emit_palow(
     let mut written: HashSet<String> = HashSet::new();
     let mut lived: HashSet<String> = HashSet::new();
     let mut decayed: HashSet<String> = HashSet::new();
+    // Passing a global address to a plain parameter needs no permission
+    // when the callee does not request anything through that parameter.
+    // Its separate, transitive global grants still propagate normally.
+    let mut address_args: HashMap<String, HashSet<usize>> = HashMap::new();
+    for decl in &tu.decls {
+        let d = match &decl.val {
+            DeclT::FnDefn(f) => &f.decl,
+            DeclT::FnDecl(d) => d,
+            _ => continue,
+        };
+        let positions = d.args.iter().enumerate().filter_map(|(i, a)| {
+            let name = &a.name.as_ref()?.val;
+            if !is_plain(&tds, &a.ty) {
+                return None;
+            }
+            let names = HashSet::from([name.to_string()]);
+            let formal = format!("var_{name}");
+            let used = d.requires.iter().any(|e| match &strip_vattr(e).val {
+                ExprT::InlinePulse(code, _) => code.tokens.iter().any(|token| match token {
+                    InlinePulseToken::RValueAntiquot { expr, .. }
+                    | InlinePulseToken::LValueAntiquot { expr, .. } => old_mentions(expr, &names, true),
+                    InlinePulseToken::Verbatim(t) => {
+                        t.text.val.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                            .any(|w| w == formal)
+                    }
+                    _ => true,
+                }),
+                _ => old_mentions(e, &names, true),
+            });
+            (!used).then_some(i)
+        }).collect::<HashSet<_>>();
+        address_args.entry(d.name.val.to_string())
+            .and_modify(|prior| prior.retain(|i| positions.contains(i)))
+            .or_insert(positions);
+    }
+    let address_args = Rc::new(address_args);
     for decl in &tu.decls {
         let DeclT::FnDefn(d) = &decl.val else {
             continue;
         };
         let mut t = Touched {
             inferring_globals: true,
+            address_args: Some(Rc::clone(&address_args)),
             aliases: {
                 let mut e = base.clone();
                 e.push_fn_decl_args_for_body(&d.decl);
