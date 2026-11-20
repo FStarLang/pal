@@ -45,6 +45,8 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _cursor __attribute((annotate("pal-cursor")))
 #define _pure __attribute((annotate("pal-pure")))
 #define _total __attribute((annotate("pal-total")))
+/* Publish address-taken mutable block statics using the global storage model. */
+#define _block_storage __attribute((annotate("pal-block-storage")))
 #define _pal_ignore __attribute__((annotate("pal-ignore")))
 #define _pal_admit __attribute__((annotate("pal-admit")))
 #define _pal_overread __attribute__((annotate("pal-overread")))
@@ -118,6 +120,7 @@ __attribute__((annotate("pal-pure"))) _Bool pal_c_assert_enabled(void);
 #define _cursor
 #define _pure
 #define _total
+#define _block_storage
 #define _pal_ignore
 #define _pal_admit
 #define _pal_overread

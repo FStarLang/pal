@@ -273,6 +273,9 @@ pub fn prepare(units: &mut [(TranslationUnit, UnitSymbols)], diags: &mut Diagnos
             );
         }
         for symbol in &symbols.symbols {
+            if symbol.name.starts_with("__pal_block_") {
+                error(diags, &symbol.loc, "reserved block object identity prefix");
+            }
             if symbol.name.starts_with("__pal_tu_") {
                 error(
                     diags,
@@ -528,6 +531,13 @@ struct Renamer<'a> {
 
 impl Renamer<'_> {
     fn bind(&mut self, scope: &mut Bound, name: &Ident) {
+        if name.val.starts_with("__pal_block_") {
+            error(
+                self.diags,
+                &name.loc,
+                "reserved block object identity prefix in binding",
+            );
+        }
         if self.reserve && name.val.starts_with("__pal_tu_") {
             error(
                 self.diags,

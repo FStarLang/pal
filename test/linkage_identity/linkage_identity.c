@@ -15,6 +15,11 @@ int32_t genuine_a(void) _ensures(return == 1) { return private_value(); }
 int32_t object_a(void) _ensures(return == 1) { return private_number; }
 int32_t header_a(void) _ensures(return == 1) { return header_value(); }
 _plain int32_t *address_a(void) { return header_address(); }
+_plain int32_t *site_a(int32_t first) { return site_address(first); }
+_block_storage _plain const int32_t *external_site(void) {
+    extern const int32_t other_tag;
+    return &other_tag;
+}
 int32_t pointer_a(void) _ensures(return == 1) {
     int32_t (*fn)(void) = &private_value;
     int32_t (*bare)(void) = private_value;

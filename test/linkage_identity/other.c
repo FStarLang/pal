@@ -2,6 +2,7 @@
 #include <stdint.h>
 #define UNIT_VALUE 2
 #include "private.h"
+const int32_t other_tag = 11;
 
 static const int32_t private_number = 2;
 extern const int external_array[];
@@ -15,6 +16,7 @@ int32_t genuine_b(void) _ensures(return == 2) { return private_value(); }
 int32_t object_b(void) _ensures(return == 2) { return private_number; }
 int32_t header_b(void) _ensures(return == 2) { return header_value(); }
 _plain int32_t *address_b(void) { return header_address(); }
+_plain int32_t *site_b(int32_t first) { return site_address(first); }
 int32_t write_b(void)
     _requires(_live(header_cell)) _ensures(_live(header_cell))
     _ensures(return == 2)

@@ -278,6 +278,34 @@ public:
   std::unordered_map<RecordDecl *, std::string>
       structNames; // map record decls to generated struct names
   Expr *forLoopIncrement = nullptr;
+  std::unordered_map<const VarDecl *, std::string> blockObjects;
+
+  static bool shadowsBlockExtern(const FunctionDecl *fn, const VarDecl *vd) {
+    for (auto *decl : fn->decls())
+      if (auto *other = dyn_cast<VarDecl>(decl);
+          other && other->getIdentifier() == vd->getIdentifier() &&
+          other->getCanonicalDecl() != vd->getCanonicalDecl())
+        return true;
+    return false;
+  }
+
+  void indexBlockObjects(const Stmt *s, const FunctionDecl *fn, unsigned &n) {
+    if (!s)
+      return;
+    if (auto *ds = dyn_cast<DeclStmt>(s))
+      for (auto *d : ds->decls())
+        if (auto *v = dyn_cast<VarDecl>(d); v && v->isStaticLocal() &&
+            v->getTLSKind() == VarDecl::TLS_None &&
+            !astCtx->getBaseElementType(v->getType()).isConstQualified() &&
+            takesAddressOf(v, fn->getBody())) {
+          // A per-body ordinal distinguishes same-line macro expansions and
+          // stays stable when the caller selects only some function bodies.
+          blockObjects[v->getCanonicalDecl()] =
+              "__pal_block_" + std::to_string(n++) + "_" + fn->getNameAsString();
+        }
+    for (auto *child : s->children())
+      indexBlockObjects(child, fn, n);
+  }
 
   // Where a statement expression used as an rvalue may put the statements
   // ahead of its value, or null if there is nowhere to put them.
@@ -552,8 +580,12 @@ public:
         !inSystemBody)
       ctx.report_diag(loc.clone(), true, "unsupported linker symbol alias"_rs);
     bool internal = isa<FunctionDecl>(d) && !d->hasExternalFormalLinkage();
-    if (auto *vd = dyn_cast<VarDecl>(d))
-      internal = vd->isFileVarDecl() && !vd->hasExternalFormalLinkage();
+    if (auto *vd = dyn_cast<VarDecl>(d)) {
+      auto *canonical = vd->getCanonicalDecl();
+      if (auto site = blockObjects.find(canonical); site != blockObjects.end())
+        return ctx.mk_symbol_ident(toStr(site->second), true, std::move(loc));
+      internal = canonical->isFileVarDecl() && !vd->hasExternalFormalLinkage();
+    }
     return ctx.mk_symbol_ident(toStr(d->getName()), internal, std::move(loc));
   }
 
@@ -2990,6 +3022,9 @@ public:
         if (hasAnnotation(d, "pal-ignore"))
           continue;
         if (auto *vd = dyn_cast<VarDecl>(d)) {
+          if (blockObjects.count(vd->getCanonicalDecl()) ||
+              vd->getStorageClass() == SC_Extern)
+            continue;
           hoistAddressedCompoundLiterals(stmts, vd->getInit());
           hoistRValueMembers(stmts, vd->getInit());
         }
@@ -3793,6 +3828,40 @@ public:
           continue;
         auto dloc = getRange(d->getSourceRange());
         if (auto vd = dyn_cast<VarDecl>(d)) {
+          if (blockObjects.count(vd->getCanonicalDecl())) {
+            HandleDecl(vd);
+            continue;
+          }
+          if (vd->getStorageClass() == SC_Extern) {
+            auto *fn = dyn_cast<FunctionDecl>(vd->getLexicalDeclContext());
+            if (!fn || !hasAnnotation(fn, "pal-block-storage") ||
+                astCtx->getLangOpts().CPlusPlus) {
+              ctx.report_diag(dloc.clone(), true,
+                              "block-scope extern requires _block_storage"_rs);
+              stmts.push(mk_stmt_err(dloc.clone()));
+              continue;
+            }
+            if (shadowsBlockExtern(fn, vd)) {
+              ctx.report_diag(dloc.clone(), true,
+                              "shadowed block-scope extern is not supported"_rs);
+              stmts.push(mk_stmt_err(dloc.clone()));
+              continue;
+            }
+            if (vd->getTLSKind() != VarDecl::TLS_None) {
+              ctx.report_diag(dloc.clone(), true,
+                              "block-scope thread-local storage is not supported"_rs);
+              stmts.push(mk_stmt_err(dloc.clone()));
+              continue;
+            }
+            if (!vd->getCanonicalDecl()->getLexicalDeclContext()->isFileContext()) {
+              ctx.add_c_symbol(toStr(vd->getName()), 1,
+                               toStr(vd->getType().getCanonicalType().getAsString()),
+                               !vd->hasExternalFormalLinkage(), false, false,
+                               isIgnored(vd), false, dloc.clone());
+              HandleDecl(vd);
+            }
+            continue;
+          }
           // A `static const` with an initializer holds the same value on
           // every call, so it is translated as a local initialized each time.
           // Only its address could tell the two apart, so one whose address
@@ -4363,6 +4432,9 @@ public:
         bool outer = inSystemBody;
         inSystemBody =
             sm.isInSystemHeader(sm.getExpansionLoc(FD->getLocation()));
+        unsigned site = 0;
+        if (!astCtx->getLangOpts().CPlusPlus && hasAnnotation(FD, "pal-block-storage"))
+          indexBlockObjects(FD->getBody(), FD, site);
         auto body = trStmts(FD->getBody());
         inSystemBody = outer;
         return ctx.add_fn_defn(std::move(builder), std::move(body));
