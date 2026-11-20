@@ -66,6 +66,27 @@ struct point {
 
 struct point origin;
 
+struct screen_state { struct point inner; } screen;
+
+uint32_t *y_address(void)
+    _ensures(_inline_pulse(rewrites_to $(return) (Global_screen.addr_var_screen +!
+        Struct_point.struct_point_offsetof_py))) {
+  return &screen.inner.py;
+}
+
+bool is_y_address(_plain uint32_t *p)
+    _ensures(_inline_pulse(pure ($(return) <==> $(p) == (Global_screen.addr_var_screen +!
+        Struct_point.struct_point_offsetof_py)))) {
+  return p == &screen.inner.py;
+}
+
+/* The publishing interfaces can be used without any permission for screen. */
+void check_y_address(void) {
+  _ghost_stmt(let p = Func_y_address.func_y_address ();
+              let yes = Func_is_y_address.func_is_y_address p;
+              assert pure yes);
+}
+
 /* Publishing the address does not borrow the struct. */
 struct point *origin_address(void)
     _ensures(_inline_pulse(pure ($(return) == Global_origin.addr_var_origin))) {

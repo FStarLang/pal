@@ -13988,6 +13988,30 @@ fn lvalue_name(e: &Expr) -> Option<String> {
     }
 }
 
+// Returning or comparing &object.member only computes an address. Stop at
+// a dereference or subscript: evaluating its pointer or index can read state.
+fn touch_address_value(e: &Expr, t: &mut Touched) -> bool {
+    if !t.inferring_globals {
+        return false;
+    }
+    let ExprT::Ref(x) = &strip_vattr(strip_casts(e)).val else {
+        return false;
+    };
+    let mut root = x;
+    while let ExprT::Member(base, _) = &strip_vattr(root).val {
+        root = base;
+    }
+    let Some(n) = lvalue_name(root) else {
+        return false;
+    };
+    if t.aliases.contains_key(&n) {
+        return false;
+    }
+    t.addressed.insert(n);
+    touch_write(x, t);
+    true
+}
+
 fn touch_write(e: &Expr, t: &mut Touched) {
     if let Some(p) = alias_of(e, t) {
         touch_write(&p, t);
@@ -14077,6 +14101,13 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
             }
             touch_write(x, t);
             touch_expr(x, t);
+        }
+        ExprT::BinOp(BinOp::Eq, x, y) if t.inferring_globals => {
+            for operand in [x, y] {
+                if !touch_address_value(operand, t) {
+                    touch_expr(operand, t);
+                }
+            }
         }
         ExprT::Index(x, y) | ExprT::BinOp(_, x, y) => {
             touch_expr(x, t);
@@ -14297,15 +14328,7 @@ fn touch_exprs(es: &Exprs, t: &mut Touched) {
 fn touch_stmts(ss: &Stmts, t: &mut Touched) {
     for s in ss.iter() {
         match &s.val {
-            StmtT::Return(Some(e))
-                if t.inferring_globals
-                    && let ExprT::Ref(x) = &strip_vattr(e).val
-                    && let Some(n) = lvalue_name(x)
-                    && !t.aliases.contains_key(&n) =>
-            {
-                t.addressed.insert(n);
-                touch_write(x, t);
-            }
+            StmtT::Return(Some(e)) if touch_address_value(e, t) => {}
             StmtT::Call(e) | StmtT::Assert(e) | StmtT::Return(Some(e)) => touch_expr(e, t),
             StmtT::Let(x, _, e) => {
                 t.declared.insert(x.val.to_string());
