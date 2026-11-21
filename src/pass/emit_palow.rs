@@ -13572,7 +13572,9 @@ fn collect_array_fill_expr(tds: &Typedefs, e: &Expr, out: &mut BTreeMap<String, 
             collect_array_fill_expr(tds, b, out);
             collect_array_fill_expr(tds, c, out);
         }
-        ExprT::MemsetZero(_, x) | ExprT::Free(x) => collect_array_fill_expr(tds, x, out),
+        ExprT::MemsetZero(_, x) | ExprT::MemsetFill(_, x, _) | ExprT::Free(x) => {
+            collect_array_fill_expr(tds, x, out)
+        }
         ExprT::Forall(_, ty, trigs, body) | ExprT::Exists(_, ty, trigs, body) => {
             collect_array_fill_type(tds, ty, out);
             for t in trigs.iter().flatten() {
@@ -14092,6 +14094,7 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         | ExprT::MallocFlex(_, x)
         | ExprT::CallocFlex(_, x)
         | ExprT::MemsetZero(_, x)
+        | ExprT::MemsetFill(_, x, _)
         | ExprT::Free(x) => go(x),
         ExprT::Live(x) => {
             if let ExprT::Var(v) = &strip_vattr(x).val {
@@ -27387,6 +27390,7 @@ impl<'a> Body<'a> {
                     let callee = self.callees.get(&*name.val.to_string());
                     let void = callee.is_some_and(|c| c.void);
                     let noreturn = callee.is_some_and(|c| c.noreturn);
+                    let mark = self.seeded.len();
                     let call = self.call(name, args)?;
                     if std::mem::take(&mut self.copied_call) {
                         return Ok(());
@@ -27396,6 +27400,13 @@ impl<'a> Body<'a> {
                     } else {
                         let t = self.fresh(&name.val);
                         self.lines.push(format!("let {} = {};", t, call));
+                    }
+                    // As for a call in an expression: a validity seeded for
+                    // the arguments is handed back by the callee and put down
+                    // here. Left for the end of the body, it would be lost
+                    // when an enclosing arm restores the outer seeds.
+                    if !noreturn {
+                        self.drop_seeded(mark);
                     }
                     // The call left `pure False` behind, so this point in the
                     // program is not reached. `unreachable` turns that into
@@ -27528,6 +27539,29 @@ impl<'a> Body<'a> {
                         .ok_or_else(|| format!("a `memset` of {}", describe(ty)))?;
                     let place = deref_of(p);
                     self.store(&place, &pn, &z)
+                }
+                // Filling a whole structure with a nonzero byte leaves bytes
+                // that need not encode any value of it, so it is modeled as a
+                // write of no value: the object must be held uninitialized,
+                // and stays so. A local's own storage is a value PAL tracks,
+                // with no uninitialized state to hold.
+                ExprT::MemsetFill(ty, p, _) => {
+                    if !matches!(
+                        &peel(self.tds, ty).val,
+                        TypeT::TypeRef(TypeRefKind::Struct(..))
+                    ) {
+                        return Err(format!("a nonzero `memset` of {}", describe(ty)));
+                    }
+                    if let ExprT::Ref(x) = &strip_vattr(p).val
+                        && lvalue_name(x).is_some()
+                    {
+                        return Err("a nonzero `memset` of a local".to_string());
+                    }
+                    let pn = palow_name(self.tds, ty)
+                        .ok_or_else(|| format!("a nonzero `memset` of {}", describe(ty)))?;
+                    let a = self.rvalue(p)?;
+                    self.lines.push(format!("assert ({}_pts_to_uninit ({}));", pn, a));
+                    Ok(())
                 }
                 _ => Err(format!(
                     "a call in statement position that is not one: {}",
@@ -30564,10 +30598,25 @@ fn alias_map(
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
 
+    // A local declared `_plain` is a pointer object by request: its uses read
+    // the local, and need no ownership of what it points into. A proof that
+    // lends that object away, piece by piece, needs exactly this.
+    fn plain_decl(ty: &Type) -> bool {
+        match &ty.val {
+            TypeT::Plain(_) => true,
+            TypeT::Refine(inner, _)
+            | TypeT::RefineAlways(inner, _)
+            | TypeT::RefineUninit(inner, _)
+            | TypeT::RefineValue(inner, _, _, _)
+            | TypeT::Nullable(inner)
+            | TypeT::Overread(inner) => plain_decl(inner),
+            _ => false,
+        }
+    }
     let locals: HashSet<String> = body
         .iter()
         .filter_map(|s| match &s.val {
-            StmtT::Decl(n, _) => Some(n.val.to_string()),
+            StmtT::Decl(n, ty) if !plain_decl(ty) => Some(n.val.to_string()),
             _ => None,
         })
         .collect();
@@ -33038,7 +33087,7 @@ fn expr_kind(e: &Expr) -> &'static str {
         | ExprT::CallocArray(..)
         | ExprT::CallocFlex(..)
         | ExprT::Free(..) => "an allocation",
-        ExprT::Memset(..) | ExprT::MemsetZero(..) => "a `memset`",
+        ExprT::Memset(..) | ExprT::MemsetZero(..) | ExprT::MemsetFill(..) => "a `memset`",
         ExprT::SizeOf(..) | ExprT::AlignOf(..) => "a `sizeof`",
         ExprT::StructInit(..) | ExprT::UnionInit(..) | ExprT::ArrayInit { .. } => {
             "an initialiser list"

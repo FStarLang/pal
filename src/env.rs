@@ -461,7 +461,9 @@ impl Env {
                 .into()),
             ExprT::Free(_) => Ok(TypeT::Void.with_loc_core(expr.loc.clone()).into()),
             ExprT::Memset(_, _, _, _) => Ok(TypeT::Void.with_loc_core(expr.loc.clone()).into()),
-            ExprT::MemsetZero(_, _) => Ok(TypeT::Void.with_loc_core(expr.loc.clone()).into()),
+            ExprT::MemsetZero(_, _) | ExprT::MemsetFill(_, _, _) => {
+                Ok(TypeT::Void.with_loc_core(expr.loc.clone()).into())
+            }
             ExprT::PreIncr(val)
             | ExprT::PostIncr(val)
             | ExprT::PreDecr(val)
