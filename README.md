@@ -252,6 +252,11 @@ pal [OPTIONS] <FILES>...
       --tmpdir <DIR>     directory for intermediates
 ```
 
+PAL exits with status 1 if it reports any hard translation errors, including
+with `--quiet` or `--print-ir`. Warnings alone leave the exit status at 0.
+Generated output and diagnostics are still written before exiting, except
+in `--print-ir` mode.
+
 Without `--only-function`, all input function bodies are translated. With it,
 every selected name must have a definition; excluded bodies are reported as
 warnings and become external declarations, not verified implementations.
