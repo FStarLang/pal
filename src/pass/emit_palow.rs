@@ -20773,7 +20773,9 @@ impl<'a> Body<'a> {
             _ => return,
         };
         let ExprT::Var(name) = &strip_vattr(&place).val else {
-            if matches!(strip_vattr(&place).val, ExprT::Deref(_))
+            // An assertion on &base.field names the storage of that
+            // field, not the containing object. Keep its structural key.
+            if matches!(strip_vattr(&place).val, ExprT::Deref(_) | ExprT::Member(..))
                 && self
                     .ty_of(&place)
                     .is_ok_and(|ty| palow_name(self.tds, &ty).as_deref() == Some(pn.as_str()))
@@ -25570,6 +25572,15 @@ impl<'a> Body<'a> {
         if matches!(lhs.val, ExprT::Member(..) | ExprT::Index(..)) {
             let before = self.own_before_write(lhs);
             let f = self.access(lhs, true)?;
+            // Only the aligned whole-struct field of a parent already in
+            // pieces. Keep ordinary addressing (including actual pointer
+            // loads), never initialize an entire parent or a bit-field unit.
+            let member_first = initialising
+                && matches!(&lhs.val, ExprT::Member(base, _) if self.in_pieces(base)
+                    && self.union_of(base).is_none())
+                && pn.starts_with("struct_")
+                && !f.unaligned && f.bits.is_none()
+                && f.write_fn == format!("{pn}_write");
             self.lines.extend(f.open_write.iter().cloned());
             match &f.bits {
                 // Storing into a bit-field is a read, a substitution and a
@@ -25585,6 +25596,7 @@ impl<'a> Body<'a> {
                     self.lines
                         .push(format!("{} {} {};", f.write_fn, f.at, pos.put(&u, &value)));
                 }
+                None if member_first => self.lines.push(format!("{pn}_write_uninit {} {};", f.at, value)),
                 None => self
                     .lines
                     .push(format!("{} {} {};", f.write_fn, f.at, value)),
