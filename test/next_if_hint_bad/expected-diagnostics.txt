@@ -1,0 +1,4 @@
+# Expected translation diagnostic substrings
+unused next conditional proof annotation
+expected one requires/ensures contract for the next conditional
+competing conditional proof annotations
