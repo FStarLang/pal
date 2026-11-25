@@ -28121,8 +28121,10 @@ impl<'a> Body<'a> {
                 // that need not encode any value of it, so it is modeled as a
                 // write of no value: the object must be held uninitialized,
                 // and stays so. A local's own storage is a value PAL tracks,
-                // with no uninitialized state to hold.
-                ExprT::MemsetFill(ty, p, _) => {
+                // with no uninitialized state to hold, so a local is filled
+                // only when the bytes encode exactly one value of its type,
+                // and the fill is then a write of that value.
+                ExprT::MemsetFill(ty, p, byte) => {
                     if !matches!(
                         &peel(self.tds, ty).val,
                         TypeT::TypeRef(TypeRefKind::Struct(..))
@@ -28132,7 +28134,12 @@ impl<'a> Body<'a> {
                     if let ExprT::Ref(x) = &strip_vattr(p).val
                         && lvalue_name(x).is_some()
                     {
-                        return Err("a nonzero `memset` of a local".to_string());
+                        let v = byte_fill_value(self.tds, ty, *byte)
+                            .map_err(|_| "a nonzero `memset` of a local".to_string())?;
+                        let pn = palow_name(self.tds, ty)
+                            .ok_or_else(|| format!("a nonzero `memset` of {}", describe(ty)))?;
+                        let place = deref_of(p);
+                        return self.store(&place, &pn, &v);
                     }
                     let pn = palow_name(self.tds, ty)
                         .ok_or_else(|| format!("a nonzero `memset` of {}", describe(ty)))?;
@@ -29719,22 +29726,26 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
     }
 }
 
-/// Unsigned integers have no trap representations. Other scalar types and
-/// unions deliberately stay unsupported: a byte pattern is not a pointer,
-/// a boolean, or evidence that a particular union member is active.
+/// Fixed-width integers have no trap representations: the model decodes an
+/// unsigned one from its bytes directly and a signed one in two's complement
+/// (`to_bits`), so every byte pattern is exactly one value. Other scalar
+/// types and unions deliberately stay unsupported: a byte pattern is not a
+/// pointer, a boolean, or evidence that a particular union member is active.
 fn byte_fill_value(tds: &Typedefs, ty: &Type, byte: u8) -> Result<String, String> {
     let t = peel(tds, ty);
     match &t.val {
-        TypeT::Int {
-            signed: false,
-            width,
-        } => {
-            let suffix = int_suffix(false, *width)?;
+        TypeT::Int { signed, width } => {
+            let suffix = int_suffix(*signed, *width)?;
             let mut value = BigInt::from(0);
             for _ in 0..(*width / 8) {
                 value = (value << 8) + byte;
             }
-            Ok(format!("{value}{suffix}"))
+            let value = wrap_int(&value, *signed, *width);
+            if value < BigInt::ZERO {
+                Ok(format!("({value}{suffix})"))
+            } else {
+                Ok(format!("{value}{suffix}"))
+            }
         }
         TypeT::SizeT => {
             let value = u64::from_le_bytes([byte; 8]);
