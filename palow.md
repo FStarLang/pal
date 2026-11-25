@@ -6976,7 +6976,7 @@ Limitations:
 
 47. **`_old` of a parameter inside a body.** A label's `_ensures` and an
     `_assert` are checked where they stand, and `_old` in them was refused
-    outright. What BOSS writes there is `p == _old(p)`: the parameters still
+    outright. The common use there is `p == _old(p)`: the parameters still
     hold what the call passed. In a body `var_p` is that value throughout,
     because a parameter the body assigns to is given a slot of its own,
     so `_old(p)` is `var_p` -- unless a local declared under the same name
