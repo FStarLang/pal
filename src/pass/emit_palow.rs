@@ -26799,13 +26799,13 @@ impl<'a> Body<'a> {
                     // An uninitialized field starts with an existential sequence
                     // of its declared length. Carry the established prefix
                     // through each real write without nesting concrete values.
-                    let snap = if ap.maybe && self.checkpoint_overlay_writes {
-                        let snap = format!("overlay_slots{}_{}", self.tmp, i);
+                    let slots = if ap.maybe && self.checkpoint_overlay_writes {
+                        let slots = format!("overlay_slots{}_{}", self.tmp, i);
                         self.lines.push(format!(
-                            "with {snap}. assert (array_pts_to {repr} (SizeT.v {}) (SizeT.v {}_alignof) {} 1.0R {snap});",
+                            "with {slots}. assert (array_pts_to {repr} (SizeT.v {}) (SizeT.v {}_alignof) {} 1.0R {slots});",
                             ap.esize, ap.pn, ap.addr
                         ));
-                        Some(snap)
+                        Some(slots)
                     } else {
                         None
                     };
@@ -26821,9 +26821,9 @@ impl<'a> Body<'a> {
                         self.lines.push(format!("{}_forget {at};", ap.pn));
                     }
                     self.write_literal_storage(elem, &v, &at)?;
-                    if let Some(ref snap) = snap {
+                    if let Some(ref slots) = slots {
                         self.lines.push(format!(
-                            "with {snap}_value. assert ({}_pts_to {at} 1.0R {snap}_value);",
+                            "with {slots}_value. assert ({}_pts_to {at} 1.0R {slots}_value);",
                             ap.pn
                         ));
                     }
@@ -26833,9 +26833,9 @@ impl<'a> Body<'a> {
                             .push(format!("elem_maybe_put {}_repr {} {at};", ap.pn, ap.esize));
                     }
                     self.lines.push(format!("array_unfocus {args};"));
-                    if let Some(snap) = snap {
+                    if let Some(slots) = slots {
                         self.lines.push(format!(
-                            "Pulse.Lib.C.Palow.ArrayCheckpoint.seal {}_repr {} {} {}_alignof {n} {i}sz {snap} #{snap}_value;",
+                            "Pulse.Lib.C.Palow.ArrayCheckpoint.seal {}_repr {} {} {}_alignof {n} {i}sz {slots} #{slots}_value;",
                             ap.pn, ap.addr, ap.esize, ap.pn
                         ));
                     }
