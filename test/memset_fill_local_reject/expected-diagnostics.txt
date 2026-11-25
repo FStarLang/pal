@@ -1,0 +1,2 @@
+# Expected translation diagnostic substrings
+a nonzero `memset` of a local
