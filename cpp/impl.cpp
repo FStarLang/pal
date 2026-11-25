@@ -2264,10 +2264,16 @@ public:
               astCtx->getTypeSize(lhsType) <= 64 &&
               astCtx->getTypeSize(rhsType) <= 64 && !outputType.isNull() &&
               outputType->isUnsignedIntegerType() &&
-              astCtx->getTypeSize(outputType) == 32 &&
+              (astCtx->getTypeSize(outputType) == 32 ||
+               astCtx->getTypeSize(outputType) == 64) &&
               !outputType.isVolatileQualified()) {
+            // A 64-bit destination has its own definition: the product
+            // modulo 2^64 and whether it fits.
             auto prim = ctx.mk_ident(
-                toStr(StringRef("__pal_mul_overflow_u64_u32")), loc.clone());
+                toStr(StringRef(astCtx->getTypeSize(outputType) == 64
+                                    ? "__pal_mul_overflow_u64_u64"
+                                    : "__pal_mul_overflow_u64_u32")),
+                loc.clone());
             auto primArgs = Vec<Rc<ir::Expr>>::new_();
             for (unsigned i = 0; i < 2; ++i) {
               primArgs.push(mk_rvalue_cast(
@@ -2281,7 +2287,7 @@ public:
           reportUnsupported(e->getSourceRange(), loc,
                             "unsupported __builtin_mul_overflow operand types",
                             " (requires unsigned operands up to 64 bits and a "
-                            "nonvolatile uint32 destination)");
+                            "nonvolatile uint32 or uint64 destination)");
           return mk_rvalue_err(std::move(loc),
                                trQualType(e->getType(), e->getSourceRange()));
         }
