@@ -14841,6 +14841,8 @@ pub fn emit_palow(
     let mut decayed: HashSet<String> = HashSet::new();
     // Passing a global address to a plain parameter needs no permission
     // when the callee does not request anything through that parameter.
+    // A clause that only tests the parameter against NULL requests nothing
+    // through it: the caller discharges it from `addr_var_g_not_null`.
     // Its separate, transitive global grants still propagate normally.
     let mut address_args: HashMap<String, HashSet<usize>> = HashMap::new();
     for decl in &tu.decls {
@@ -14866,6 +14868,7 @@ pub fn emit_palow(
                     }
                     _ => true,
                 }),
+                _ if Body::null_tested(e).is_some_and(|(v, _)| v == **name) => false,
                 _ => old_mentions(e, &names, true),
             });
             (!used).then_some(i)
