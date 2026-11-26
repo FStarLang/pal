@@ -33031,7 +33031,7 @@ fn is_zero(e: &Expr) -> bool {
 }
 
 /// A nested exit needs continuation lowering even when its sibling falls through.
-fn may_exit(stmts: &Stmts) -> bool {
+pub(crate) fn may_exit(stmts: &Stmts) -> bool {
     stmts.iter().any(|s| match &s.val {
         StmtT::Return(_) | StmtT::Goto(_) => true,
         StmtT::If {

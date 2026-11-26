@@ -1116,6 +1116,11 @@ fn mk_if(loc: Rc<SourceInfo>, cond: Rc<Expr>, a: Stmts, b: Stmts, ensures: Exprs
     }
     .with_loc(loc)
 }
+/// Whether `stmts` may leave by `return` or `goto`, as the emitter decides
+/// it for the arms of an `if`.
+fn stmts_may_exit(stmts: &Stmts) -> bool {
+    crate::pass::emit_palow::may_exit(stmts)
+}
 fn mk_match_branch(patterns: Exprs, body: Stmts) -> Rc<MatchBranch> {
     Rc::new(MatchBranch {
         patterns: Rc::new(patterns),

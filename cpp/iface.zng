@@ -356,6 +356,7 @@ mod crate::clang {
     fn mk_return_void(Rc<SourceInfo>) -> Rc<Stmt>;
     fn mk_call(Rc<SourceInfo>, Rc<Expr>) -> Rc<Stmt>;
     fn mk_if(Rc<SourceInfo>, Rc<Expr>, Vec<Rc<Stmt>>, Vec<Rc<Stmt>>, Vec<Rc<Expr>>) -> Rc<Stmt>;
+    fn stmts_may_exit(&Vec<Rc<Stmt>>) -> bool;
     fn mk_match_branch(Vec<Rc<Expr>>, Vec<Rc<Stmt>>) -> Rc<MatchBranch>;
     fn mk_match(Rc<SourceInfo>, Rc<Expr>, Vec<Rc<MatchBranch>>, Vec<Rc<Stmt>>, Vec<Rc<Expr>>) -> Rc<Stmt>;
     fn mk_while(Rc<SourceInfo>, Rc<Expr>, Vec<Rc<Expr>>, Vec<Rc<Expr>>, Vec<Rc<Expr>>, Vec<Rc<Stmt>>) -> Rc<Stmt>;
