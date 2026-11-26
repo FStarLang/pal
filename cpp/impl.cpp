@@ -4446,11 +4446,9 @@ public:
         return ctx.add_fn_defn(std::move(builder), std::move(body));
       } else {
         if (FD->doesThisDeclarationHaveABody() && !admit) {
-          std::string message =
-              "--only-function excludes body of `" + FD->getName().str() +
-              "`; only its external declaration is translated";
-          ctx.report_diag(getRange(FD->getSourceRange()), false,
-                          toStr(message));
+          ctx.exclude_function_body(getRange(FD->getSourceRange()),
+                                    getRange(FD->getBody()->getSourceRange()),
+                                    toStr(FD->getName()));
         }
         return ctx.add_fn_decl(std::move(builder));
       }
