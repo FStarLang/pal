@@ -313,7 +313,14 @@ When a function won't verify, **localize before you theorize**:
    single lemma — you are usually one type-ascription away.
 5. **Slow, not failing? Suspect structure first.** An opaque slprop hiding a
    `pts_to`, an existential keyed on the wrong name, or a quantified
-   invariant with a bad trigger. Only after ruling those out, raise the budget —
+   invariant with a bad trigger. A `_forall`/`_exists` without a `_trigger`
+   is left to the solver, which usually picks `SizeT.v i` and so fires on
+   every `size_t` in the context; when an invariant
+   `_forall(size_t b, Q(b) ==> _exists(size_t j, ...))` brings a fresh `j` per
+   instance, that is a matching loop. Give such quantifiers an explicit
+   trigger naming the term the proof actually goes through —
+   `_forall(size_t b, _trigger(_BIT(b)), ...)`, `_trigger(a[k])` — see
+   `_trigger` in `pal_surface_syntax.md`. Only after ruling those out, raise the budget —
    prefer a *target-specific* `--z3rlimit_factor` over a global bump, and
    keep it as low as still passes. Note that `--z3rlimit` does not bound
    wall time: a matching loop can run for hours while using only a few rlimit

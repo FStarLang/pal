@@ -1,17 +1,17 @@
-FROM mcr.microsoft.com/devcontainers/base:ubuntu24.04
+FROM mcr.microsoft.com/devcontainers/base:ubuntu26.04
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         pkg-config libgmp-dev tmux ripgrep tig gdb \
-        clang clang-format ccls zstd rustup \
+        clang clang-format zstd rustup \
         lsb-release wget software-properties-common gnupg && \
     apt-get clean
 
 RUN wget https://apt.llvm.org/llvm.sh && \
     chmod +x llvm.sh && \
-    ./llvm.sh 20 && \
+    ./llvm.sh 23 && \
     apt-get update && \
-    apt-get install -y clang-20 libclang-cpp20-dev g++ clang-tools-20 libclang-20-dev && \
+    apt-get install -y llvm-23 llvm-23-dev clang-23 libclang-cpp23-dev g++ clang-tools-23 libclang-23-dev clang-format-23 && \
     apt-get clean && \
     rm llvm.sh
 

@@ -21,6 +21,7 @@ void across_call(struct holder *h)
     keep(h);
     *q = 5;
     _assert(h->s->seq == 5);
+    _assert(*q == h->s->seq);
 }
 
 void store_call_result(struct holder *h)
