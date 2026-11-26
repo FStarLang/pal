@@ -34,7 +34,10 @@ endif
 
 FST_FILES := $(wildcard $(OUT_DIR)/*.fst)
 FSTI_FILES := $(wildcard $(OUT_DIR)/*.fsti)
-EXPECTED_FAILURE_MODULES := $(if $(wildcard $(EXPECTED_FAILURES_FILE)),$(shell sed 's/#.*//; /^[[:space:]]*$$/d; s/[[:space:]]//g; s/\.fst$$//' $(EXPECTED_FAILURES_FILE)))
+# A literal '#': before GNU Make 4.3 (e.g. macOS's 3.81), a '#' inside a
+# function call starts a comment, and from 4.3 on, '\#' there stays '\#'.
+HASH := \#
+EXPECTED_FAILURE_MODULES := $(if $(wildcard $(EXPECTED_FAILURES_FILE)),$(shell sed 's/$(HASH).*//; /^[[:space:]]*$$/d; s/[[:space:]]//g; s/\.fst$$//' $(EXPECTED_FAILURES_FILE)))
 EXPECTED_FAILURE_FILES := $(addprefix $(OUT_DIR)/,$(addsuffix .fst,$(EXPECTED_FAILURE_MODULES)))
 ALL_CHECKED_FILES := $(patsubst $(OUT_DIR)/%.fst,$(CACHE_DIR)/%.fst.checked,$(filter-out $(EXPECTED_FAILURE_FILES),$(FST_FILES))) \
                      $(patsubst $(OUT_DIR)/%.fsti,$(CACHE_DIR)/%.fsti.checked,$(FSTI_FILES))

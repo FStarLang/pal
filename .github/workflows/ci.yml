@@ -9,7 +9,7 @@ env:
 
 jobs:
   main:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
     - uses: actions/checkout@v3
 
@@ -17,9 +17,9 @@ jobs:
       run: |
         wget https://apt.llvm.org/llvm.sh
         chmod +x llvm.sh
-        sudo ./llvm.sh 20
+        sudo ./llvm.sh 23
         sudo apt update
-        sudo apt install -y clang-20 libclang-cpp20-dev g++ clang-tools-20 libclang-20-dev
+        sudo apt install -y clang-23 llvm-23-dev libclang-cpp23-dev g++ clang-tools-23 libclang-23-dev clang-format-23
 
     - name: Install F*
       run: ./opt/install-fstar.sh --link-dir /usr/local/bin
