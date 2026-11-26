@@ -235,7 +235,7 @@ fn scan_expr(deps: &mut HashSet<DeclName>, rv: &Expr) {
             scan_expr(deps, value);
             scan_expr(deps, count);
         }
-        ExprT::MemsetZero(ty, ptr) => {
+        ExprT::MemsetZero(ty, ptr) | ExprT::MemsetFill(ty, ptr, _) => {
             scan_type(deps, ty);
             scan_expr(deps, ptr);
         }

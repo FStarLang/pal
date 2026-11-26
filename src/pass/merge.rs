@@ -167,7 +167,7 @@ fn rename_expr_in_place(expr: &mut Expr, renames: &HashMap<Rc<str>, Rc<Ident>>) 
             rename_expr_in_place(Rc::make_mut(value), renames);
             rename_expr_in_place(Rc::make_mut(count), renames);
         }
-        ExprT::MemsetZero(ty, ptr) => {
+        ExprT::MemsetZero(ty, ptr) | ExprT::MemsetFill(ty, ptr, _) => {
             rename_type_in_place(Rc::make_mut(ty), renames);
             rename_expr_in_place(Rc::make_mut(ptr), renames);
         }
@@ -776,7 +776,7 @@ fn collect_refs_expr(e: &Expr, out: &mut Vec<TypeKey>) {
             collect_refs_expr(value, out);
             collect_refs_expr(n, out);
         }
-        ExprT::MemsetZero(ty, ptr) => {
+        ExprT::MemsetZero(ty, ptr) | ExprT::MemsetFill(ty, ptr, _) => {
             collect_type_refs(ty, out);
             collect_refs_expr(ptr, out);
         }

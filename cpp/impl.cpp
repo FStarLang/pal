@@ -2397,6 +2397,16 @@ public:
                 return mk_memset_zero(std::move(loc), std::move(objTy),
                                       trRValue(ptrArg));
               }
+              // Filling a whole structure with a nonzero byte (a debug
+              // scribble) leaves it holding no value of its type.
+              if (!valIsZero && !pointeeQt.isNull() &&
+                  pointeeQt->isStructureType() &&
+                  astCtx->hasSameUnqualifiedType(objQt, pointeeQt)) {
+                auto objTy = trQualType(pointeeQt, szof->getSourceRange());
+                return mk_memset_fill(std::move(loc), std::move(objTy),
+                                      trRValue(ptrArg),
+                                      static_cast<uint32_t>(fillByte));
+              }
             }
           }
           // Filling a whole array: `f(arr, N)` where `arr` is an array-typed
@@ -3570,14 +3580,11 @@ public:
 
           auto defaultBody = defaultGroup ? makeBody(*defaultGroup)
                                           : Vec<Rc<ir::Stmt>>::new_();
+          // Keep the clauses apart: an ownership clause is recognised only
+          // when it stands alone.
           auto matchEnss = Vec<Rc<ir::Expr>>::new_();
-          auto combined = switchEnss.front().clone();
-          for (size_t i = 1; i < switchEnss.size(); i++) {
-            combined =
-                mk_rvalue_binop(loc.clone(), ir::BinOp::LogAnd(),
-                                std::move(combined), switchEnss[i].clone());
-          }
-          matchEnss.push(std::move(combined));
+          for (auto &ens : switchEnss)
+            matchEnss.push(ens.clone());
           stmts.push(mk_match(loc.clone(),
                               mk_lvalue_var(loc.clone(), scrutId.clone()),
                               std::move(matchBranches), std::move(defaultBody),

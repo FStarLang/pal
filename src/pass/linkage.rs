@@ -665,6 +665,7 @@ impl Renamer<'_> {
             | ExprT::MallocFlex(t, e)
             | ExprT::CallocFlex(t, e)
             | ExprT::MemsetZero(t, e)
+            | ExprT::MemsetFill(t, e, _)
             | ExprT::ContainerOf(e, t, _) => {
                 self.expr(e, bound);
                 self.ty(t, bound);
