@@ -14841,8 +14841,10 @@ pub fn emit_palow(
     let mut decayed: HashSet<String> = HashSet::new();
     // Passing a global address to a plain parameter needs no permission
     // when the callee does not request anything through that parameter.
-    // A clause that only tests the parameter against NULL requests nothing
-    // through it: the caller discharges it from `addr_var_g_not_null`.
+    // A clause that only compares the parameter's value -- tests it against
+    // NULL, or for equality with another value -- requests nothing through
+    // it: the caller discharges a NULL test from `addr_var_g_not_null`, and
+    // an equality from whatever it knows of the address it passes.
     // Its separate, transitive global grants still propagate normally.
     let mut address_args: HashMap<String, HashSet<usize>> = HashMap::new();
     for decl in &tu.decls {
@@ -14868,8 +14870,7 @@ pub fn emit_palow(
                     }
                     _ => true,
                 }),
-                _ if Body::null_tested(e).is_some_and(|(v, _)| v == **name) => false,
-                _ => old_mentions(e, &names, true),
+                _ => !compares_only(e, name),
             });
             (!used).then_some(i)
         }).collect::<HashSet<_>>();
@@ -30314,6 +30315,30 @@ fn mentions_return(e: &Expr, ret: &str) -> bool {
             _ => false,
         }),
         _ => true,
+    }
+}
+
+/// Whether the clause `e` names `v` only to compare its value: as a truth
+/// value, or as an operand of `==` (`!=` is its negation) whose other operand
+/// does not name it, under `!`, `&&`, `||` and `==>`. A clause that does not
+/// name `v` at all qualifies. Comparing a pointer reads nothing through it.
+fn compares_only(e: &Expr, v: &str) -> bool {
+    fn peel(e: &Expr) -> &Expr {
+        match &strip_vattr(e).val {
+            ExprT::Cast(inner, _) => peel(inner),
+            _ => strip_vattr(e),
+        }
+    }
+    let is_v = |e: &Expr| matches!(&peel(e).val, ExprT::Var(x) if &*x.val == v);
+    let names = HashSet::from([v.to_string()]);
+    match &peel(e).val {
+        _ if is_v(e) => true,
+        ExprT::UnOp(UnOp::Not, a) => compares_only(a, v),
+        ExprT::BinOp(BinOp::LogAnd | BinOp::LogOr | BinOp::Implies, a, b) => {
+            compares_only(a, v) && compares_only(b, v)
+        }
+        ExprT::BinOp(BinOp::Eq, a, b) => [a, b].iter().all(|x| is_v(x) || !old_mentions(x, &names, true)),
+        _ => !old_mentions(e, &names, true),
     }
 }
 
