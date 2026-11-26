@@ -27560,7 +27560,8 @@ impl<'a> Body<'a> {
                     let pn = palow_name(self.tds, ty)
                         .ok_or_else(|| format!("a nonzero `memset` of {}", describe(ty)))?;
                     let a = self.rvalue(p)?;
-                    self.lines.push(format!("assert ({}_pts_to_uninit ({}));", pn, a));
+                    self.lines
+                        .push(format!("assert ({}_pts_to_uninit ({}));", pn, a));
                     Ok(())
                 }
                 _ => Err(format!(
