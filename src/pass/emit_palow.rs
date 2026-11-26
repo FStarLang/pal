@@ -22256,7 +22256,13 @@ impl<'a> Body<'a> {
         // order and supplied C's implicit tail. Do not make F* count a
         // potentially very large list for a uniform zero byte array.
         if let Some((leaf, len)) = flat_array(self.tds, ty)
-            && matches!(peel(self.tds, leaf).val, TypeT::Int { signed: false, width: 8 })
+            && matches!(
+                peel(self.tds, leaf).val,
+                TypeT::Int {
+                    signed: false,
+                    width: 8
+                }
+            )
             && vs.len() as u64 == len
             && vs.iter().all(|v| v == "0uy")
         {
@@ -22768,10 +22774,16 @@ impl<'a> Body<'a> {
                         n.val
                     ));
                 }
-                let member_ty = self.tds.unions.get(&*n.val)
+                let member_ty = self
+                    .tds
+                    .unions
+                    .get(&*n.val)
                     .and_then(|u| u.members.iter().find(|f| f.name == *m.val))
-                    .ok_or_else(|| format!("an unknown union initializer member {}.{}", n.val, m.val))?
-                    .ty.clone();
+                    .ok_or_else(|| {
+                        format!("an unknown union initializer member {}.{}", n.val, m.val)
+                    })?
+                    .ty
+                    .clone();
                 // No array-to-pointer conversion: this is the value of
                 // the selected member, just as for a struct initializer.
                 let v = self.init_value(&member_ty, e)?;
