@@ -525,7 +525,15 @@ fn scan_translation_unit(deps: &mut Deps<DeclName>, tu: &TranslationUnit) {
     }
 }
 
-pub fn prune(tu: &mut TranslationUnit, required_functions: &[String]) {
+/// Keep the declarations of the main files, the `required_functions`, and
+/// what they use. `selected_units`, if given, holds the TU-local name prefixes
+/// of the units the selection applies to (`--only-function-in`): a selected
+/// TU-local function of another unit is kept only if something uses it.
+pub fn prune(
+    tu: &mut TranslationUnit,
+    required_functions: &[String],
+    selected_units: Option<&HashSet<String>>,
+) {
     let mut deps = Deps::new();
     scan_translation_unit(&mut deps, tu);
     for name in required_functions {
@@ -534,9 +542,13 @@ pub fn prune(tu: &mut TranslationUnit, required_functions: &[String]) {
     // A selected TU-local function is known by its renamed name.
     for decl in &tu.decls {
         if let DeclT::FnDefn(f) = &decl.val
-            && required_functions
-                .iter()
-                .any(|n| n == crate::pass::linkage::source_name(&f.decl.name.val))
+            && let name = &*f.decl.name.val
+            && let source = crate::pass::linkage::source_name(name)
+            && required_functions.iter().any(|n| n == source)
+            && (source.len() == name.len()
+                || selected_units.is_none_or(|units| {
+                    units.iter().any(|prefix| name.starts_with(prefix.as_str()))
+                }))
         {
             deps.add_root(decl_name(decl));
         }
