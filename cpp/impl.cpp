@@ -298,14 +298,15 @@ public:
       return;
     if (auto *ds = dyn_cast<DeclStmt>(s))
       for (auto *d : ds->decls())
-        if (auto *v = dyn_cast<VarDecl>(d); v && v->isStaticLocal() &&
-            v->getTLSKind() == VarDecl::TLS_None &&
+        if (auto *v = dyn_cast<VarDecl>(d);
+            v && v->isStaticLocal() && v->getTLSKind() == VarDecl::TLS_None &&
             !astCtx->getBaseElementType(v->getType()).isConstQualified() &&
             takesAddressOf(v, fn->getBody())) {
           // A per-body ordinal distinguishes same-line macro expansions and
           // stays stable when the caller selects only some function bodies.
-          blockObjects[v->getCanonicalDecl()] =
-              "__pal_block_" + std::to_string(n++) + "_" + fn->getNameAsString();
+          blockObjects[v->getCanonicalDecl()] = "__pal_block_" +
+                                                std::to_string(n++) + "_" +
+                                                fn->getNameAsString();
         }
     for (auto *child : s->children())
       indexBlockObjects(child, fn, n);
@@ -3856,22 +3857,27 @@ public:
               continue;
             }
             if (shadowsBlockExtern(fn, vd)) {
-              ctx.report_diag(dloc.clone(), true,
-                              "shadowed block-scope extern is not supported"_rs);
+              ctx.report_diag(
+                  dloc.clone(), true,
+                  "shadowed block-scope extern is not supported"_rs);
               stmts.push(mk_stmt_err(dloc.clone()));
               continue;
             }
             if (vd->getTLSKind() != VarDecl::TLS_None) {
-              ctx.report_diag(dloc.clone(), true,
-                              "block-scope thread-local storage is not supported"_rs);
+              ctx.report_diag(
+                  dloc.clone(), true,
+                  "block-scope thread-local storage is not supported"_rs);
               stmts.push(mk_stmt_err(dloc.clone()));
               continue;
             }
-            if (!vd->getCanonicalDecl()->getLexicalDeclContext()->isFileContext()) {
-              ctx.add_c_symbol(toStr(vd->getName()), 1,
-                               toStr(vd->getType().getCanonicalType().getAsString()),
-                               !vd->hasExternalFormalLinkage(), false, false,
-                               isIgnored(vd), false, dloc.clone());
+            if (!vd->getCanonicalDecl()
+                     ->getLexicalDeclContext()
+                     ->isFileContext()) {
+              ctx.add_c_symbol(
+                  toStr(vd->getName()), 1,
+                  toStr(vd->getType().getCanonicalType().getAsString()),
+                  !vd->hasExternalFormalLinkage(), false, false, isIgnored(vd),
+                  false, dloc.clone());
               HandleDecl(vd);
             }
             continue;
@@ -4468,7 +4474,8 @@ public:
         inSystemBody =
             sm.isInSystemHeader(sm.getExpansionLoc(FD->getLocation()));
         unsigned site = 0;
-        if (!astCtx->getLangOpts().CPlusPlus && hasAnnotation(FD, "pal-block-storage"))
+        if (!astCtx->getLangOpts().CPlusPlus &&
+            hasAnnotation(FD, "pal-block-storage"))
           indexBlockObjects(FD->getBody(), FD, site);
         auto body = trStmts(FD->getBody());
         inSystemBody = outer;
