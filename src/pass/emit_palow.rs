@@ -28510,10 +28510,14 @@ impl<'a> Body<'a> {
                 // before it lands somewhere its original column means nothing.
                 let hint = flatten_fragment(t?.trim())?;
                 if let Some(contract) = hint.strip_prefix("pal_next_if ") {
-                    if !contract.starts_with("requires ") || !contract.contains(" ensures ")
+                    if !contract.starts_with("requires ")
+                        || !contract.contains(" ensures ")
                         || self.next_if_contract.is_some()
                     {
-                        return Err("expected one requires/ensures contract for the next conditional".into());
+                        return Err(
+                            "expected one requires/ensures contract for the next conditional"
+                                .into(),
+                        );
                     }
                     self.next_if_contract = Some(contract.to_string());
                     return Ok(());
