@@ -615,6 +615,7 @@ impl DeclBuilder {
             name: Some(name),
             ty,
             mode,
+            cursor_from: None,
         })
     }
     fn arg_anon(&mut self, ty: Rc<Type>, mode: ParamMode) {
@@ -627,7 +628,14 @@ impl DeclBuilder {
             name: Some(name),
             ty,
             mode,
+            cursor_from: None,
         })
+    }
+
+    fn cursor_from(&mut self, seed: Rc<Ident>) {
+        if let Some(a) = self.args.last_mut() {
+            a.cursor_from = Some(seed);
+        }
     }
 
     fn field(&mut self, name: Rc<Ident>, ty: Rc<Type>) {

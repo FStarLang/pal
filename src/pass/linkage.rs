@@ -670,10 +670,13 @@ impl Renamer<'_> {
                 self.expr(e, bound);
                 self.ty(t, bound);
             }
-            ExprT::Forall(n, t, e) | ExprT::Exists(n, t, e) => {
+            ExprT::Forall(n, t, trigs, e) | ExprT::Exists(n, t, trigs, e) => {
                 self.ty(t, bound);
                 let mut nested = bound.clone();
                 self.bind(&mut nested, n);
+                for tr in trigs.iter_mut().flatten() {
+                    self.expr(tr, &nested);
+                }
                 self.expr(e, &nested);
             }
             ExprT::ArrayInit { elem_ty, elems, .. } => {
