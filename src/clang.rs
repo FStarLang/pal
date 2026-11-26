@@ -43,6 +43,8 @@ pub struct Ctx<'a> {
     include_files: Vec<String>,
     defines: Vec<String>,
     only_functions: HashSet<String>,
+    /// The bodies `--only-function` leaves out of the translation.
+    excluded_bodies: Vec<Location>,
     interned_strs: HashSet<Rc<str>>,
     translation_unit: TranslationUnit,
     diagnostics: Diagnostics,
@@ -68,6 +70,7 @@ impl<'a> Ctx<'a> {
             include_files,
             defines,
             only_functions,
+            excluded_bodies: Vec::new(),
             interned_strs: HashSet::new(),
             translation_unit: TranslationUnit {
                 main_file_names: vec![main_file_name],
@@ -105,6 +108,17 @@ impl<'a> Ctx<'a> {
 
     fn selects_function_body(&self, name: &str) -> bool {
         self.only_functions.is_empty() || self.only_functions.contains(name)
+    }
+
+    /// `--only-function` translates only the declaration of `name`, defined at
+    /// `decl` with its body at `body`.
+    fn exclude_function_body(&mut self, decl: Rc<SourceInfo>, body: Rc<SourceInfo>, name: &str) {
+        self.excluded_bodies.push(body.location().clone());
+        self.report_diag(
+            decl,
+            false,
+            &format!("--only-function excludes body of `{name}`; only its external declaration is translated"),
+        );
     }
 
     /// Extra preprocessor defines: a test's own `-D` flags, and how a source
@@ -1194,5 +1208,20 @@ pub fn parse_file(
     );
     ctx.symbols.identity = identity.clone();
     generated::parse_file(&mut ctx);
+    // An error clang reports inside a body that is not translated cannot make
+    // the translation wrong, so it is reported as a warning. An error in the
+    // function's signature still fails: the declaration is translated.
+    for diag in &mut ctx.diagnostics.diags {
+        if diag.level == DiagnosticLevel::Error
+            && ctx.excluded_bodies.iter().any(|body| {
+                body.file_name == diag.loc.file_name
+                    && body.range.start <= diag.loc.range.start
+                    && diag.loc.range.end <= body.range.end
+            })
+        {
+            diag.level = DiagnosticLevel::Warning;
+            diag.msg = format!("in a body --only-function excludes: {}", diag.msg);
+        }
+    }
     (ctx.translation_unit, ctx.diagnostics, ctx.symbols)
 }

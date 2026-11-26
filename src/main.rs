@@ -82,6 +82,13 @@ struct Cli {
     only_functions: Vec<String>,
 
     #[arg(
+        long = "only-function-in",
+        value_name = "FILE",
+        help = "Apply --only-function to this input file only; the other input files have every body translated"
+    )]
+    only_function_files: Vec<String>,
+
+    #[arg(
         short = 'D',
         help = "Preprocessor definitions, e.g. -DFOO or -DFOO=bar"
     )]
@@ -210,9 +217,48 @@ fn main() {
     let mut defines: Vec<String> = cli.defines.clone();
     defines.push("PALOW".to_string());
 
+    // `--only-function-in` scopes the selection to some of the input files.
+    // Every body of the other files is translated, as without a selection.
+    if !cli.only_function_files.is_empty() && cli.only_functions.is_empty() {
+        eprintln!("error: --only-function-in needs at least one --only-function");
+        std::process::exit(1);
+    }
+    let input_names: HashSet<String> = cli
+        .files
+        .iter()
+        .map(|file| vfs::absolute_file_name(file).unwrap())
+        .collect();
+    let mut selected_files = HashSet::new();
+    for file in &cli.only_function_files {
+        let file_name = vfs::absolute_file_name(file).unwrap();
+        if !input_names.contains(&file_name) {
+            eprintln!("error: --only-function-in `{file}` is not an input file");
+            std::process::exit(1);
+        }
+        selected_files.insert(file_name);
+    }
+    // The translation units the selection applies to, by the prefix of their
+    // TU-local names. A selected static body is kept only in these; another
+    // unit keeps its copy only if something there uses it, as without a
+    // selection.
+    let selected_units: Option<HashSet<String>> = (!selected_files.is_empty()).then(|| {
+        cli.files
+            .iter()
+            .zip(&identities)
+            .filter(|(file, _)| selected_files.contains(&vfs::absolute_file_name(file).unwrap()))
+            .map(|(_, identity)| identity.prefix.clone())
+            .collect()
+    });
+
     let parse_start = Instant::now();
     for (file, identity) in cli.files.iter().zip(&identities) {
         let file_name = vfs::absolute_file_name(file).unwrap();
+        let only_functions: &[String] =
+            if selected_files.is_empty() || selected_files.contains(&file_name) {
+                &cli.only_functions
+            } else {
+                &[]
+            };
 
         if let Err(error) = vfs.read_vfs_file(&file_name) {
             eprintln!("Cannot open {}: {}", file_name, error);
@@ -224,7 +270,7 @@ fn main() {
             &cli.include_paths,
             &cli.include_files,
             &defines,
-            &cli.only_functions,
+            only_functions,
             identity,
             &mut *vfs,
         );
@@ -279,7 +325,11 @@ fn main() {
     pass::builtins::builtins(&mut combined_tu);
 
     let t = Instant::now();
-    pass::prune::prune(&mut combined_tu, &cli.only_functions);
+    pass::prune::prune(
+        &mut combined_tu,
+        &cli.only_functions,
+        selected_units.as_ref(),
+    );
     if cli.time_passes {
         eprintln!(
             "  prune ({} decls): {:.3}s",

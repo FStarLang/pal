@@ -246,6 +246,7 @@ pal [OPTIONS] <FILES>...
   -I <PATH>              extra include search paths
       --include <FILE>   preinclude a header (repeatable, in order)
       --only-function <NAME>  select a function body (repeatable)
+      --only-function-in <FILE>  apply the selection to this input file only (repeatable)
       --print-ir         print IR and exit
       --time-passes      show per-pass timing
   -q, --quiet            suppress diagnostics on stderr
@@ -261,6 +262,14 @@ annotation header supplied by `--include`, without copying its C body.
 Preincluded headers follow any platform headers in the compilation database.
 A selected definition in an included header remains a proof root even when
 none of the input sources call it.
+
+`--only-function-in` scopes the selection to some input files. In those files'
+translation units only the named bodies are translated, as above; every body
+of the other input files, and of the headers they include, is translated as
+without `--only-function`. This lets one run check whole files together with a
+few bodies selected from much larger files, which then share one translation of
+every common declaration. The named file must be one of the inputs, and the
+option needs at least one `--only-function`.
 
 ---
 
