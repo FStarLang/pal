@@ -3068,6 +3068,12 @@ struct FnSurface {
     /// asking Pulse for ownership its own signature no longer states, so the
     /// access is refused and counted instead.
     granted: HashSet<String>,
+    /// Granted parameters whose spliced contract states their bytes
+    /// (`..._pts_to $(P)` on a `_plain` P) and no deep ownership: a load of a
+    /// pointer their `_owning` union member owns is a plain load through
+    /// them, not one that opens that ownership, which the caller may have
+    /// lent out.
+    bytes_only: HashSet<String>,
     /// Whether the contract carries ownership the author wrote by hand. Palow
     /// cannot read such a clause, so it cannot tell which object it covers;
     /// a parameter's dereference already takes one as a grant over everything,
@@ -5987,6 +5993,100 @@ fn pure_let(
 /// A call to an slprop-valued `_let` is the same thing under a name: the
 /// author has given a piece of ownership a word, and a contract that uses the
 /// word means the ownership.
+/// The `_plain` parameters `P` of `decl` that its spliced clauses give only
+/// bytes: some clause states `..._pts_to $(P)`, or `..._pts_to ($(P) ...)`
+/// for the bytes of a field, and none mentions an `_own` predicate (or a
+/// word for one, like `..._owned`).
+fn bytes_only_params<'e>(
+    tds: &Typedefs,
+    decl: &FnDecl,
+    clauses: impl Iterator<Item = &'e Rc<Expr>>,
+) -> HashSet<String> {
+    let mut named: HashSet<String> = HashSet::new();
+    for c in clauses {
+        let Some(code) = slprop_refine(tds, c) else {
+            continue;
+        };
+        let mut prev_pts_to = false;
+        for tok in &code.tokens {
+            match tok {
+                InlinePulseToken::Verbatim(ct) => {
+                    if names_own_predicate(&ct.text.val) {
+                        return HashSet::new();
+                    }
+                    // Tokens may arrive split, so `_pts_to ($(p) ...)` gives
+                    // a lone `(` between the predicate and the antiquot.
+                    let t = ct
+                        .text
+                        .val
+                        .trim_end_matches(|c: char| c.is_whitespace() || c == '(');
+                    if !t.is_empty() {
+                        prev_pts_to = t.ends_with("_pts_to");
+                    }
+                }
+                InlinePulseToken::RValueAntiquot { expr, .. } => {
+                    if prev_pts_to && let ExprT::Var(v) = &strip_vattr(expr).val {
+                        named.insert(v.val.to_string());
+                    }
+                    prev_pts_to = false;
+                }
+                _ => prev_pts_to = false,
+            }
+        }
+    }
+    decl.args
+        .iter()
+        .filter(|a| is_plain_chain(&a.ty))
+        .filter_map(|a| a.name.as_ref().map(|n| n.val.to_string()))
+        .filter(|n| named.contains(n))
+        .collect()
+}
+
+/// Whether `text` names an `_own` predicate (`..._own` as a whole word) or a
+/// word for one (`..._owned`), as opposed to a pure fact about one, like
+/// `..._own_ok`.
+fn names_own_predicate(text: &str) -> bool {
+    text.match_indices("_own").any(|(i, _)| {
+        let rest = &text[i + "_own".len()..];
+        rest.starts_with("ed")
+            || !rest
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// A spliced clause that is a single `pure (...)`: it states no ownership.
+fn is_pure_only_clause(tds: &Typedefs, e: &Rc<Expr>) -> bool {
+    let Some(code) = slprop_refine(tds, e) else {
+        return false;
+    };
+    let mut first = true;
+    for tok in &code.tokens {
+        if let InlinePulseToken::Verbatim(ct) = tok {
+            // `pure` itself, not a predicate whose name merely starts with
+            // it: `pure_cell p` may well own `p`.
+            if first
+                && !ct
+                    .text
+                    .val
+                    .trim_start()
+                    .strip_prefix("pure")
+                    .is_some_and(|r| r.starts_with(|c: char| c.is_whitespace() || c == '('))
+            {
+                return false;
+            }
+            if ct.text.val.contains("**") {
+                return false;
+            }
+        } else if first {
+            return false;
+        }
+        first = false;
+    }
+    !first
+}
+
 fn is_slprop_clause(tds: &Typedefs, e: &Rc<Expr>) -> bool {
     is_own_refine(tds, e)
 }
@@ -6013,7 +6113,11 @@ fn emit_fn(
     // Whether the author's `_ensures` states ownership rather than only
     // propositions. Asked here, ahead of the parameter loop, because it
     // changes what a parameter mode is allowed to promise back.
-    let ens_own = decl.ensures.iter().any(|e| is_slprop_clause(tds, e));
+    // A clause that is only a `pure (...)` states a fact, not ownership.
+    let ens_own = decl
+        .ensures
+        .iter()
+        .any(|e| is_slprop_clause(tds, e) && !is_pure_only_clause(tds, e));
     let mut req: Vec<String> = Vec::new();
     // Hand-written ownership the contract hands back, which unlike the
     // generated kind binds no existential of its own -- the author names
@@ -8457,7 +8561,9 @@ fn emit_fn(
     // parameter it covers is the author's business. So one is taken as a grant
     // over everything, which is the same trust a spliced clause gets
     // everywhere else.
+    let mut bytes_only = HashSet::new();
     if contract_ok && !(req_slprops.is_empty() && ens_slprops.is_empty()) {
+        bytes_only = bytes_only_params(tds, decl, req_slprops.iter().chain(ens_slprops.iter()));
         granted.extend(
             decl.args
                 .iter()
@@ -8488,6 +8594,7 @@ fn emit_fn(
         null_payload,
         null_outs,
         granted,
+        bytes_only,
         spliced_own: contract_ok
             && (!(req_slprops.is_empty() && ens_slprops.is_empty()) || refine_own_spliced.take()),
         contract: contract_ok,
@@ -13572,7 +13679,9 @@ fn collect_array_fill_expr(tds: &Typedefs, e: &Expr, out: &mut BTreeMap<String, 
             collect_array_fill_expr(tds, b, out);
             collect_array_fill_expr(tds, c, out);
         }
-        ExprT::MemsetZero(_, x) | ExprT::Free(x) => collect_array_fill_expr(tds, x, out),
+        ExprT::MemsetZero(_, x) | ExprT::MemsetFill(_, x, _) | ExprT::Free(x) => {
+            collect_array_fill_expr(tds, x, out)
+        }
         ExprT::Forall(_, ty, trigs, body) | ExprT::Exists(_, ty, trigs, body) => {
             collect_array_fill_type(tds, ty, out);
             for t in trigs.iter().flatten() {
@@ -14092,6 +14201,7 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
         | ExprT::MallocFlex(_, x)
         | ExprT::CallocFlex(_, x)
         | ExprT::MemsetZero(_, x)
+        | ExprT::MemsetFill(_, x, _)
         | ExprT::Free(x) => go(x),
         ExprT::Live(x) => {
             if let ExprT::Var(v) = &strip_vattr(x).val {
@@ -16120,6 +16230,8 @@ struct Body<'a> {
     outs: &'a [OwnedParam],
     /// Parameters whose pointee the emitted contract owns; see `FnSurface`.
     granted: &'a HashSet<String>,
+    /// See `FnSurface::bytes_only`.
+    bytes_only: &'a HashSet<String>,
     /// See `FnSurface::spliced_own`.
     spliced_own: bool,
     /// Parameters whose struct pointee the contract owns field by field. See
@@ -17054,7 +17166,7 @@ impl<'a> Body<'a> {
             return None;
         };
         let p = v.val.to_string();
-        if !self.params.contains(&p) || !self.owned_here(&p) {
+        if !self.params.contains(&p) || !self.owned_here(&p) || self.bytes_only.contains(&p) {
             return None;
         }
         Some(OwnPath {
@@ -17227,7 +17339,8 @@ impl<'a> Body<'a> {
     /// value the object holds after the write. Ownership is read at the
     /// object's current value, so it cannot be left behind. A write to a field
     /// the ownership does read is not followed, since the ownership then
-    /// really is about something else.
+    /// really is about something else. A bytes-only parameter has no deep
+    /// ownership to follow.
     fn own_before_write(&mut self, lhs: &Expr) -> Option<(String, String, String)> {
         if let Some(b) = self.union_own_before_write(lhs) {
             return Some(b);
@@ -17242,7 +17355,7 @@ impl<'a> Body<'a> {
             return None;
         };
         let p = v.val.to_string();
-        if !self.owned_here(&p) || !self.params.contains(&p) {
+        if !self.owned_here(&p) || !self.params.contains(&p) || self.bytes_only.contains(&p) {
             return None;
         }
         let ty = self.ty_of(base).ok()?;
@@ -23272,7 +23385,8 @@ impl<'a> Body<'a> {
     /// held through its `_owning` member may store anywhere in that member,
     /// so the ownership follows the call only as far as the callee promises
     /// the bytes it is keyed on `_unchanged`; `own_follow` asks for exactly
-    /// that. Name the union's value before the member is lent.
+    /// that. Name the union's value before the member is lent. A parameter
+    /// whose contract gives only its bytes has no ownership to follow.
     fn union_own_before_lend(&mut self, lv: &Expr) -> Option<(String, String, String)> {
         let (root, uname, _) = overlay_path(self.tds, &|x| self.ty_of(x).ok(), lv)
             .ok()?
@@ -23294,7 +23408,7 @@ impl<'a> Body<'a> {
             return None;
         };
         let p = v.val.to_string();
-        if !self.owned_here(&p) || !self.params.contains(&p) {
+        if !self.owned_here(&p) || !self.params.contains(&p) || self.bytes_only.contains(&p) {
             return None;
         }
         let at = format!("var_{}", p);
@@ -25482,6 +25596,15 @@ impl<'a> Body<'a> {
         });
         let mut mentioned = Touched::default();
         touch_exprs(&named, &mut mentioned);
+        // `touch_expr` looks past spliced Pulse, so a local a clause reads only
+        // through `$(x)` is not among the names above. It still needs a name in
+        // the invariant -- without one `$(x)` comes out as `var_x`, which
+        // nothing declares -- and the body does not change it, so the name is
+        // its value as the loop finds it.
+        let mut clause_reads: HashSet<String> = HashSet::new();
+        for e in named.iter() {
+            spliced_reads(e, &mut clause_reads);
+        }
         let mut deref_slots: Vec<(String, String)> = Vec::new();
         let mut walks: HashMap<String, (String, String, String)> = HashMap::new();
         for (i, s) in self.slots.clone().into_iter().enumerate() {
@@ -25489,12 +25612,27 @@ impl<'a> Body<'a> {
             // A struct `_out` parameter's slot is named `*p`; the body
             // touches it through `p`.
             let touch = s.name.strip_prefix('*').unwrap_or(&s.name);
+            let only_spliced = kept.as_ref().is_some_and(|k| !k.contains(touch))
+                && clause_reads.contains(touch)
+                && !s.global;
             if let Some(k) = &kept
                 && !k.contains(touch)
+                && !only_spliced
             {
                 continue;
             }
             let explicitly_owned = stated.contains(&s.name) || stated.contains(touch);
+            if only_spliced && !explicitly_owned {
+                if !s.init {
+                    return Err(format!("{} with `{}` not yet written", what, s.name));
+                }
+                let value = self.fresh("loop_val");
+                self.lines
+                    .push(format!("with {}. assert ({});", value, s.pts_to(&value)));
+                owns.push(s.pts_to(&value));
+                locals.insert(s.name.clone(), value);
+                continue;
+            }
             // Explicit ownership replaces the predicate, not scratch cleanup.
             if !s.init
                 && (body.is_none() || (!s.global && !s.name.starts_with('*')))
@@ -27387,6 +27525,7 @@ impl<'a> Body<'a> {
                     let callee = self.callees.get(&*name.val.to_string());
                     let void = callee.is_some_and(|c| c.void);
                     let noreturn = callee.is_some_and(|c| c.noreturn);
+                    let mark = self.seeded.len();
                     let call = self.call(name, args)?;
                     if std::mem::take(&mut self.copied_call) {
                         return Ok(());
@@ -27396,6 +27535,13 @@ impl<'a> Body<'a> {
                     } else {
                         let t = self.fresh(&name.val);
                         self.lines.push(format!("let {} = {};", t, call));
+                    }
+                    // As for a call in an expression: a validity seeded for
+                    // the arguments is handed back by the callee and put down
+                    // here. Left for the end of the body, it would be lost
+                    // when an enclosing arm restores the outer seeds.
+                    if !noreturn {
+                        self.drop_seeded(mark);
                     }
                     // The call left `pure False` behind, so this point in the
                     // program is not reached. `unreachable` turns that into
@@ -27528,6 +27674,30 @@ impl<'a> Body<'a> {
                         .ok_or_else(|| format!("a `memset` of {}", describe(ty)))?;
                     let place = deref_of(p);
                     self.store(&place, &pn, &z)
+                }
+                // Filling a whole structure with a nonzero byte leaves bytes
+                // that need not encode any value of it, so it is modeled as a
+                // write of no value: the object must be held uninitialized,
+                // and stays so. A local's own storage is a value PAL tracks,
+                // with no uninitialized state to hold.
+                ExprT::MemsetFill(ty, p, _) => {
+                    if !matches!(
+                        &peel(self.tds, ty).val,
+                        TypeT::TypeRef(TypeRefKind::Struct(..))
+                    ) {
+                        return Err(format!("a nonzero `memset` of {}", describe(ty)));
+                    }
+                    if let ExprT::Ref(x) = &strip_vattr(p).val
+                        && lvalue_name(x).is_some()
+                    {
+                        return Err("a nonzero `memset` of a local".to_string());
+                    }
+                    let pn = palow_name(self.tds, ty)
+                        .ok_or_else(|| format!("a nonzero `memset` of {}", describe(ty)))?;
+                    let a = self.rvalue(p)?;
+                    self.lines
+                        .push(format!("assert ({}_pts_to_uninit ({}));", pn, a));
+                    Ok(())
                 }
                 _ => Err(format!(
                     "a call in statement position that is not one: {}",
@@ -30564,10 +30734,25 @@ fn alias_map(
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
 
+    // A local declared `_plain` is a pointer object by request: its uses read
+    // the local, and need no ownership of what it points into. A proof that
+    // lends that object away, piece by piece, needs exactly this.
+    fn plain_decl(ty: &Type) -> bool {
+        match &ty.val {
+            TypeT::Plain(_) => true,
+            TypeT::Refine(inner, _)
+            | TypeT::RefineAlways(inner, _)
+            | TypeT::RefineUninit(inner, _)
+            | TypeT::RefineValue(inner, _, _, _)
+            | TypeT::Nullable(inner)
+            | TypeT::Overread(inner) => plain_decl(inner),
+            _ => false,
+        }
+    }
     let locals: HashSet<String> = body
         .iter()
         .filter_map(|s| match &s.val {
-            StmtT::Decl(n, _) => Some(n.val.to_string()),
+            StmtT::Decl(n, ty) if !plain_decl(ty) => Some(n.val.to_string()),
             _ => None,
         })
         .collect();
@@ -32148,6 +32333,7 @@ fn emit_body(
         owned: &sig.owned,
         outs: &sig.outs,
         granted: &sig.granted,
+        bytes_only: &sig.bytes_only,
         spliced_own: sig.spliced_own,
         pieces: &sig.pieces,
         piece_types: &sig.piece_types,
@@ -33038,7 +33224,7 @@ fn expr_kind(e: &Expr) -> &'static str {
         | ExprT::CallocArray(..)
         | ExprT::CallocFlex(..)
         | ExprT::Free(..) => "an allocation",
-        ExprT::Memset(..) | ExprT::MemsetZero(..) => "a `memset`",
+        ExprT::Memset(..) | ExprT::MemsetZero(..) | ExprT::MemsetFill(..) => "a `memset`",
         ExprT::SizeOf(..) | ExprT::AlignOf(..) => "a `sizeof`",
         ExprT::StructInit(..) | ExprT::UnionInit(..) | ExprT::ArrayInit { .. } => {
             "an initialiser list"

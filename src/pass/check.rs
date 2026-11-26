@@ -539,7 +539,7 @@ impl<'a> Checker<'a> {
                 self.check_rvalue(env, value);
                 self.check_rvalue(env, count);
             }
-            ExprT::MemsetZero(ty, ptr) => {
+            ExprT::MemsetZero(ty, ptr) | ExprT::MemsetFill(ty, ptr, _) => {
                 self.check_type(env, ty);
                 self.check_rvalue(env, ptr);
             }

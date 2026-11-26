@@ -370,6 +370,13 @@ impl PrettyIR for ExprT {
                 .append("))")
                 .nest(4)
                 .group(),
+            ExprT::MemsetFill(ty, ptr, byte) => RcDoc::text("memset(")
+                .append(ptr.to_doc())
+                .append(format!(", {}, sizeof(", byte))
+                .append(ty.to_doc())
+                .append("))")
+                .nest(4)
+                .group(),
             ExprT::Free(val) => RcDoc::text("free(")
                 .append(val.to_doc())
                 .append(")")
