@@ -237,6 +237,18 @@ fn main() {
         }
         selected_files.insert(file_name);
     }
+    // The translation units the selection applies to, by the prefix of their
+    // TU-local names. A selected static body is kept only in these; another
+    // unit keeps its copy only if something there uses it, as without a
+    // selection.
+    let selected_units: Option<HashSet<String>> = (!selected_files.is_empty()).then(|| {
+        cli.files
+            .iter()
+            .zip(&identities)
+            .filter(|(file, _)| selected_files.contains(&vfs::absolute_file_name(file).unwrap()))
+            .map(|(_, identity)| identity.prefix.clone())
+            .collect()
+    });
 
     let parse_start = Instant::now();
     for (file, identity) in cli.files.iter().zip(&identities) {
@@ -313,7 +325,11 @@ fn main() {
     pass::builtins::builtins(&mut combined_tu);
 
     let t = Instant::now();
-    pass::prune::prune(&mut combined_tu, &cli.only_functions);
+    pass::prune::prune(
+        &mut combined_tu,
+        &cli.only_functions,
+        selected_units.as_ref(),
+    );
     if cli.time_passes {
         eprintln!(
             "  prune ({} decls): {:.3}s",
