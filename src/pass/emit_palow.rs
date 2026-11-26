@@ -26039,7 +26039,8 @@ impl<'a> Body<'a> {
                 && matches!(&lhs.val, ExprT::Member(base, _) if self.in_pieces(base)
                     && self.union_of(base).is_none())
                 && pn.starts_with("struct_")
-                && !f.unaligned && f.bits.is_none()
+                && !f.unaligned
+                && f.bits.is_none()
                 && f.write_fn == format!("{pn}_write");
             self.lines.extend(f.open_write.iter().cloned());
             match &f.bits {
@@ -26056,7 +26057,9 @@ impl<'a> Body<'a> {
                     self.lines
                         .push(format!("{} {} {};", f.write_fn, f.at, pos.put(&u, &value)));
                 }
-                None if member_first => self.lines.push(format!("{pn}_write_uninit {} {};", f.at, value)),
+                None if member_first => self
+                    .lines
+                    .push(format!("{pn}_write_uninit {} {};", f.at, value)),
                 None => self
                     .lines
                     .push(format!("{} {} {};", f.write_fn, f.at, value)),
