@@ -524,7 +524,7 @@ impl Env {
             ExprT::Live(_) => Ok(TypeT::SLProp.with_loc_core(expr.loc.clone()).into()),
             ExprT::Unchanged(_) => Ok(TypeT::Bool.with_loc_core(expr.loc.clone()).into()),
             ExprT::Old(v) => self.infer_expr(v),
-            ExprT::Forall(var, ty, body) | ExprT::Exists(var, ty, body) => {
+            ExprT::Forall(var, ty, _, body) | ExprT::Exists(var, ty, _, body) => {
                 let mut env = self.clone();
                 env.push_var_decl(var, ty.clone(), LocalDeclKind::RValue);
                 env.infer_expr(body)

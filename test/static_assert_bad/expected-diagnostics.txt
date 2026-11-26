@@ -1,0 +1,2 @@
+# Expected translation diagnostic substrings
+static assertion failed: block-scope assertion must fail

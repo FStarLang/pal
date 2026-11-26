@@ -23,10 +23,12 @@ palow-check: rust lib
 comment-check:
 	./opt/check-comments.py pulse/*.fst pulse/*.fsti
 
+CLANG_FORMAT ?= $(shell command -v clang-format-23 || echo clang-format)
+
 .PHONY: format-check
 format-check:
 	cargo fmt --check
-	clang-format --dry-run --Werror cpp/impl.cpp
+	$(CLANG_FORMAT) --dry-run --Werror cpp/impl.cpp
 
 .PHONY: test
 test: rust lib -testsuite
@@ -36,3 +38,16 @@ test: rust lib -testsuite
 .PHONY: clean
 clean:
 	$(MAKE) -C test clean
+
+# Binary package: dist/pal-<version>-<commit>-linux-<arch>.tar.gz. See
+# opt/package.sh for PACKAGE_OPTS (e.g. --check-pulse, --llvm system,
+# --fstar DIR, --fstar-ref REF, --fstar-src SRC).
+PACKAGE_OPTS ?=
+.PHONY: package
+package:
+	./opt/package.sh --out dist $(PACKAGE_OPTS)
+
+# Smoke-test the most recent package (run `make package` first).
+.PHONY: package-test
+package-test:
+	./opt/package-test.sh $$(ls -t dist/pal-*.tar.gz dist/pal-*.zip 2>/dev/null | head -1)

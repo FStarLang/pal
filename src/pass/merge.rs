@@ -125,8 +125,11 @@ fn rename_expr_in_place(expr: &mut Expr, renames: &HashMap<Rc<str>, Rc<Ident>>) 
             rename_inline_pulse_in_place(Rc::make_mut(code), renames);
             rename_type_in_place(Rc::make_mut(ty), renames);
         }
-        ExprT::Forall(binder, ty, body) | ExprT::Exists(binder, ty, body) => {
+        ExprT::Forall(binder, ty, trigs, body) | ExprT::Exists(binder, ty, trigs, body) => {
             rename_type_in_place(Rc::make_mut(ty), renames);
+            for t in trigs.iter_mut().flatten() {
+                rename_shadowed_expr(binder, t, renames);
+            }
             rename_shadowed_expr(binder, body, renames);
         }
         ExprT::StructInit(_, fields) => {
@@ -644,9 +647,7 @@ fn collect_type_refs(ty: &Type, out: &mut Vec<TypeKey>) {
         TypeT::Pointer(inner, _)
         | TypeT::FixedArray(inner, _)
         | TypeT::FlexArray(inner)
-        | TypeT::Plain(inner) => {
-            collect_type_refs(inner, out)
-        }
+        | TypeT::Plain(inner) => collect_type_refs(inner, out),
         TypeT::Refine(inner, _)
         | TypeT::RefineAlways(inner, _)
         | TypeT::RefineUninit(inner, _)
@@ -738,8 +739,11 @@ fn collect_refs_expr(e: &Expr, out: &mut Vec<TypeKey>) {
             collect_refs_inline(code, out);
             collect_type_refs(ty, out);
         }
-        ExprT::Forall(_, ty, body) | ExprT::Exists(_, ty, body) => {
+        ExprT::Forall(_, ty, trigs, body) | ExprT::Exists(_, ty, trigs, body) => {
             collect_type_refs(ty, out);
+            for t in trigs.iter().flatten() {
+                collect_refs_expr(t, out);
+            }
             collect_refs_expr(body, out);
         }
         ExprT::StructInit(_, fields) => {
