@@ -16652,6 +16652,12 @@ struct Body<'a> {
     /// its arms may write. Every other slot keeps the value it holds at the
     /// `if`, bound by a `with` just before it.
     join_written: Option<HashSet<String>>,
+    /// Proof annotation for the next lowered conditional; useful when the
+    /// conditional comes from a C initializer rather than a statement with
+    /// an `_ensures` of its own. Both arms must establish the clause.
+    next_if_contract: Option<String>,
+    // Only annotated arms opt into cut points for unrolled overlay writes.
+    checkpoint_overlay_writes: bool,
     /// While reading through a walked pointer whose pointee is the element
     /// type at the other signedness (`walk_sign_view`).
     sign_view: bool,
@@ -27274,6 +27280,19 @@ impl<'a> Body<'a> {
                         "{repr} {} {} {}_alignof {i}sz {off}",
                         ap.addr, ap.esize, ap.pn
                     );
+                    // An uninitialized field starts with an existential sequence
+                    // of its declared length. Carry the established prefix
+                    // through each real write without nesting concrete values.
+                    let slots = if ap.maybe && self.checkpoint_overlay_writes {
+                        let slots = format!("overlay_slots{}_{}", self.tmp, i);
+                        self.lines.push(format!(
+                            "with {slots}. assert (array_pts_to {repr} (SizeT.v {}) (SizeT.v {}_alignof) {} 1.0R {slots});",
+                            ap.esize, ap.pn, ap.addr
+                        ));
+                        Some(slots)
+                    } else {
+                        None
+                    };
                     self.lines.push(format!("array_focus {args};"));
                     if ap.maybe {
                         self.lines.push(format!(
@@ -27286,12 +27305,24 @@ impl<'a> Body<'a> {
                         self.lines.push(format!("{}_forget {at};", ap.pn));
                     }
                     self.write_literal_storage(elem, &v, &at)?;
+                    if let Some(ref slots) = slots {
+                        self.lines.push(format!(
+                            "with {slots}_value. assert ({}_pts_to {at} 1.0R {slots}_value);",
+                            ap.pn
+                        ));
+                    }
                     self.lines.push(format!("{}_to_elem {at};", ap.pn));
                     if ap.maybe {
                         self.lines
                             .push(format!("elem_maybe_put {}_repr {} {at};", ap.pn, ap.esize));
                     }
                     self.lines.push(format!("array_unfocus {args};"));
+                    if let Some(slots) = slots {
+                        self.lines.push(format!(
+                            "Pulse.Lib.C.Palow.ArrayCheckpoint.seal {}_repr {} {} {}_alignof {n} {i}sz {slots} #{slots}_value;",
+                            ap.pn, ap.addr, ap.esize, ap.pn
+                        ));
+                    }
                 }
                 self.lines.extend(ap.close_write);
                 self.lines.append(&mut self.pending_close);
@@ -28501,8 +28532,21 @@ impl<'a> Body<'a> {
                 // emitted fragment gets the statement's indent, so a hint the
                 // author wrote across several lines has to become one line
                 // before it lands somewhere its original column means nothing.
-                self.lines
-                    .push(format!("{};", flatten_fragment(t?.trim())?));
+                let hint = flatten_fragment(t?.trim())?;
+                if let Some(contract) = hint.strip_prefix("pal_next_if ") {
+                    if !contract.starts_with("requires ")
+                        || !contract.contains(" ensures ")
+                        || self.next_if_contract.is_some()
+                    {
+                        return Err(
+                            "expected one requires/ensures contract for the next conditional"
+                                .into(),
+                        );
+                    }
+                    self.next_if_contract = Some(contract.to_string());
+                    return Ok(());
+                }
+                self.lines.push(format!("{};", hint));
                 Ok(())
             }
             StmtT::Return(None) => Ok(()),
@@ -28712,6 +28756,10 @@ impl<'a> Body<'a> {
             } => {
                 // Either arm may make a different member live, and the two
                 // arms need not agree, so nothing survives the join.
+                let source_contract = self.next_if_contract.take();
+                if source_contract.is_some() && !ensures.is_empty() {
+                    return Err("competing conditional proof annotations".into());
+                }
                 self.active.clear();
                 // A `_ensures` that says only what is live needs no
                 // translation: Pulse computes the join of an `if` itself, so
@@ -28799,6 +28847,8 @@ impl<'a> Body<'a> {
                 if let Some((p, _)) = pt.as_ref().filter(|_| pt_live_then) {
                     self.unguarded.push(p.clone());
                 }
+                let outer_checkpoints = self.checkpoint_overlay_writes;
+                self.checkpoint_overlay_writes |= source_contract.is_some();
                 let then = self.branch(then_branch);
                 if pt.is_some() && pt_live_then {
                     self.unguarded.pop();
@@ -28823,6 +28873,7 @@ impl<'a> Body<'a> {
                     self.unguarded.push(p.clone());
                 }
                 let els = self.branch(else_branch);
+                self.checkpoint_overlay_writes = outer_checkpoints;
                 if pt.is_some() && !pt_live_then {
                     self.unguarded.pop();
                 }
@@ -29009,6 +29060,9 @@ impl<'a> Body<'a> {
                     None
                 };
                 self.lines.push(format!("if ({})", c));
+                if let Some(contract) = &source_contract {
+                    self.lines.push(format!("  {contract}"));
+                }
                 if let Some(j) = join {
                     self.lines.push(format!("  ensures {}", j));
                 }
@@ -29057,7 +29111,7 @@ impl<'a> Body<'a> {
                 // `if`'s arm, or of a loop body -- as two postconditions for
                 // one statement. A unit after it is the tail instead, checked
                 // against the outer expectation from the `if`'s own.
-                if pure_join || states_own {
+                if pure_join || states_own || source_contract.is_some() {
                     self.lines.push("();".to_string());
                 }
                 for (addr, key) in fps {
@@ -33499,6 +33553,8 @@ fn emit_body(
         break_flag: None,
         frame_slots: Vec::new(),
         join_written: None,
+        next_if_contract: None,
+        checkpoint_overlay_writes: false,
         sign_view: false,
         divergent_fns,
         blocks: Vec::new(),
@@ -33629,6 +33685,9 @@ fn emit_body(
     }
 
     b.rest(&defn.body)?;
+    if b.next_if_contract.is_some() {
+        return Err("unused next conditional proof annotation".into());
+    }
     Ok(TranslatedBody {
         lines: b.lines,
         divergent: b.divergent,
