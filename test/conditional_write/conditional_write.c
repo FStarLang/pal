@@ -59,6 +59,51 @@ void native_scalar(_plain uint32_t *p, uint32_t value)
     *p = value;
 }
 
+bool claim_output(_plain uint32_t *p, uint32_t cursor, uint32_t limit)
+  _requires(_inline_pulse(uint32_t_pts_to_uninit $(p)))
+  _ensures(_inline_pulse(if $(return) then uint32_t_pts_to $(p) 1.0R $(cursor)
+                         else uint32_t_pts_to_uninit $(p)))
+  _ensures(return == (cursor < limit))
+{
+    bool claimed = cursor < limit;
+    if (claimed) {
+        *p = cursor;
+    }
+    return claimed;
+}
+
+bool clear_claim(bool initial)
+  _ensures(return == false)
+{
+    bool claimed = initial;
+    bool *alias = &claimed;
+    if (claimed) {
+        *alias = false;
+    }
+    return claimed;
+}
+
+bool dispatch_output(_plain uint32_t *p, bool first, uint32_t cursor, uint32_t limit)
+  _requires(_inline_pulse(uint32_t_pts_to_uninit $(p)))
+  _ensures(_inline_pulse(if $(return) then uint32_t_pts_to $(p) 1.0R $(cursor)
+                         else uint32_t_pts_to_uninit $(p)))
+  _ensures(return == (first ? cursor < limit : cursor <= limit))
+{
+    bool claimed;
+    if (first) {
+        claimed = cursor < limit;
+        if (claimed) {
+            *p = cursor;
+        }
+    } else {
+        claimed = cursor <= limit;
+        if (claimed) {
+            *p = cursor;
+        }
+    }
+    return claimed;
+}
+
 void native_array_alias(_array uint32_t *array, _plain uint32_t **alias)
   _requires(_inline_pulse(Pulse.Lib.C.Palow.Scalar.ptr_pts_to_uninit $(alias)))
   _ensures(_inline_pulse(Pulse.Lib.C.Palow.Scalar.ptr_pts_to $(alias) 1.0R $(array)))

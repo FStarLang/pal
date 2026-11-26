@@ -24,6 +24,12 @@ uint32_t get_small(_plain struct pr s)
 _Bool is_null(_plain struct pr s)
 { return s.p == NULL; }
 
+int32_t read_loan(_plain struct pr s)
+  _ghost_arg(int32_t value)
+  _preserves(_inline_pulse(int32_t_pts_to $(s).Struct_pr.fld_p 1.0R $(value)))
+  _ensures(return == value)
+{ return *s.p; }
+
 // A refinement written on the parameter itself is still stated.
 uint32_t below5(_refine(this < 5) _plain uint32_t x)
   _ensures(return < 5)

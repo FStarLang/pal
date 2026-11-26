@@ -6,6 +6,9 @@ int32_t parameter_shadow(int32_t), block_shadow(void), call_external(void);
 int32_t false_function_a(void), false_function_b(void);
 int32_t false_object_a(void), false_object_b(void);
 int32_t *address_a(void), *address_b(void);
+int32_t *site_a(int32_t), *site_b(int32_t);
+extern const int32_t other_tag;
+const int32_t *external_site(void);
 int32_t array_a(void), array_b(void), external_object(void);
 int32_t write_a(void), write_b(void);
 int main(void) {
@@ -13,6 +16,9 @@ int main(void) {
              object_a() == 1 && object_b() == 2 &&
              header_a() == 1 && header_b() == 2 &&
              address_a() != address_b() &&
+             site_a(1) == site_a(2) && site_a(1) != site_a(0) &&
+             site_a(1) != site_b(1) && *site_a(0) == 1 && *site_b(0) == 2 &&
+             external_site() == &other_tag &&
              write_a() == 1 && write_b() == 2 &&
              *address_a() == 1 && *address_b() == 2 &&
              pointer_a() == 1 && annotated_a() == 1 &&

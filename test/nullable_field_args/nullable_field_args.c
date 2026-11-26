@@ -42,6 +42,13 @@ void two_in(const Point* s)
     opt_two_in(&s->x, &s->y);
 }
 
+void two_in_through_local(const Point* s)
+{
+    const Point* p = s;
+    _ghost_stmt(with v perm. assert Struct_Point.struct_Point_pts_to $(p) perm v);
+    opt_two_in(&p->x, &p->y);
+}
+
 /* Two fields of one struct, as two optional outputs. */
 void two_out(Point* s)
     _ensures(s->x == 7 && s->y == 7)

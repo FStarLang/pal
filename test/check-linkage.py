@@ -4,6 +4,7 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -59,6 +60,26 @@ def check_proof_reuse(out):
 
 
 check_proof_reuse(Path(original_out))
+
+# Selecting one body must not change its site identities. Each branch must
+# refer to a different persistent object, including across header inclusions.
+sites = fixture / "expected-static-sites.txt"
+if sites.exists():
+    for spec in sites.read_text().splitlines():
+        name, count = spec.split()
+        selected = work / ("selected-" + name)
+        run([pal, "--only-function", name, "--outdir", str(selected), *map(str, source_files)],
+            work, "selected.log")
+        observed = set()
+        for copy in Path(original_out).glob(f"Func___pal_tu_*_{name}.fst"):
+            pattern = rf"\baddr_var_(__pal_tu_\w+___pal_block_\d+_{name})\b"
+            body_sites = re.findall(pattern, copy.read_text().split("\n{")[-1])
+            assert len(body_sites) == len(set(body_sites)) == int(count), copy
+            assert not observed.intersection(body_sites), copy
+            assert body_sites == re.findall(pattern, (selected / copy.name).read_text().split("\n{")[-1])
+            assert all((selected / f"Global_{site}.fst").is_file() for site in body_sites)
+            observed.update(body_sites)
+        assert len(observed) == 2 * int(count)
 
 
 def check_case(name, inputs, compare=True, native=False, two_private=False):

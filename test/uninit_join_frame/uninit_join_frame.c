@@ -16,6 +16,36 @@ int delayed_scalar(int *p, _Bool write)
     return result;
 }
 
+void mixed_join(int *p, _Bool write)
+{
+    int status = 0;
+    if (write)
+        _ensures(_live(status) && (_Bool)_inline_pulse($(status) == 0l) &&
+            (_slprop)_inline_pulse(exists* v. int32_t_pts_to $&(*p) 1.0R v))
+    {
+        *p = 1;
+    }
+    *p = status;
+}
+
+int optional_read_join(_nullable const int *p, _Bool use)
+    _ensures(use || return == 0)
+{
+    int result = 0;
+    if (use)
+        _ensures(use || result == 0)
+    {
+        if (p != NULL) {
+            if (*p > 0)
+                _ensures(result >= 0)
+            {
+                result = *p;
+            }
+        }
+    }
+    return result;
+}
+
 union result {
     int value;
     unsigned bits;

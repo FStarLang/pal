@@ -18,6 +18,10 @@ int static_local(void) {
 typedef _plain int *annotated_pointer;
 extern annotated_pointer annotation_object;
 int __pal_tu_reserved;
+int __pal_block_0_site_address;
+_block_storage int *shadowed_extern(int value) {
+    { extern int value; return &value; }
+}
 int link_renamed(void) __asm__("native_renamed");
 int reserved_local(int __pal_tu_parameter) {
     int __pal_tu_local = __pal_tu_parameter;

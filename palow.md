@@ -1521,6 +1521,12 @@ C leaves the bytes of the union outside the initialized member unspecified, so
 the split is made only when that member -- an omitted union's first -- covers
 every byte of the union without padding; otherwise the literal is refused
 (`overlay_struct_literal_stale_bad`).
+For a tagged union stored as an island, the store writes the tagged value
+as a whole: a designator selects its member, and an omitted initializer
+initializes its first member recursively. This also applies to nested
+array elements. The store does not prescribe padding bytes. Inputs that
+read the destination are evaluated before its fields are overwritten;
+the destination itself must be repeatable (`overlay_island_init`).
 
 `_unchanged(lv)` in a postcondition says the object `lv` names has the bytes
 it had on entry. Inside an overlay union it is
@@ -8047,3 +8053,9 @@ Limitations:
     without a diagnostic, from contracts and from `struct_X__refine` alike.
     The attribute now stays on the clause, which says which member is live
     (`anon_union_refine`, `anon_union_refine_bad`).
+107. **By-value bit-field initializers.** Designators name source fields,
+    not the synthetic storage unit. Start the unit at an unspecified value
+    and apply the field-store bit updates to each named member, using zero
+    for omitted members. An explicitly false flag does not imply a zero
+    storage byte (`bitfield_init_padding_bad`). This does not publish new
+    bit-field constants for static objects.

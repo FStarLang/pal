@@ -17,6 +17,22 @@ void write_optional_default(_nullable _out int32_t *p)
     }
 }
 
+void write_two_outputs(_out int32_t *x, _nullable _out int32_t *p)
+    _ensures(_inline_pulse(int32_t_pts_to $(x) 1.0R 7l))
+{
+    *x = 7;
+    if (p != NULL) {
+        *p = 17;
+    }
+}
+
+int32_t read_other_output(void)
+{
+    int32_t x, other;
+    write_two_outputs(&x, &other);
+    return other;
+}
+
 void write_optional_early(_nullable _out int32_t *p)
     _ensures(_inline_pulse(unless_null $(p) (int32_t_pts_to $(p) 1.0R 42l)))
 {

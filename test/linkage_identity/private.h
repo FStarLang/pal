@@ -15,3 +15,10 @@ static _plain int32_t *header_address(void)
 {
     return &header_cell;
 }
+
+static _block_storage _plain int32_t *site_address(int32_t first)
+{
+#define RETURN_SITE() do { static int32_t cell = UNIT_VALUE; return &cell; } while (0)
+    if (first) { RETURN_SITE(); } else { RETURN_SITE(); }
+#undef RETURN_SITE
+}

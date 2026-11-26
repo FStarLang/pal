@@ -7,6 +7,22 @@ void init_value(_out int *x)
     *x = 42;
 }
 
+void init_separate_outputs(_out int *x, _out int *y)
+    _ensures(_inline_pulse(int32_t_pts_to $(x) 1.0R 7l))
+    _ensures(*y == 42)
+{
+    *x = 7;
+    *y = 42;
+}
+
+int read_separate_outputs(void)
+    _ensures(return == 49)
+{
+    int x, y;
+    init_separate_outputs(&x, &y);
+    return x + y;
+}
+
 int call_init_value()
     _ensures(return == 42)
 {
