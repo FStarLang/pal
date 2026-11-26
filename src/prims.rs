@@ -52,6 +52,14 @@ const PRIMS: &[Prim] = &[
         ret: || TypeT::Bool,
         out: Some(2),
     },
+    Prim {
+        // As above, into a 64-bit destination.
+        name: "__pal_mul_overflow_u64_u64",
+        builtin: "__builtin_mul_overflow",
+        fstar: "Pulse.Lib.C.Palow.CheckedWide.mul_overflow_u64_u64",
+        ret: || TypeT::Bool,
+        out: Some(2),
+    },
 ];
 
 fn lookup(name: &str) -> Option<&'static Prim> {
