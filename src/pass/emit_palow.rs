@@ -2938,22 +2938,10 @@ fn field_refines(tds: &Typedefs, ty: &Type) -> Vec<FieldRefinement> {
         let Ok((mut ps, _, _)) = field_refinements(tds, &f.ty) else {
             continue;
         };
-        // An embedded struct carries its declaration's invariant just
-        // as a parameter of that type does. Do not follow pointers:
-        // storing an address is not ownership of the pointed-to object.
-        let nested = !is_plain(tds, &f.ty)
-            && !is_plain_chain(&f.ty)
-            && matches!(peel(tds, &f.ty).val, TypeT::TypeRef(TypeRefKind::Struct(_)));
-        if nested {
-            if let TypeT::TypeRef(TypeRefKind::Struct(child)) = &peel(tds, &f.ty).val
-                && let Some(r) = tds.refined_structs.get(&*child.val)
-                && let Ok((clauses, _, _)) = refinements(tds, r)
-            {
-                for cl in clauses {
-                    if !ps.iter().any(|p| Rc::ptr_eq(p, &cl)) {
-                        ps.push(cl);
-                    }
-                }
+        let nested = embedded_field(tds, &f.ty);
+        for cl in embedded_decl_refines(tds, &f.ty) {
+            if !ps.iter().any(|p| Rc::ptr_eq(p, &cl)) {
+                ps.push(cl);
             }
         }
         for cl in ps {
@@ -2973,6 +2961,42 @@ fn field_refines(tds: &Typedefs, ty: &Type) -> Vec<FieldRefinement> {
         }
     }
     out
+}
+
+/// Whether a struct field holds a struct by value whose invariant it carries.
+/// Pointers are not followed -- storing an address is not ownership of the
+/// pointed-to object -- and a `_plain` field leaves its type's clauses to the
+/// enclosing protocol.
+fn embedded_field(tds: &Typedefs, fty: &Type) -> bool {
+    !is_plain(tds, fty)
+        && !is_plain_chain(fty)
+        && matches!(peel(tds, fty).val, TypeT::TypeRef(TypeRefKind::Struct(_)))
+}
+
+/// The clauses of the `_refine` on the declaration of the struct a field
+/// embeds. An embedded struct carries its declaration's invariant just as a
+/// parameter of that type does, so `field_refines` states them wherever the
+/// container is held.
+fn embedded_decl_refines(tds: &Typedefs, fty: &Type) -> Vec<Rc<Expr>> {
+    if !embedded_field(tds, fty) {
+        return Vec::new();
+    }
+    let TypeT::TypeRef(TypeRefKind::Struct(child)) = &peel(tds, fty).val else {
+        return Vec::new();
+    };
+    tds.refined_structs
+        .get(&*child.val)
+        .and_then(|r| refinements(tds, r).ok())
+        .map(|(ps, _, _)| ps)
+        .unwrap_or_default()
+}
+
+/// Whether field `f` of struct `container` is an embedded struct whose
+/// ownership record is a field of the container's.
+fn embedded_own_item(tds: &Typedefs, container: &str, f: &str) -> bool {
+    tds.structs
+        .get(container)
+        .is_some_and(|si| si.own.iter().any(|i| i.embedded && i.name == f))
 }
 
 fn is_nullable(tds: &Typedefs, ty: &Type) -> bool {
@@ -7122,6 +7146,7 @@ fn emit_fn(
         let mut pointees = spec.pointees.clone();
         let mut arrays = spec.arrays.clone();
         let mut olens = spec.olens.clone();
+        let mut owns = spec.owns.clone();
         let mut locals = HashMap::new();
         // A refinement read against the *storage* rather than the value --
         // which is the only reading an `_out` parameter has on the way in --
@@ -7178,12 +7203,19 @@ fn emit_fn(
                 // in the struct's ownership record, so the caller hands it
                 // over here: without it the only refinement anyone writes on
                 // an array field -- its length -- could not be stated.
-                if let Some((_, Some(pt), _)) = this_value {
-                    pointees.insert(
-                        "this".to_string(),
-                        (Some(pt.to_string()), Some(pt.to_string())),
-                    );
-                    arrays.insert("this".to_string());
+                // A `this` bound to an embedded struct is a value too, and
+                // what it owns is a record rather than a sequence: it goes
+                // where `this.f` looks for the ownership of a field.
+                if let Some((v, Some(pt), _)) = this_value {
+                    if matches!(peel(tds, ty).val, TypeT::TypeRef(TypeRefKind::Struct(_))) {
+                        owns.insert(v.to_string(), (Some(pt.to_string()), Some(pt.to_string())));
+                    } else {
+                        pointees.insert(
+                            "this".to_string(),
+                            (Some(pt.to_string()), Some(pt.to_string())),
+                        );
+                        arrays.insert("this".to_string());
+                    }
                 }
                 true
             }
@@ -7230,7 +7262,7 @@ fn emit_fn(
             olds: spec.olds.clone(),
             arrays,
             olens,
-            owns: spec.owns.clone(),
+            owns,
             addrs: spec.addrs.clone(),
             guarded: spec.guarded.clone(),
             guards: RefCell::new(Vec::new()),
@@ -7333,9 +7365,14 @@ fn emit_fn(
         // elements are inside the object and their number is not in the type.
         // So `this` and the sequence behind it are the same term, which is
         // what makes `this._length == len` sayable at all.
+        // An embedded struct with ownership of its own has its record in the
+        // container's, so a clause its declaration states about that
+        // ownership -- the length of an `_array` field, say -- reads it there.
         let own = if flex_elem(tds, fty).is_some() {
             Some(format!("({}).fld_{}", this, fname))
-        } else if matches!(extent(tds, fty), Some(Extent::Array)) {
+        } else if matches!(extent(tds, fty), Some(Extent::Array))
+            || embedded_own_item(tds, &field.container, fname)
+        {
             container_own.map(|o| format!("({}).own_{}", o, fname))
         } else {
             None
@@ -11445,6 +11482,33 @@ fn has_pure_refine(tds: &Typedefs, ty: &Type) -> bool {
     }
 }
 
+/// Whether a field carries a `_refine` about its value that the struct record
+/// could have carried and did not: see the note `emit_struct` writes.
+///
+/// For a field that embeds a struct, only the clauses written on the field
+/// itself count. What it reaches through the struct's typedef is that type's
+/// invariant, which every contract holding the container states the way it
+/// states the embedded struct's own: see `field_refines`.
+fn field_written_refine(tds: &Typedefs, ty: &Type) -> bool {
+    if !embedded_field(tds, ty) {
+        return field_refined(tds, ty) && has_pure_refine(tds, ty);
+    }
+    let mut t = ty;
+    loop {
+        t = match &t.val {
+            TypeT::Refine(u, p) | TypeT::RefineAlways(u, p) => {
+                if slprop_refine(tds, p).is_none() {
+                    return true;
+                }
+                u
+            }
+            TypeT::RefineUninit(..) => return true,
+            TypeT::RefineValue(u, ..) | TypeT::Nullable(u) | TypeT::Overread(u) => u,
+            _ => return false,
+        };
+    }
+}
+
 fn own_kind(tds: &Typedefs, ty: &Type) -> bool {
     extent(tds, ty) == Some(Extent::Array) && flex_elem(tds, ty).is_none()
 }
@@ -11534,12 +11598,16 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     // position a contract has: a parameter that is such a struct, a parameter
     // that points at one, and a result. That is the same place the old model
     // puts it, in the struct predicate rather than in the struct type.
+    //
+    // Nor is a `_refine` a field reaches through the type of a struct it
+    // embeds, on the struct's declaration or its typedef. It is that type's
+    // invariant, not one written on the field, and it is stated where the
+    // embedded struct's own one is: on the record when it is about the value
+    // alone, and otherwise -- a length of an `_array` field it owns, say --
+    // in the contract of every function that holds the container, which
+    // `field_refines` sees to. A contract that cannot state it says so there.
     for f in &si.fields {
-        if field_refined(tds, &f.ty)
-            && f.inv.is_none()
-            && si.inv.is_none()
-            && has_pure_refine(tds, &f.ty)
-        {
+        if field_written_refine(tds, &f.ty) && f.inv.is_none() && si.inv.is_none() {
             c += &format!(
                 "(* contract dropped: the `_refine` on field `{}` is not a \
                  property of the field's value alone *)\n",
