@@ -14271,6 +14271,50 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
 /// speaks *about* C objects through its antiquotations, and which ones it
 /// speaks about is exactly what decides whether the author or the generated
 /// frame states them.
+/// The structs a function's own ghost statements handle in pieces: those whose
+/// field offsets or holes they name, and whose points-to they do not (the
+/// test `pieces_named` applies to a contract).
+fn ghost_stmt_pieces(body: &Stmts) -> HashSet<String> {
+    fn go(body: &Stmts, out: &mut String) {
+        for s in body.iter() {
+            match &s.val {
+                StmtT::GhostStmt(c) if !ghost_interpreted(c) => {
+                    for tok in &c.tokens {
+                        if let InlinePulseToken::Verbatim(ct) = tok {
+                            out.push_str(ct.before);
+                            out.push_str(&ct.text.val);
+                        }
+                    }
+                    out.push('\n');
+                }
+                StmtT::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    go(then_branch, out);
+                    go(else_branch, out);
+                }
+                StmtT::Match {
+                    branches,
+                    default_branch,
+                    ..
+                } => {
+                    for b in branches.iter() {
+                        go(&b.body, out);
+                    }
+                    go(default_branch, out);
+                }
+                StmtT::While { body, .. } | StmtT::GotoBlock { body, .. } => go(body, out),
+                _ => {}
+            }
+        }
+    }
+    let mut text = String::new();
+    go(body, &mut text);
+    pieces_named(&text)
+}
+
 /// The names a body's ghost statements speak about.
 ///
 /// A ghost statement is hand-written Pulse, and what it does to the state is
@@ -16239,6 +16283,10 @@ struct Body<'a> {
     pieces: &'a HashSet<String>,
     /// See `FnSurface::piece_types`.
     piece_types: &'a HashSet<String>,
+    /// Structs this function's ghost statements handle in pieces
+    /// (`ghost_stmt_pieces`): a local pointer to one that a ghost statement
+    /// names is accessed field by field.
+    ghost_piece_types: HashSet<String>,
     /// Places a checked native field-hole assertion owns in pieces.
     asserted_pieces: HashSet<(String, String)>,
     /// Dynamic pointees whose checked storage assertion selects a first store.
@@ -17906,7 +17954,10 @@ impl<'a> Body<'a> {
         {
             return true;
         }
-        if self.pieces.is_empty() {
+        if self.pieces.is_empty()
+            && self.piece_types.is_empty()
+            && self.ghost_piece_types.is_empty()
+        {
             return false;
         }
         if let Some(place) = self.unalias(base) {
@@ -17917,13 +17968,34 @@ impl<'a> Body<'a> {
             return self.in_pieces(parent)
                 && self
                     .struct_of(base)
-                    .is_ok_and(|(sn, _)| self.piece_types.contains(&sn));
+                    .is_ok_and(|(sn, _)| self.is_piece_type(&sn));
         }
-        let v = match &base.val {
-            ExprT::Deref(inner) => lvalue_name(strip_vattr(inner)),
-            _ => lvalue_name(base),
+        let (v, deref) = match &base.val {
+            ExprT::Deref(inner) => (lvalue_name(strip_vattr(inner)), true),
+            _ => (lvalue_name(base), false),
         };
-        v.is_some_and(|v| self.pieces.contains(&v))
+        // A local pointer a ghost statement speaks about, to a struct this
+        // function owns in pieces: the ghost statement is what put ownership
+        // behind it, in the shape the contract's (or its own ghost code's)
+        // pieces have -- there is no whole for it to have handed over, since
+        // nothing here names one. Not a block this function allocated, whose
+        // pieces its allocation tracks (and whose first stores initialise).
+        v.is_some_and(|v| {
+            self.pieces.contains(&v)
+                || (deref
+                    && self.ghost_names.contains(&v)
+                    && !self.params.contains(&v)
+                    && !self.blocks.iter().any(|b| b.var == v)
+                    && self
+                        .struct_of(base)
+                        .is_ok_and(|(sn, _)| self.is_piece_type(&sn)))
+        })
+    }
+
+    /// A struct the contract, the file's helpers or this function's ghost
+    /// statements own in pieces.
+    fn is_piece_type(&self, sn: &str) -> bool {
+        self.piece_types.contains(sn) || self.ghost_piece_types.contains(sn)
     }
 
     /// The address an lvalue denotes, computed by arithmetic alone.
@@ -32337,6 +32409,7 @@ fn emit_body(
         spliced_own: sig.spliced_own,
         pieces: &sig.pieces,
         piece_types: &sig.piece_types,
+        ghost_piece_types: ghost_stmt_pieces(&defn.body),
         asserted_pieces: HashSet::new(),
         asserted_uninit: HashSet::new(),
         guarded: &sig.guarded,
