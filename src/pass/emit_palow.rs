@@ -3966,6 +3966,10 @@ impl<'a> Spec<'a> {
                     k => Ok(format!("({} +! {}sz)", a, k)),
                 }
             }
+            // A local in a body-level annotation lives in a slot, and the slot
+            // is its address. A function contract has no locals, so `addrs` is
+            // empty there.
+            ExprT::Var(v) if self.addrs.contains_key(&*v.val) => Ok(self.addrs[&*v.val].clone()),
             // A mutable global's address is a closed term the model already
             // publishes, so `&g` in a contract is that term. Ownership of it
             // is a separate matter and still has to be stated; what this says
@@ -4973,6 +4977,10 @@ impl<'a> Spec<'a> {
                                 .unwrap_or_else(|| format!("var_{}", n))
                         }
                         ExprT::Deref(p) => self.value(p, w)?,
+                        // A field or constant element of a place the
+                        // clause can already address -- a local's slot, a
+                        // pointer's pointee -- is that address plus an offset.
+                        ExprT::Member(..) | ExprT::Index(..) => self.addr_of(expr, w)?,
                         _ => {
                             return Err("`$&` of something a contract cannot address".to_string());
                         }
