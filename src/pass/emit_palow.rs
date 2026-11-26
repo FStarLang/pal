@@ -11832,7 +11832,20 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
     for f in &si.fields {
         let fty = field_type(tds, &f.ty).unwrap();
         let at = format!("(a +! {}_offsetof_{})", sn, f.name);
-        let upd = format!("({{ x with fld_{} = y }})", f.name);
+        let rfty = refined_ty(&fty, f.inv.as_ref().filter(|_| !own_kind(tds, &f.ty)));
+        // The value after a write to one field, named rather than spelled as
+        // `{ x with fld_f = y }`. The record update copies `x` into every
+        // other field, and `x` is itself the value left by the previous write,
+        // so in a function that writes the same object several times the
+        // spelled-out term grows by a factor of the field count per write and
+        // the checker's time with it. Under a name, `x` occurs once.
+        c += &format!(
+            "let {sn}_upd_{f} (x: {sn}) (y: {rfty}) : {sn} = {{ x with fld_{f} = y }}\n\n",
+            sn = sn,
+            f = f.name,
+            rfty = rfty
+        );
+        let upd = format!("({}_upd_{} x y)", sn, f.name);
         let owned = |v: &str| f.shape.pts_to(&at, v);
         // The hole carries the object's own invariant too: what is missing
         // is one field's storage, not the fact that the object is well
@@ -11866,7 +11879,7 @@ fn emit_struct(tds: &Typedefs, name: &str) -> String {
             iv = inv_at(&upd),
             sn = sn,
             f = f.name,
-            rfty = refined_ty(&fty, f.inv.as_ref().filter(|_| !own_kind(tds, &f.ty))),
+            rfty = rfty,
             owned = owned("y"),
             upd = upd
         );
