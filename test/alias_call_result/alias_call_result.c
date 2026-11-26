@@ -56,3 +56,27 @@ uint32_t through_const(struct ctx *o)
     const struct inner *q = get_in_const(o);
     return q->a;
 }
+
+/* An alias handed to a callee lends it the field, as `&r->c->in` would. */
+void set_a(struct inner *i, uint32_t v)
+    _ensures(i->a == v)
+    _ensures(i->b == _old(i->b));
+
+void lend_deep(struct req *r)
+{
+    struct inner *q = get_deep(r);
+    r->c->in.b = 4;
+    set_a(q, 5);
+    _assert(r->c->in.a == 5);
+    _assert(r->c->in.b == 4);
+}
+
+uint32_t get_b(const struct inner *i)
+    _ensures(return == i->b);
+
+uint32_t lend_const(struct ctx *o)
+    _ensures(return == o->in.b)
+{
+    const struct inner *q = get_in_const(o);
+    return get_b(q);
+}

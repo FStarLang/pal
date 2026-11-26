@@ -340,6 +340,10 @@ pub enum VAttr {
 
 pub type Expr = Ast<ExprT>;
 pub type Exprs = Vec<Rc<Expr>>;
+/// The SMT patterns of a quantifier: each `_trigger(e1, ..., en)` is one
+/// multi-pattern, and several of them are alternatives. Empty when the source
+/// gives none and the solver is left to choose.
+pub type Triggers = Vec<Exprs>;
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum ExprT {
     // LValue variants
@@ -382,8 +386,10 @@ pub enum ExprT {
     /// frame, for storage a function does not interpret.
     Unchanged(Rc<Expr>),
     Old(Rc<Expr>),
-    Forall(Rc<Ident>, Rc<Type>, Rc<Expr>),
-    Exists(Rc<Ident>, Rc<Type>, Rc<Expr>),
+    /// `_forall(T x, _trigger(..).., body)`: the bound variable, its type,
+    /// the SMT patterns (see `Triggers`) and the body.
+    Forall(Rc<Ident>, Rc<Type>, Triggers, Rc<Expr>),
+    Exists(Rc<Ident>, Rc<Type>, Triggers, Rc<Expr>),
     StructInit(Rc<Ident>, Vec<(Rc<Ident>, Rc<Expr>)>),
     UnionInit(Rc<Ident>, Rc<Ident>, Rc<Expr>),
     /// Array initializer: element type + list of element values.
@@ -644,6 +650,10 @@ pub struct FnArg {
     pub name: Option<Rc<Ident>>,
     pub ty: Rc<Type>,
     pub mode: ParamMode,
+    /// `_cursor_from(s)` on a `_cursor` parameter: the parameter `s` that,
+    /// when not null, is where the cursor starts instead of the incoming
+    /// `*p`.
+    pub cursor_from: Option<Rc<Ident>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]

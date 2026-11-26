@@ -6,7 +6,11 @@
 #include "clang/Lex/MacroArgs.h"
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
-#ifndef _WIN32
+#ifdef _WIN32
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
+#include <cstdlib>
+#else
 #include <dlfcn.h>
 #endif
 #include <map>
@@ -294,14 +298,15 @@ public:
       return;
     if (auto *ds = dyn_cast<DeclStmt>(s))
       for (auto *d : ds->decls())
-        if (auto *v = dyn_cast<VarDecl>(d); v && v->isStaticLocal() &&
-            v->getTLSKind() == VarDecl::TLS_None &&
+        if (auto *v = dyn_cast<VarDecl>(d);
+            v && v->isStaticLocal() && v->getTLSKind() == VarDecl::TLS_None &&
             !astCtx->getBaseElementType(v->getType()).isConstQualified() &&
             takesAddressOf(v, fn->getBody())) {
           // A per-body ordinal distinguishes same-line macro expansions and
           // stays stable when the caller selects only some function bodies.
-          blockObjects[v->getCanonicalDecl()] =
-              "__pal_block_" + std::to_string(n++) + "_" + fn->getNameAsString();
+          blockObjects[v->getCanonicalDecl()] = "__pal_block_" +
+                                                std::to_string(n++) + "_" +
+                                                fn->getNameAsString();
         }
     for (auto *child : s->children())
       indexBlockObjects(child, fn, n);
@@ -971,7 +976,7 @@ public:
     // meaning for the contract, so the type is rebuilt from the pointee.
     for (auto attr : attrs) {
       auto ann = dyn_cast<AnnotateAttr>(attr);
-      if (!ann || ann->getAnnotation() != "pal-cursor" || ann->args_size() != 0)
+      if (!ann || ann->getAnnotation() != "pal-cursor" || ann->args_size() > 1)
         continue;
       auto outer = declQt.isNull()
                        ? nullptr
@@ -3830,6 +3835,10 @@ public:
       return trStmt(stmts, subStmt);
     } else if (auto *ds = dyn_cast<DeclStmt>(stmt)) {
       for (auto d : ds->decls()) {
+        // Like file-scope assertions, these are checked by Clang and have no
+        // runtime effect.
+        if (isa<StaticAssertDecl>(d))
+          continue;
         if (hasAnnotation(d, "pal-ignore"))
           continue;
         auto dloc = getRange(d->getSourceRange());
@@ -3848,22 +3857,27 @@ public:
               continue;
             }
             if (shadowsBlockExtern(fn, vd)) {
-              ctx.report_diag(dloc.clone(), true,
-                              "shadowed block-scope extern is not supported"_rs);
+              ctx.report_diag(
+                  dloc.clone(), true,
+                  "shadowed block-scope extern is not supported"_rs);
               stmts.push(mk_stmt_err(dloc.clone()));
               continue;
             }
             if (vd->getTLSKind() != VarDecl::TLS_None) {
-              ctx.report_diag(dloc.clone(), true,
-                              "block-scope thread-local storage is not supported"_rs);
+              ctx.report_diag(
+                  dloc.clone(), true,
+                  "block-scope thread-local storage is not supported"_rs);
               stmts.push(mk_stmt_err(dloc.clone()));
               continue;
             }
-            if (!vd->getCanonicalDecl()->getLexicalDeclContext()->isFileContext()) {
-              ctx.add_c_symbol(toStr(vd->getName()), 1,
-                               toStr(vd->getType().getCanonicalType().getAsString()),
-                               !vd->hasExternalFormalLinkage(), false, false,
-                               isIgnored(vd), false, dloc.clone());
+            if (!vd->getCanonicalDecl()
+                     ->getLexicalDeclContext()
+                     ->isFileContext()) {
+              ctx.add_c_symbol(
+                  toStr(vd->getName()), 1,
+                  toStr(vd->getType().getCanonicalType().getAsString()),
+                  !vd->hasExternalFormalLinkage(), false, false, isIgnored(vd),
+                  false, dloc.clone());
               HandleDecl(vd);
             }
             continue;
@@ -4047,7 +4061,13 @@ public:
     } else if (dyn_cast<NullStmt>(stmt) || dyn_cast<IntegerLiteral>(stmt)) {
       return rust::Unit();
     } else if (auto *as = dyn_cast<GCCAsmStmt>(stmt);
+#if LLVM_VERSION_MAJOR >= 21
+               // Since LLVM 21, the template may be a constant expression
+               // (getAsmStringExpr), and getAsmString returns its value.
+               as && as->getAsmString().empty() &&
+#else
                as && as->getAsmString()->getString().empty() &&
+#endif
                as->getNumOutputs() == 0 && as->getNumLabels() == 0) {
       // An empty template executes no instructions, and without outputs or
       // labels it cannot change a C variable or jump: it is a compiler
@@ -4230,6 +4250,21 @@ public:
                     std::move(ty), std::move(mode));
       } else {
         builder.arg_anon(std::move(ty), std::move(mode));
+      }
+      // `_cursor_from(s)`: the parameter the cursor starts from when it is
+      // not null.
+      for (auto *attr : param->getAttrs()) {
+        auto *ann = dyn_cast<AnnotateAttr>(attr);
+        if (!ann || ann->getAnnotation() != "pal-cursor" ||
+            ann->args_size() != 1)
+          continue;
+        auto *lit =
+            dyn_cast<StringLiteral>(ann->args_begin()[0]->IgnoreParenCasts());
+        if (!lit)
+          continue;
+        builder.cursor_from(
+            ctx.mk_ident(toStr(lit->getString()), getRange(ann->getRange())));
+        break;
       }
     }
     builder.return_type(trTypeAttrs(
@@ -4439,7 +4474,8 @@ public:
         inSystemBody =
             sm.isInSystemHeader(sm.getExpansionLoc(FD->getLocation()));
         unsigned site = 0;
-        if (!astCtx->getLangOpts().CPlusPlus && hasAnnotation(FD, "pal-block-storage"))
+        if (!astCtx->getLangOpts().CPlusPlus &&
+            hasAnnotation(FD, "pal-block-storage"))
           indexBlockObjects(FD->getBody(), FD, site);
         auto body = trStmts(FD->getBody());
         inSystemBody = outer;
@@ -4668,9 +4704,32 @@ std::string getBinaryForResourcesPath() {
 }
 #endif
 
+#ifdef _WIN32
+// The clang resource directory, in order of preference:
+// $PAL_CLANG_RESOURCE_DIR, <dir of pal.exe>/../lib/clang/<major> (relocatable
+// binary package, see opt/package.sh), and the directory of the clang used to
+// build PAL.
+std::string getWindowsResourcesPath() {
+  if (const char *env = std::getenv("PAL_CLANG_RESOURCE_DIR"); env && *env)
+    return env;
+  std::string exe = llvm::sys::fs::getMainExecutable(nullptr, nullptr);
+  if (!exe.empty()) {
+    llvm::SmallString<256> dir(
+        llvm::sys::path::parent_path(llvm::sys::path::parent_path(exe)));
+    llvm::sys::path::append(dir, "lib", "clang",
+                            std::to_string(LLVM_VERSION_MAJOR));
+    llvm::SmallString<256> include(dir);
+    llvm::sys::path::append(include, "include");
+    if (llvm::sys::fs::is_directory(include))
+      return std::string(dir);
+  }
+  return PAL_CLANG_RESOURCE_DIR;
+}
+#endif
+
 std::string getResourcesPath() {
 #ifdef _WIN32
-  return PAL_CLANG_RESOURCE_DIR;
+  return getWindowsResourcesPath();
 #else
   return GetResourcesPath(getBinaryForResourcesPath());
 #endif
@@ -4840,6 +4899,12 @@ static void parse_file(RefMut<Ctx> ctx) {
       ArgumentInsertPosition::END));
   Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
       {"-resource-dir", getResourcesPath()}, ArgumentInsertPosition::BEGIN));
+  // The C library headers to compile against, if not the toolchain's default.
+  // On Windows (MinGW target), clang otherwise only finds them through a MinGW
+  // gcc on PATH, e.g. PAL_SYSROOT=C:/msys64/ucrt64 for <dir>/include/stdlib.h.
+  if (const char *sysroot = std::getenv("PAL_SYSROOT"); sysroot && *sysroot)
+    Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster(
+        {std::string("--sysroot=") + sysroot}, ArgumentInsertPosition::BEGIN));
 
   // Preserve platform preincludes from the compilation database before
   // applying the caller's annotation headers, in their requested order.
