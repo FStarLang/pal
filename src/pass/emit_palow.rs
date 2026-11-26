@@ -26190,6 +26190,15 @@ impl<'a> Body<'a> {
         });
         let mut mentioned = Touched::default();
         touch_exprs(&named, &mut mentioned);
+        // `touch_expr` looks past spliced Pulse, so a local a clause reads only
+        // through `$(x)` is not among the names above. It still needs a name in
+        // the invariant -- without one `$(x)` comes out as `var_x`, which
+        // nothing declares -- and the body does not change it, so the name is
+        // its value as the loop finds it.
+        let mut clause_reads: HashSet<String> = HashSet::new();
+        for e in named.iter() {
+            spliced_reads(e, &mut clause_reads);
+        }
         let mut deref_slots: Vec<(String, String)> = Vec::new();
         let mut walks: HashMap<String, (String, String, String)> = HashMap::new();
         for (i, s) in self.slots.clone().into_iter().enumerate() {
@@ -26197,12 +26206,27 @@ impl<'a> Body<'a> {
             // A struct `_out` parameter's slot is named `*p`; the body
             // touches it through `p`.
             let touch = s.name.strip_prefix('*').unwrap_or(&s.name);
+            let only_spliced = kept.as_ref().is_some_and(|k| !k.contains(touch))
+                && clause_reads.contains(touch)
+                && !s.global;
             if let Some(k) = &kept
                 && !k.contains(touch)
+                && !only_spliced
             {
                 continue;
             }
             let explicitly_owned = stated.contains(&s.name) || stated.contains(touch);
+            if only_spliced && !explicitly_owned {
+                if !s.init {
+                    return Err(format!("{} with `{}` not yet written", what, s.name));
+                }
+                let value = self.fresh("loop_val");
+                self.lines
+                    .push(format!("with {}. assert ({});", value, s.pts_to(&value)));
+                owns.push(s.pts_to(&value));
+                locals.insert(s.name.clone(), value);
+                continue;
+            }
             // Explicit ownership replaces the predicate, not scratch cleanup.
             if !s.init
                 && (body.is_none() || (!s.global && !s.name.starts_with('*')))
