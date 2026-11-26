@@ -191,6 +191,7 @@ mod crate::clang {
         fn get_include_file_count(&self) -> usize;
         fn get_include_file(&self, usize) -> &str;
         fn selects_function_body(&self, &str) -> bool;
+        fn exclude_function_body(&mut self, Rc<SourceInfo>, Rc<SourceInfo>, &str);
 
         fn get_define_count(&self) -> usize;
         fn get_define(&self, usize) -> &str;
