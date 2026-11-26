@@ -14271,14 +14271,6 @@ fn touch_expr(e: &Expr, t: &mut Touched) {
 /// speaks *about* C objects through its antiquotations, and which ones it
 /// speaks about is exactly what decides whether the author or the generated
 /// frame states them.
-/// The names a body's ghost statements speak about.
-///
-/// A ghost statement is hand-written Pulse, and what it does to the state is
-/// the author's business: the one thing the emitter can read off it is which
-/// C objects it names. A local that a ghost statement names may therefore
-/// have had ownership moved onto it, in words the emitter does not read --
-/// which is the same trust a spliced contract clause gets. If the splice did
-/// not in fact grant it, F* rejects the access.
 /// The structs a function's own ghost statements handle in pieces: those whose
 /// field offsets or holes they name, and whose points-to they do not (the
 /// test `pieces_named` applies to a contract).
@@ -14323,6 +14315,14 @@ fn ghost_stmt_pieces(body: &Stmts) -> HashSet<String> {
     pieces_named(&text)
 }
 
+/// The names a body's ghost statements speak about.
+///
+/// A ghost statement is hand-written Pulse, and what it does to the state is
+/// the author's business: the one thing the emitter can read off it is which
+/// C objects it names. A local that a ghost statement names may therefore
+/// have had ownership moved onto it, in words the emitter does not read --
+/// which is the same trust a spliced contract clause gets. If the splice did
+/// not in fact grant it, F* rejects the access.
 fn ghost_stmt_names(body: &Stmts, out: &mut HashSet<String>) {
     fn code(c: &InlinePulseCode, out: &mut HashSet<String>) {
         for tok in &c.tokens {
