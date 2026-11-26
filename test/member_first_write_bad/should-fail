@@ -1,0 +1,2 @@
+Cannot prove:
+struct_inner_pts_to_uninit (var_o +! struct_outer_offsetof_in)
