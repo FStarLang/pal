@@ -27,6 +27,94 @@ fn types_match(env: &Env, decl: &FnDecl, defn: &FnDecl) -> bool {
     env.vtype_eq(decl.ret_type.clone().into(), defn.ret_type.clone().into())
 }
 
+fn is_type_annotation(ty: &Type) -> bool {
+    matches!(
+        ty.val,
+        TypeT::Refine(..)
+            | TypeT::RefineAlways(..)
+            | TypeT::RefineUninit(..)
+            | TypeT::RefineValue(..)
+            | TypeT::Plain(..)
+            | TypeT::Nullable(..)
+            | TypeT::Overread(..)
+    )
+}
+
+/// Whether a type, as written, carries a PAL annotation (`_plain`,
+/// `_nullable`, `_pal_overread` or a refinement) anywhere. Typedef bodies are
+/// not expanded: every declaration naming a typedef shares what it says.
+fn has_type_annotation(ty: &Type) -> bool {
+    match &ty.val {
+        _ if is_type_annotation(ty) => true,
+        TypeT::Pointer(inner, _) | TypeT::FixedArray(inner, _) | TypeT::FlexArray(inner) => {
+            has_type_annotation(inner)
+        }
+        TypeT::FnPtr { args, ret } => {
+            args.iter().any(|a| has_type_annotation(a)) || has_type_annotation(ret)
+        }
+        _ => false,
+    }
+}
+
+/// Whether two declarations' types carry the same annotations in the same
+/// places. The C types themselves are not compared: clang has already checked
+/// that they are compatible, and they may be spelled through different
+/// typedefs.
+fn annotations_agree(a: &Type, b: &Type) -> bool {
+    match (&a.val, &b.val) {
+        (TypeT::Refine(x, p), TypeT::Refine(y, q))
+        | (TypeT::RefineAlways(x, p), TypeT::RefineAlways(y, q))
+        | (TypeT::RefineUninit(x, p), TypeT::RefineUninit(y, q)) => {
+            p == q && annotations_agree(x, y)
+        }
+        (TypeT::RefineValue(x, n, t, p), TypeT::RefineValue(y, m, u, q)) => {
+            n == m && t == u && p == q && annotations_agree(x, y)
+        }
+        (TypeT::Plain(x), TypeT::Plain(y))
+        | (TypeT::Nullable(x), TypeT::Nullable(y))
+        | (TypeT::Overread(x), TypeT::Overread(y)) => annotations_agree(x, y),
+        _ if is_type_annotation(a) || is_type_annotation(b) => false,
+        (TypeT::Pointer(x, _), TypeT::Pointer(y, _))
+        | (TypeT::FixedArray(x, _), TypeT::FixedArray(y, _))
+        | (TypeT::FlexArray(x), TypeT::FlexArray(y)) => annotations_agree(x, y),
+        (TypeT::FnPtr { args: xs, ret: x }, TypeT::FnPtr { args: ys, ret: y }) => {
+            xs.len() == ys.len()
+                && xs.iter().zip(ys).all(|(x, y)| annotations_agree(x, y))
+                && annotations_agree(x, y)
+        }
+        _ => !has_type_annotation(a) && !has_type_annotation(b),
+    }
+}
+
+/// Whether a declaration states a contract, in `_requires`/`_ensures` or in
+/// the annotated types of its parameters or result.
+fn has_contract(decl: &FnDecl) -> bool {
+    !decl.requires.is_empty()
+        || !decl.ensures.is_empty()
+        || decl.args.iter().any(|a| has_type_annotation(&a.ty))
+        || has_type_annotation(&decl.ret_type)
+}
+
+/// Whether two declarations that both state a contract state the same one, up
+/// to the names of their parameters.
+fn contracts_agree(earlier: &FnDecl, later: &FnDecl) -> bool {
+    let renames = param_renames(earlier, later);
+    let rename_type = |ty: &Rc<Type>| {
+        let mut ty = (**ty).clone();
+        rename_type_in_place(&mut ty, &renames);
+        ty
+    };
+    rename_specs(&earlier.requires, &renames) == later.requires
+        && rename_specs(&earlier.ensures, &renames) == later.ensures
+        && earlier.args.len() == later.args.len()
+        && earlier
+            .args
+            .iter()
+            .zip(&later.args)
+            .all(|(e, l)| annotations_agree(&rename_type(&e.ty), &l.ty))
+        && annotations_agree(&rename_type(&earlier.ret_type), &later.ret_type)
+}
+
 fn param_renames(decl: &FnDecl, defn: &FnDecl) -> HashMap<Rc<str>, Rc<Ident>> {
     let mut renames = HashMap::new();
     for (decl_arg, defn_arg) in decl.args.iter().zip(defn.args.iter()) {
@@ -273,22 +361,19 @@ pub fn merge(diags: &mut Diagnostics, tu: &mut TranslationUnit) {
             if let DeclT::FnDecl(later_decl) = &later.val
                 && let DeclT::FnDecl(earlier_decl) = &tu.decls[dst].val
             {
-                let earlier_has_specs =
-                    !earlier_decl.requires.is_empty() || !earlier_decl.ensures.is_empty();
-                let later_has_specs =
-                    !later_decl.requires.is_empty() || !later_decl.ensures.is_empty();
-                if earlier_has_specs && !later_has_specs {
+                // A contract written only in annotated types (`_plain`, a
+                // refinement) counts as much as one in `_requires`/`_ensures`:
+                // otherwise a bare redeclaration read later, say from a header
+                // another file includes, would silently replace it.
+                let earlier_has_contract = has_contract(earlier_decl);
+                let later_has_contract = has_contract(later_decl);
+                if earlier_has_contract && !later_has_contract {
                     // Keep the whole signature so specs retain their parameter
                     // names, ghost binders, and annotated types.
                     continue;
                 }
-                if earlier_has_specs && later_has_specs {
-                    let renames = param_renames(earlier_decl, later_decl);
-                    let renamed_requires = rename_specs(&earlier_decl.requires, &renames);
-                    let renamed_ensures = rename_specs(&earlier_decl.ensures, &renames);
-                    if renamed_requires != later_decl.requires
-                        || renamed_ensures != later_decl.ensures
-                    {
+                if earlier_has_contract && later_has_contract {
+                    if !contracts_agree(earlier_decl, later_decl) {
                         report(
                             diags,
                             format!(
