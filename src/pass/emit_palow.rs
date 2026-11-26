@@ -6064,7 +6064,16 @@ fn is_pure_only_clause(tds: &Typedefs, e: &Rc<Expr>) -> bool {
     let mut first = true;
     for tok in &code.tokens {
         if let InlinePulseToken::Verbatim(ct) = tok {
-            if first && !ct.text.val.trim_start().starts_with("pure") {
+            // `pure` itself, not a predicate whose name merely starts with
+            // it: `pure_cell p` may well own `p`.
+            if first
+                && !ct
+                    .text
+                    .val
+                    .trim_start()
+                    .strip_prefix("pure")
+                    .is_some_and(|r| r.starts_with(|c: char| c.is_whitespace() || c == '('))
+            {
                 return false;
             }
             if ct.text.val.contains("**") {
