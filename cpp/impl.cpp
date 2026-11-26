@@ -3793,6 +3793,10 @@ public:
       return trStmt(stmts, subStmt);
     } else if (auto *ds = dyn_cast<DeclStmt>(stmt)) {
       for (auto d : ds->decls()) {
+        // Like file-scope assertions, these are checked by Clang and have no
+        // runtime effect.
+        if (isa<StaticAssertDecl>(d))
+          continue;
         if (hasAnnotation(d, "pal-ignore"))
           continue;
         auto dloc = getRange(d->getSourceRange());
