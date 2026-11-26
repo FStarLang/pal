@@ -22252,6 +22252,22 @@ impl<'a> Body<'a> {
         }
         let mut vs = Vec::new();
         self.init_flat(ty, e, &mut vs)?;
+        // init_flat has already evaluated the initializers in storage
+        // order and supplied C's implicit tail. Do not make F* count a
+        // potentially very large list for a uniform zero byte array.
+        if let Some((leaf, len)) = flat_array(self.tds, ty)
+            && matches!(
+                peel(self.tds, leaf).val,
+                TypeT::Int {
+                    signed: false,
+                    width: 8
+                }
+            )
+            && vs.len() as u64 == len
+            && vs.iter().all(|v| v == "0uy")
+        {
+            return Ok(format!("(Seq.create {len} 0uy)"));
+        }
         Ok(format!("(Seq.seq_of_list [{}])", vs.join("; ")))
     }
 
@@ -22758,10 +22774,19 @@ impl<'a> Body<'a> {
                         n.val
                     ));
                 }
-                if !self.tds.unions.contains_key(&*n.val) {
-                    return Err(format!("an initialiser for union {}", n.val));
-                }
-                let v = self.rvalue(e)?;
+                let member_ty = self
+                    .tds
+                    .unions
+                    .get(&*n.val)
+                    .and_then(|u| u.members.iter().find(|f| f.name == *m.val))
+                    .ok_or_else(|| {
+                        format!("an unknown union initializer member {}.{}", n.val, m.val)
+                    })?
+                    .ty
+                    .clone();
+                // No array-to-pointer conversion: this is the value of
+                // the selected member, just as for a struct initializer.
+                let v = self.init_value(&member_ty, e)?;
                 Ok(format!("(Union_{}_{} {})", n.val, m.val, v))
             }
             ExprT::IntLit(n, ty) => int_literal(self.tds, n, ty),
