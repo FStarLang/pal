@@ -728,6 +728,17 @@ val sizet_of_uint64 (x: U64.t) : Pure SZ.t (requires U64.v x < T.addr_limit) (en
 val size_t_fits (x: int) : Lemma (requires 0 <= x /\ x < T.addr_limit) (ensures SZ.fits x)
   [SMTPat (SZ.fits x)]
 
+(* A constant such as the `56sz` of an array element's size needs `SZ.fits 56`.
+   Both `size_t_fits` and F*'s `SZ.fits_at_least_16` bound their argument by a
+   power of two (`Target.addr_limit`, `pow2 16`), which the solver has to
+   evaluate before it can compare a constant against it. In a function with a
+   large context that search costs about a second for every occurrence of the
+   constant. C guarantees `size_t` at least sixteen bits, so stating that bound
+   as a numeral makes each such goal linear arithmetic. *)
+
+val size_t_fits_small (x: int) : Lemma (requires 0 <= x /\ x < 65536) (ensures SZ.fits x)
+  [SMTPat (SZ.fits x)]
+
 
 let size_t_sizeof : n:SZ.t{SZ.v n == T.ptr_bytes} = if T.ptr_64 then 8sz else 4sz
 let size_t_alignof : n:SZ.t{SZ.v n == T.ptr_bytes} = size_t_sizeof

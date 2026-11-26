@@ -969,6 +969,17 @@ let size_t_fits (x: int) : Lemma (requires 0 <= x /\ x < T.addr_limit) (ensures 
     SZ.fits_u32_implies_fits x
   end
 
+let size_t_fits_small (x: int) : Lemma (requires 0 <= x /\ x < 65536) (ensures SZ.fits x)
+  [SMTPat (SZ.fits x)] =
+  assert_norm (pow2 16 == 65536);
+  SZ.fits_at_least_16 x
+
+(* What `size_t_fits_small` is for: a constant's `SZ.fits` with neither
+   `pow2`'s definition nor the target facts behind `addr_limit` in the
+   context, so that no other route to it is left. *)
+#push-options "--using_facts_from '* -Prims.pow2 -FStar.UInt.pow2_values -FStar.Int.pow2_values -Pulse.Lib.C.Palow.Target'"
+let size_t_fits_small_constant () : Lemma (SZ.fits 56) = ()
+#pop-options
 
 
 
