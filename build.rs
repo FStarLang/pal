@@ -24,7 +24,7 @@ fn compiler_output(compiler: &cc::Tool, argument: &str) -> String {
 }
 
 fn llvm_config_flags(args: &[&str]) -> Vec<String> {
-    (Command::new("llvm-config-20").args(args.iter()).output())
+    (Command::new("llvm-config-23").args(args.iter()).output())
         .or(Command::new("llvm-config").args(args.iter()).output())
         .expect("Cannot find llvm-config")
         .stdout
@@ -79,13 +79,22 @@ fn main() {
         .flag("-Wno-uninitialized-const-reference")
         .flag("-Wno-unused-parameter");
 
-    build
-        .cpp(true)
-        .compiler("clang++")
-        .include(crate_dir.join("cpp"));
+    // Prefer the clang++ matching llvm-config (e.g. `clang++-23` from apt.llvm.org).
+    let versioned_cxx = format!("clang++-{llvm_version}");
+    let cxx = if Command::new(&versioned_cxx)
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        versioned_cxx.as_str()
+    } else {
+        "clang++"
+    };
+    build_rs::output::rerun_if_env_changed("PATH");
+
+    build.cpp(true).compiler(cxx).include(crate_dir.join("cpp"));
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        build_rs::output::rerun_if_env_changed("PATH");
         let compiler = build.get_compiler();
         let version = compiler_output(&compiler, "-dumpversion");
         assert_eq!(

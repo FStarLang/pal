@@ -288,24 +288,28 @@ impl PrettyIR for ExprT {
                 .append(")")
                 .nest(2)
                 .group(),
-            ExprT::Forall(var, ty, body) => RcDoc::text("_forall(")
-                .append(ty.to_doc())
-                .append(RcDoc::space())
-                .append(var.to_doc())
-                .append(", ")
-                .append(body.to_doc())
-                .append(")")
-                .nest(2)
-                .group(),
-            ExprT::Exists(var, ty, body) => RcDoc::text("_exists(")
-                .append(ty.to_doc())
-                .append(RcDoc::space())
-                .append(var.to_doc())
-                .append(", ")
-                .append(body.to_doc())
-                .append(")")
-                .nest(2)
-                .group(),
+            ExprT::Forall(var, ty, trigs, body) | ExprT::Exists(var, ty, trigs, body) => {
+                let kw = if matches!(self, ExprT::Forall(..)) {
+                    "_forall("
+                } else {
+                    "_exists("
+                };
+                let mut doc = RcDoc::text(kw)
+                    .append(ty.to_doc())
+                    .append(RcDoc::space())
+                    .append(var.to_doc())
+                    .append(", ");
+                for group in trigs {
+                    doc = doc
+                        .append("_trigger(")
+                        .append(RcDoc::intersperse(
+                            group.iter().map(|t| t.to_doc()),
+                            RcDoc::text(", "),
+                        ))
+                        .append("), ");
+                }
+                doc.append(body.to_doc()).append(")").nest(2).group()
+            }
             ExprT::Error(_) => RcDoc::text("???"),
             ExprT::Malloc(ty) => RcDoc::text("malloc(sizeof(")
                 .append(ty.to_doc())

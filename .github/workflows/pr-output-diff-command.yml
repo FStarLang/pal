@@ -22,7 +22,7 @@ jobs:
     if: >-
       github.event.issue.pull_request != null &&
       startsWith(github.event.comment.body, '!diff')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     outputs:
       run_id: ${{ steps.run.outputs.run_id }}
