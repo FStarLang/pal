@@ -16585,6 +16585,11 @@ struct Body<'a> {
     /// Whether a loop encloses the statement being translated, so `break` and
     /// `continue` have something to leave.
     in_loop: bool,
+    /// Whether an arm of an `if` the author joined with `_ensures` encloses
+    /// the statement being translated. A `return` or `goto` there leaves by
+    /// Pulse's own `return`, as it does from a loop body, so the code after
+    /// the `if` is translated once, after the join, and not once per arm.
+    early_exit: bool,
     /// Ghost steps owed at the end of the current statement. A local array
     /// handed to a callee is converted to the view the callee asks for and
     /// back again, and the way back cannot be emitted until the call has been.
@@ -29193,7 +29198,7 @@ impl<'a> Body<'a> {
                         r?;
                     }
                     self.release_from(0);
-                    if self.in_loop {
+                    if self.returns_early() {
                         self.lines.push(match v {
                             Some(v) => format!("return {};", v),
                             None => "return ();".to_string(),
@@ -29205,6 +29210,26 @@ impl<'a> Body<'a> {
                         self.lines.push(v);
                     }
                     return Ok(has);
+                }
+                // An `_ensures` on an `if` is the author's join, and C reaches
+                // the code after the `if` only through it: an arm that leaves
+                // by `return` or `goto` leaves the function, not the join.
+                // Copying the rest of the block into each arm instead -- what
+                // the case below does for an `if` without one -- would never
+                // check the clause, and would translate (and verify) that rest
+                // once per arm. So the arms are translated against the join,
+                // with their exits as Pulse `return`s, and the rest once.
+                StmtT::If {
+                    then_branch,
+                    else_branch,
+                    ensures,
+                    ..
+                } if !ensures.is_empty() && (may_exit(then_branch) || may_exit(else_branch)) => {
+                    let outer = std::mem::replace(&mut self.early_exit, true);
+                    self.env.push_stmt(s);
+                    let r = self.stmt(s);
+                    self.early_exit = outer;
+                    r?;
                 }
                 StmtT::If {
                     cond,
@@ -29419,10 +29444,17 @@ impl<'a> Body<'a> {
             return Ok(false);
         }
         self.release_from(0);
-        if self.in_loop {
+        if self.returns_early() {
             self.lines.push("return ();".to_string());
         }
         Ok(false)
+    }
+
+    /// Whether a `return` here is Pulse's early `return` rather than the
+    /// value of the enclosing block: in a loop body, and in an arm of an `if`
+    /// with an `_ensures` join, nothing after the exit is in the same block.
+    fn returns_early(&self) -> bool {
+        self.in_loop || self.early_exit
     }
 
     /// One arm of a returning `if`, translated into its own line buffer
@@ -29506,7 +29538,7 @@ impl<'a> Body<'a> {
         let outer_tail_branch = std::mem::replace(&mut self.tail_branch, false);
         let outer_diverged = std::mem::replace(&mut self.diverged, false);
 
-        let folded = if self.in_loop {
+        let folded = if self.returns_early() {
             fold_exits(stmts)
         } else {
             stmts.clone()
@@ -29516,7 +29548,7 @@ impl<'a> Body<'a> {
                 if self.diverged {
                     break;
                 }
-                if self.in_loop && matches!(s.val, StmtT::Goto(_)) {
+                if self.returns_early() && matches!(s.val, StmtT::Goto(_)) {
                     self.rest(std::slice::from_ref(s))?;
                     return Ok(true);
                 }
@@ -29526,12 +29558,14 @@ impl<'a> Body<'a> {
                     // arranges by folding the statements after an `if` into
                     // the arm that falls through. A loop body has no tail to
                     // be -- but Pulse has a `return` of its own, and this is
-                    // the one place worth spending it. Everything the frame
+                    // the place worth spending it, along with an arm of an
+                    // `if` whose `_ensures` joins the arms that stay.
+                    // Everything the frame
                     // holds is given back first, because nothing after this
                     // runs; whether what is left implies the postcondition is
                     // the loop invariant's business, which is where it
                     // belongs.
-                    if !self.in_loop {
+                    if !self.returns_early() {
                         return Err("a `return` that is not in tail position".to_string());
                     }
                     if let Some(e) = e {
@@ -33495,6 +33529,7 @@ fn emit_body(
         copied_call: false,
         gotos: Vec::new(),
         in_loop: false,
+        early_exit: false,
         pending_close: Vec::new(),
         open_elems: Vec::new(),
         nested_scatter: BTreeMap::new(),
