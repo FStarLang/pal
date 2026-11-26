@@ -28,7 +28,7 @@ permissions:
 jobs:
   comment:
     if: inputs.run_id != '' || github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       # Publishing to a gist requires a token with the `gist` scope, which the
       # built-in GITHUB_TOKEN does not have. If the secret is not configured we

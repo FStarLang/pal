@@ -346,8 +346,6 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
         | ExprT::Live(x)
         | ExprT::Unchanged(x)
         | ExprT::Old(x)
-        | ExprT::Forall(_, _, x)
-        | ExprT::Exists(_, _, x)
         | ExprT::PreIncr(x)
         | ExprT::PostIncr(x)
         | ExprT::PreDecr(x)
@@ -360,6 +358,12 @@ fn rewrite_expr(env: &Env, e: &mut Expr, elim: &HashMap<Rc<IdentT>, ElimUnion>) 
         | ExprT::MallocFlex(_, x)
         | ExprT::CallocFlex(_, x)
         | ExprT::UnionInit(_, _, x) => rewrite_expr(env, Rc::make_mut(x), elim),
+        ExprT::Forall(_, _, trigs, x) | ExprT::Exists(_, _, trigs, x) => {
+            for t in trigs.iter_mut().flatten() {
+                rewrite_expr(env, Rc::make_mut(t), elim);
+            }
+            rewrite_expr(env, Rc::make_mut(x), elim);
+        }
         ExprT::Index(a, b) | ExprT::BinOp(_, a, b) | ExprT::AssignExpr(a, b) => {
             rewrite_expr(env, Rc::make_mut(a), elim);
             rewrite_expr(env, Rc::make_mut(b), elim);
@@ -674,8 +678,11 @@ fn rewrite_types_expr(e: &mut Expr, elim: &HashSet<Rc<IdentT>>) {
             rewrite_type(ty, elim);
             rewrite_types_expr(Rc::make_mut(x), elim);
         }
-        ExprT::Forall(_, ty, x) | ExprT::Exists(_, ty, x) => {
+        ExprT::Forall(_, ty, trigs, x) | ExprT::Exists(_, ty, trigs, x) => {
             rewrite_type(ty, elim);
+            for t in trigs.iter_mut().flatten() {
+                rewrite_types_expr(Rc::make_mut(t), elim);
+            }
             rewrite_types_expr(Rc::make_mut(x), elim);
         }
         ExprT::ArrayInit {

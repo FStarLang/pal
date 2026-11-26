@@ -1,0 +1,3 @@
+Cannot prove:
+ptr_pts_to var_p
+null_or var_s (ptr_pts_to var_p 1.0R var_p__arr) (ptr_pts_to_uninit var_p)
