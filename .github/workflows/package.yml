@@ -1,0 +1,470 @@
+name: Package
+
+# Builds the relocatable binary packages (opt/package.sh) for Linux, macOS and
+# Windows, with F* and z3 bundled, and tests them (opt/package-test.sh:
+# translate and verify) on fresh machines without LLVM or F*. The packages are
+# available as workflow artifacts.
+#
+# F* is the pinned nightly (opt/install-fstar.sh), unless fstar_ref or
+# fstar_src_url is given: then the fstar-src job makes (or downloads) an F*
+# source package, and each platform builds F* from it (opt/build-fstar.sh;
+# natively on both arm64 and x86_64 macOS; Windows in its own Cygwin job,
+# fstar-windows), all cached.
+
+on:
+  workflow_dispatch:
+    inputs:
+      fstar_ref:
+        description: 'F* branch, tag or full commit SHA to build F* from (empty: the pinned F* nightly)'
+        type: string
+        default: ''
+      fstar_repo:
+        description: 'F* repository to build fstar_ref from'
+        type: string
+        default: 'https://github.com/FStarLang/FStar.git'
+      fstar_src_url:
+        description: 'URL of an F* source package (fstar-src.tar.gz) to build F* from, instead of fstar_ref'
+        type: string
+        default: ''
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fstar-src:
+    # The F* source package that all platforms build F* from: made from
+    # fstar_ref (a full bootstrapping build, cached per commit), or downloaded
+    # from fstar_src_url.
+    if: (inputs.fstar_ref != '' || inputs.fstar_src_url != '')
+    runs-on: ubuntu-22.04
+    outputs:
+      id: ${{ steps.id.outputs.id }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download the F* source package
+      if: inputs.fstar_src_url != ''
+      env:
+        FSTAR_SRC_URL: ${{ inputs.fstar_src_url }}
+      run: |
+        mkdir -p fstar-src
+        curl -fsSL -o fstar-src/fstar-src.tar.gz "$FSTAR_SRC_URL"
+        printf 'repo: %s\nref: source package\n' "$FSTAR_SRC_URL" > fstar-src/fstar-src.SOURCE
+
+    - name: Resolve the F* commit
+      id: commit
+      if: inputs.fstar_src_url == ''
+      env:
+        FSTAR_REF: ${{ inputs.fstar_ref }}
+        FSTAR_REPO: ${{ inputs.fstar_repo }}
+      run: echo "commit=$(./opt/build-fstar.sh --print-commit --ref "$FSTAR_REF" --repo "$FSTAR_REPO")" >> "$GITHUB_OUTPUT"
+
+    - name: Cache the F* source package
+      id: cache
+      if: inputs.fstar_src_url == ''
+      uses: actions/cache@v4
+      with:
+        path: fstar-src
+        key: fstar-src-${{ steps.commit.outputs.commit }}-${{ hashFiles('opt/build-fstar.sh') }}
+
+    - name: Install OCaml
+      if: inputs.fstar_src_url == '' && steps.cache.outputs.cache-hit != 'true'
+      uses: ocaml/setup-ocaml@v3
+      with:
+        ocaml-compiler: 5.3.0
+
+    - name: Make the F* source package
+      if: inputs.fstar_src_url == '' && steps.cache.outputs.cache-hit != 'true'
+      env:
+        FSTAR_REPO: ${{ inputs.fstar_repo }}
+        FSTAR_REF: ${{ inputs.fstar_ref }}
+        FSTAR_COMMIT: ${{ steps.commit.outputs.commit }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libgmp-dev libzstd-dev pkg-config
+        ./opt/build-fstar.sh --install-deps --repo "$FSTAR_REPO" --ref "$FSTAR_COMMIT" \
+          --make-src-package fstar-src
+
+    # The ref as given (the cached package may come from another ref to the
+    # same commit).
+    - name: Record the F* ref
+      if: inputs.fstar_src_url == ''
+      env:
+        FSTAR_REF: ${{ inputs.fstar_ref }}
+      run: |
+        sed -i "s|^ref: .*|ref: $FSTAR_REF|" fstar-src/fstar-src.SOURCE
+
+    # The cache key of the F* builds: the source package's checksum.
+    - name: Identify the F* source package
+      id: id
+      run: |
+        cat fstar-src/fstar-src.SOURCE
+        echo "id=$(sha256sum fstar-src/fstar-src.tar.gz | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: fstar-src
+        path: fstar-src/
+
+  build:
+    # The package runs on glibc >= the build host's: build on the oldest
+    # supported Ubuntu.
+    needs: fstar-src
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install clang
+      run: |
+        wget https://apt.llvm.org/llvm.sh
+        chmod +x llvm.sh
+        sudo ./llvm.sh 23
+        sudo apt update
+        sudo apt install -y clang-23 llvm-23-dev libclang-cpp23-dev g++ clang-tools-23 libclang-23-dev patchelf
+
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+
+    - name: Install F*
+      if: needs.fstar-src.outputs.id == ''
+      run: ./opt/install-fstar.sh --dest "$RUNNER_TEMP/fstar" --no-link
+
+    - name: Cache F* built from source
+      id: fstar-cache
+      if: needs.fstar-src.outputs.id != ''
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/fstar
+        key: fstar-${{ runner.os }}-${{ runner.arch }}-ubuntu-22.04-${{ needs.fstar-src.outputs.id }}-${{ hashFiles('opt/build-fstar.sh') }}
+
+    - uses: actions/download-artifact@v4
+      if: needs.fstar-src.outputs.id != '' && steps.fstar-cache.outputs.cache-hit != 'true'
+      with:
+        name: fstar-src
+        path: ${{ runner.temp }}/fstar-src
+
+    - name: Install OCaml
+      if: needs.fstar-src.outputs.id != '' && steps.fstar-cache.outputs.cache-hit != 'true'
+      uses: ocaml/setup-ocaml@v3
+      with:
+        ocaml-compiler: 5.3.0
+
+    - name: Build F* from the source package
+      if: needs.fstar-src.outputs.id != '' && steps.fstar-cache.outputs.cache-hit != 'true'
+      run: |
+        sudo apt-get install -y libgmp-dev libzstd-dev pkg-config
+        ./opt/build-fstar.sh --install-deps --src-package "$RUNNER_TEMP/fstar-src/fstar-src.tar.gz" \
+          --dest "$RUNNER_TEMP/fstar"
+
+    - name: Build package
+      run: make package PACKAGE_OPTS="--fstar $RUNNER_TEMP/fstar"
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: pal-linux-x86_64
+        path: dist/pal-*.tar.gz*
+
+  test:
+    needs: build
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:22.04', 'ubuntu:24.04', 'ubuntu:26.04', 'debian:12']
+    container: ${{ matrix.image }}
+    steps:
+    - name: Install test prerequisites (no LLVM, no F*)
+      run: apt-get update && apt-get install -y make libc6-dev
+
+    - uses: actions/checkout@v4
+
+    - uses: actions/download-artifact@v4
+      with:
+        name: pal-linux-x86_64
+        path: dist
+
+    - name: Test package (translate and verify)
+      run: VERIFY=1 make package-test
+
+  macos:
+    needs: fstar-src
+    if: ${{ !cancelled() && !failure() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - { runner: macos-26, arch: arm64 }
+        - { runner: macos-26-intel, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install LLVM 23
+      run: |
+        brew install llvm
+        echo "LLVM_CONFIG=$(brew --prefix llvm)/bin/llvm-config" >> "$GITHUB_ENV"
+
+    - name: Install Rust
+      run: rustup update stable && rustup default stable
+
+    # fstar.exe (nightly or built from source) links Homebrew's gmp and zstd,
+    # which package.sh bundles next to it.
+    - name: Install the libraries that F* links
+      run: brew install gmp zstd
+
+    # The F* nightly build for this architecture (arm64 or x86_64).
+    - name: Install F*
+      if: needs.fstar-src.outputs.id == ''
+      run: ./opt/install-fstar.sh --dest "$RUNNER_TEMP/fstar" --no-link
+
+    - name: Cache F* built from source
+      id: fstar-cache
+      if: needs.fstar-src.outputs.id != ''
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/fstar
+        key: fstar-${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner }}-${{ needs.fstar-src.outputs.id }}-${{ hashFiles('opt/build-fstar.sh') }}
+
+    - uses: actions/download-artifact@v4
+      if: needs.fstar-src.outputs.id != '' && steps.fstar-cache.outputs.cache-hit != 'true'
+      with:
+        name: fstar-src
+        path: ${{ runner.temp }}/fstar-src
+
+    - name: Install F*'s build tools
+      if: needs.fstar-src.outputs.id != '' && steps.fstar-cache.outputs.cache-hit != 'true'
+      run: brew install make pkg-config
+
+    - name: Install OCaml
+      if: needs.fstar-src.outputs.id != '' && steps.fstar-cache.outputs.cache-hit != 'true'
+      uses: ocaml/setup-ocaml@v3
+      with:
+        ocaml-compiler: 5.3.0
+
+    - name: Build F* from the source package
+      if: needs.fstar-src.outputs.id != '' && steps.fstar-cache.outputs.cache-hit != 'true'
+      run: |
+        ./opt/build-fstar.sh --install-deps --src-package "$RUNNER_TEMP/fstar-src/fstar-src.tar.gz" \
+          --dest "$RUNNER_TEMP/fstar"
+
+    - name: Build package
+      run: make package PACKAGE_OPTS="--fstar $RUNNER_TEMP/fstar"
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: pal-macos-${{ matrix.arch }}
+        path: dist/pal-*.tar.gz*
+
+  macos-test:
+    # Fresh runners, without Homebrew's LLVM or F*.
+    needs: macos
+    if: ${{ !cancelled() && !failure() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - { runner: macos-26, arch: arm64 }
+        - { runner: macos-26-intel, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/download-artifact@v4
+      with:
+        name: pal-macos-${{ matrix.arch }}
+        path: dist
+
+    - name: Test package (translate and verify)
+      run: VERIFY=1 make package-test
+
+  fstar-windows:
+    # F* builds on Windows from a source package only, in Cygwin with OCaml
+    # from opam (as F*'s own Windows builds do): a job of its own, apart from
+    # the MSYS2 environment that builds PAL.
+    needs: fstar-src
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - name: Check out with LF line endings
+      shell: pwsh
+      run: git config --global core.autocrlf false
+
+    - uses: actions/checkout@v4
+
+    - name: Cache F* built from source
+      id: fstar-cache
+      uses: actions/cache@v4
+      with:
+        path: fstar
+        key: fstar-${{ runner.os }}-${{ runner.arch }}-${{ needs.fstar-src.outputs.id }}-${{ hashFiles('opt/build-fstar.sh') }}
+
+    - uses: actions/download-artifact@v4
+      if: steps.fstar-cache.outputs.cache-hit != 'true'
+      with:
+        name: fstar-src
+        path: fstar-src
+
+    # The MinGW libraries only (as F*'s Windows builds do): F* builds in the
+    # Cygwin of opam (setup-ocaml), which has make and unzip. Tools of this
+    # second Cygwin fail silently when run from opam's Cygwin bash (its curl
+    # did, in F*'s get_fstar_z3.sh): curl is then Windows' own.
+    - uses: cygwin/cygwin-install-action@master
+      if: steps.fstar-cache.outputs.cache-hit != 'true'
+      with:
+        packages: mingw64-i686-gmp, mingw64-i686-libffi, mingw64-x86_64-gmp, mingw64-x86_64-libffi
+
+    # Only Cygwin's tools on the PATH of Cygwin's bash.
+    - run: echo "CYGWIN_NOWINPATH=1" >> "$GITHUB_ENV"
+      if: steps.fstar-cache.outputs.cache-hit != 'true'
+
+    - name: Install OCaml
+      if: steps.fstar-cache.outputs.cache-hit != 'true'
+      uses: ocaml/setup-ocaml@v3
+      with:
+        ocaml-compiler: 5.3.0
+
+    # Packages with Cygwin depexts, from outside Cygwin: Cygwin's setup.exe
+    # may upgrade cygwin1.dll and kill a running Cygwin bash.
+    - name: Install gmp and pkg-config for OCaml
+      if: steps.fstar-cache.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: opam install -y conf-gmp conf-pkg-config
+
+    - name: Build F* from the source package
+      if: steps.fstar-cache.outputs.cache-hit != 'true'
+      run: |
+        eval "$(opam env)"
+        ./opt/build-fstar.sh --install-deps --src-package fstar-src/fstar-src.tar.gz \
+          --work "$(cygpath -u "$RUNNER_TEMP")/fstar-work" --dest fstar
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: fstar-windows-x86_64
+        path: fstar/
+
+  windows:
+    needs: fstar-windows
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+    - name: Check out with symlinks and LF line endings
+      shell: pwsh
+      run: |
+        git config --global core.symlinks true
+        git config --global core.autocrlf false
+
+    - uses: actions/checkout@v4
+
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: UCRT64
+        update: true
+        install: >-
+          make git python zip unzip
+          mingw-w64-ucrt-x86_64-rust
+          mingw-w64-ucrt-x86_64-clang
+          mingw-w64-ucrt-x86_64-llvm
+          mingw-w64-ucrt-x86_64-clang-tools-extra
+
+    - name: Configure MSYS2 git like the checkout
+      run: |
+        git config --global --add safe.directory "$PWD"
+        git config --global core.symlinks true
+        git config --global core.autocrlf false
+        git status --short
+
+    - name: Install F*
+      if: needs.fstar-windows.result != 'success'
+      run: ./opt/install-fstar.sh --dest "$(cygpath -u "$RUNNER_TEMP")/fstar" --no-link
+
+    - uses: actions/download-artifact@v4
+      if: needs.fstar-windows.result == 'success'
+      with:
+        name: fstar-windows-x86_64
+        path: ${{ runner.temp }}/fstar
+
+    - name: Build package
+      run: make package PACKAGE_OPTS="--fstar $(cygpath -u "$RUNNER_TEMP")/fstar"
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: pal-windows-x86_64
+        path: dist/pal-*.zip*
+
+  windows-test:
+    # A clean environment: MSYS2 tools (make, unzip) and the MinGW-w64 C
+    # library headers, but no clang, LLVM, gcc or F*.
+    needs: windows
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+    - name: Check out with symlinks and LF line endings
+      shell: pwsh
+      run: |
+        git config --global core.symlinks true
+        git config --global core.autocrlf false
+
+    - uses: actions/checkout@v4
+
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: UCRT64
+        install: make unzip mingw-w64-ucrt-x86_64-headers
+
+    # Without a MinGW gcc on PATH, pal.exe's clang finds no C library headers
+    # (stdlib.h, ...) unless told where they are.
+    - name: Point pal.exe to the MinGW-w64 headers
+      run: echo "PAL_SYSROOT=$(cygpath -m "$MINGW_PREFIX")" >> "$GITHUB_ENV"
+
+    - uses: actions/download-artifact@v4
+      with:
+        name: pal-windows-x86_64
+        path: dist
+
+    - name: Test package (translate and verify)
+      run: VERIFY=1 make package-test
+
+  windows-msvc-test:
+    # Windows without MSYS2: the C library headers of MSVC and the Windows SDK
+    # (clang target x86_64-pc-windows-msvc, set by a compile_flags.txt next to
+    # each test), and a PowerShell test driver instead of bash and make.
+    needs: windows
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+    - uses: actions/checkout@v4
+
+    # INCLUDE: the MSVC and Windows SDK header directories, as set by
+    # vcvars64.bat of the Visual Studio installation that vswhere finds.
+    - name: Set INCLUDE to the MSVC and Windows SDK headers
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vs = & $vswhere -latest -products * `
+          -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if (-not $vs) { throw 'no Visual Studio with the MSVC x64 tools' }
+        $include = cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" |
+          Select-String '^INCLUDE=' | Select-Object -First 1
+        if (-not $include) { throw 'vcvars64.bat did not set INCLUDE' }
+        Write-Host $include.Line
+        $include.Line >> $env:GITHUB_ENV
+
+    - uses: actions/download-artifact@v4
+      with:
+        name: pal-windows-x86_64
+        path: dist
+
+    - name: Test package (translate and verify)
+      run: ./opt/package-test.ps1 (Get-Item dist/pal-*.zip).FullName -Target x86_64-pc-windows-msvc

@@ -28,7 +28,7 @@ cargo run -- --print-ir test/swap.c  # print the IR without emitting files
 
 # Formatting (CI checks this)
 cargo fmt
-clang-format -i cpp/impl.cpp
+clang-format-23 -i cpp/impl.cpp
 ```
 
 The test suite (`test/Makefile`) runs `pal` on each `.c` file in `test/`, then verifies the generated `.fst` files using F*/Pulse.
