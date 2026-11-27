@@ -17036,7 +17036,8 @@ impl<'a> Body<'a> {
             me.lines.truncate(mark);
             me.pending_close.truncate(closing);
         };
-        let Ok(mut addr) = self.inline(e) else {
+        let field = self.snapshot_field_addr(e);
+        let Ok(mut addr) = field.map_or_else(|| self.inline(e), Ok) else {
             rollback(self);
             return;
         };
@@ -19488,6 +19489,9 @@ impl<'a> Body<'a> {
     /// the object: the snapshot of a pointer local that has one. Naming it
     /// must cost nothing: this is bookkeeping, not an access.
     fn hint_object_addr(&mut self, e: &Expr) -> Option<String> {
+        if let Some(a) = self.snapshot_field_addr(e) {
+            return Some(a);
+        }
         if let ExprT::Var(v) = &strip_vattr(e).val
             && let Some(local) = self.slots.iter().rev().find(|s| s.name == *v.val)
             && let Some(base) = self.snapshot_base(&local.addr)
@@ -19504,6 +19508,35 @@ impl<'a> Body<'a> {
                 None
             }
         }
+    }
+
+    /// `&p->f` (or `&p->f.g`, ...) where `p` is a pointer local whose object
+    /// is tracked at a snapshot: the field's address off the snapshot, where
+    /// the field is tracked too. Naming it through the local would take a
+    /// read of the local, which a hint must not cost.
+    fn snapshot_field_addr(&self, e: &Expr) -> Option<String> {
+        let ExprT::Ref(place) = &strip_vattr(e).val else {
+            return None;
+        };
+        if !matches!(&strip_vattr(place).val, ExprT::Member(..)) {
+            return None;
+        }
+        let mut root: &Expr = place;
+        loop {
+            match &strip_vattr(root).val {
+                ExprT::Member(b, _) => root = b,
+                ExprT::Deref(inner) => {
+                    let ExprT::Var(v) = &strip_vattr(inner).val else {
+                        return None;
+                    };
+                    let local = self.slots.iter().rev().find(|s| s.name == *v.val)?;
+                    self.snapshot_base(&local.addr)?;
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        self.tracked_place_key(place)
     }
 
     fn snapshot_base(&self, local_addr: &str) -> Option<String> {
@@ -32282,6 +32315,14 @@ fn call_bound_map(body: &Stmts, storage_snapshot: bool) -> HashSet<String> {
         })
         .val;
         let loaded = matches!(rhs_val, ExprT::Deref(..) | ExprT::Member(..));
+        // `T *p = (T *)q;`, a pointer local initialised once with another
+        // name's value under a cast, which a `$scattered` hint further on
+        // names: the hint says what that value points at, and as for a load
+        // every use still reads the local and is checked against the snapshot.
+        let renamed = storage_snapshot
+            && !matches!(strip_vattr(rhs).val, ExprT::Var(..))
+            && matches!(strip_vattr(strip_casts(rhs)).val, ExprT::Var(..))
+            && scattered_hints(body, &q) >= 1;
         let noted_scattered = storage_snapshot
             && loaded
             && initialized_null.contains(&q)
@@ -32301,7 +32342,7 @@ fn call_bound_map(body: &Stmts, storage_snapshot: bool) -> HashSet<String> {
         // the storage snapshot takes it; a code pointer's validity still has
         // to come from a call.
         if !(matches!(rhs_val, ExprT::FnCall(..) | ExprT::FnPtrCall(..))
-            || (storage_snapshot && loaded))
+            || (storage_snapshot && (loaded || renamed)))
         {
             continue;
         }
