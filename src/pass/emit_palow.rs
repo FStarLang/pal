@@ -19271,6 +19271,28 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// The address a `$gathered` or `$released` names, as the emitter keys
+    /// the object: the snapshot of a pointer local that has one. Naming it
+    /// must cost nothing: this is bookkeeping, not an access.
+    fn hint_object_addr(&mut self, e: &Expr) -> Option<String> {
+        if let ExprT::Var(v) = &strip_vattr(e).val
+            && let Some(local) = self.slots.iter().rev().find(|s| s.name == *v.val)
+            && let Some(base) = self.snapshot_base(&local.addr)
+        {
+            return Some(base);
+        }
+        let mark = self.lines.len();
+        let closing = self.pending_close.len();
+        match self.inline(e) {
+            Ok(a) if self.lines.len() == mark && self.pending_close.len() == closing => Some(a),
+            _ => {
+                self.lines.truncate(mark);
+                self.pending_close.truncate(closing);
+                None
+            }
+        }
+    }
+
     fn snapshot_base(&self, local_addr: &str) -> Option<String> {
         self.slots.iter().rev().find_map(|s| {
             (!s.init && s.name.strip_prefix("*snapshot:") == Some(local_addr))
@@ -28089,18 +28111,10 @@ impl<'a> Body<'a> {
                 let Some(e) = uninit_open_arg(code) else {
                     return Err("`$gathered` without an object".to_string());
                 };
-                // Naming the address must cost nothing: this is bookkeeping,
-                // not an access.
-                let mark = self.lines.len();
-                let closing = self.pending_close.len();
-                let addr = match self.inline(e) {
-                    Ok(a) if self.lines.len() == mark && self.pending_close.len() == closing => a,
-                    _ => {
-                        self.lines.truncate(mark);
-                        self.pending_close.truncate(closing);
-                        return Err("`$gathered` of something that is not a struct this body                                     can name by address"
-                            .to_string());
-                    }
+                let Some(addr) = self.hint_object_addr(e) else {
+                    return Err("`$gathered` of something that is not a struct this body \
+                                can name by address"
+                        .to_string());
                 };
                 let Some(t) = self.scatter_target(&addr) else {
                     return Err(
@@ -28124,6 +28138,63 @@ impl<'a> Body<'a> {
                 let mut close = Vec::new();
                 self.gather_enclosing(&addr, &mut close);
                 self.lines.extend(close);
+                Ok(())
+            }
+            StmtT::GhostStmt(code) if matches!(aux_fn_kind(code), Some(AuxFnKind::Released)) => {
+                // The other closing form of `$scattered`: a ghost step of the
+                // author's has taken the pieces back -- written fields and
+                // storage alike -- typically to hand the object on as raw
+                // bytes. The emitter forgets the object, so nothing after
+                // this asks for its pieces or for a whole value. Nothing is
+                // emitted and nothing is assumed: pieces the author's step
+                // did not consume are still in the context, and Pulse
+                // rejects them where the body ends.
+                let Some(e) = uninit_open_arg(code) else {
+                    return Err("`$released` without an object".to_string());
+                };
+                let Some(addr) = self.hint_object_addr(e) else {
+                    return Err("`$released` of something that is not a struct this body \
+                                can name by address"
+                        .to_string());
+                };
+                let Some(Scattering::Slot(_)) = self.scatter_target(&addr) else {
+                    return Err(
+                        "`$released` of something this body is not filling one field at a time"
+                            .to_string(),
+                    );
+                };
+                if !self.prescattered.contains(&addr)
+                    && self
+                        .slots
+                        .iter()
+                        .rev()
+                        .find(|s| s.addr == addr && !s.init)
+                        .is_none_or(|s| s.scattered.is_empty())
+                {
+                    return Err(
+                        "`$released` of an object that was never `$scattered` or written"
+                            .to_string(),
+                    );
+                }
+                let mut gone = vec![addr.clone()];
+                let mut k = 0;
+                while k < gone.len() {
+                    let kids: Vec<String> = self
+                        .nested_scatter
+                        .iter()
+                        .filter(|(_, (pa, _, _))| *pa == gone[k])
+                        .map(|(c, _)| c.clone())
+                        .collect();
+                    for c in kids {
+                        self.nested_scatter.remove(&c);
+                        gone.push(c);
+                    }
+                    k += 1;
+                }
+                for a in &gone {
+                    self.prescattered.remove(a);
+                }
+                self.slots.retain(|s| s.init || !gone.contains(&s.addr));
                 Ok(())
             }
             StmtT::GhostStmt(code) if ghost_handled(code) => {
@@ -31743,9 +31814,9 @@ fn ptr_source_map(body: &Stmts) -> HashMap<String, Rc<Expr>> {
     out
 }
 
-/// Locals bound exactly once, from a call. What the call returned is what
-/// the name holds, so anything the callee's contract said about its result is
-/// a fact about this name.
+/// Locals bound exactly once, from a call (or, for the storage snapshot, a
+/// load). What the call returned is what the name holds, so anything the
+/// callee's contract said about its result is a fact about this name.
 fn call_bound_map(body: &Stmts, storage_snapshot: bool) -> HashSet<String> {
     let mut t = Touched::default();
     touch_stmts(body, &mut t);
@@ -31775,22 +31846,42 @@ fn call_bound_map(body: &Stmts, storage_snapshot: bool) -> HashSet<String> {
         // Only snapshot the extra NULL-then-call case when the annotation
         // names this very result immediately after the assignment. A later
         // annotation may instead describe storage already split by its owner.
-        let noted_result = storage_snapshot && body.get(i + 1).is_some_and(|s| {
-            matches!(&s.val, StmtT::GhostStmt(code)
+        let noted_result = storage_snapshot
+            && body.get(i + 1).is_some_and(|s| {
+                matches!(&s.val, StmtT::GhostStmt(code)
                 if matches!(aux_fn_kind(code), Some(AuxFnKind::UnfoldUninit))
                     && uninit_open_arg(code).and_then(lvalue_name).as_ref() == Some(&q))
-        });
-        let expected = 1 + usize::from(noted_result && initialized_null.contains(&q));
+            });
+        // The same for a pointer declared NULL and then loaded from memory
+        // once, when a `$scattered` hint further on names it: the hint is
+        // where the author says what the loaded pointer points at.
+        let rhs_val = &(if noted_result {
+            strip_casts(rhs)
+        } else {
+            strip_vattr(rhs)
+        })
+        .val;
+        let loaded = matches!(rhs_val, ExprT::Deref(..) | ExprT::Member(..));
+        let noted_scattered = storage_snapshot
+            && loaded
+            && initialized_null.contains(&q)
+            && body[i + 1..].iter().any(|s| {
+                matches!(&s.val, StmtT::GhostStmt(code)
+                    if matches!(aux_fn_kind(code), Some(AuxFnKind::Scattered))
+                        && uninit_open_arg(code).and_then(lvalue_name).as_ref() == Some(&q))
+            });
+        let expected =
+            1 + usize::from((noted_result || noted_scattered) && initialized_null.contains(&q));
         if t.rebound.get(&q).copied() != Some(expected) {
             continue;
         }
-        // A pointer loaded from memory, `T *p = *q;`, is as settled as one a
-        // call returned: the local is written once, and every use still loads
-        // it and is checked against the snapshot. Only the storage snapshot
-        // takes it; a code pointer's validity still has to come from a call.
-        let rhs_val = &(if noted_result { strip_casts(rhs) } else { strip_vattr(rhs) }).val;
+        // A pointer loaded from memory, `T *p = *q;` or `T *p = s->f;`, is as
+        // settled as one a call returned: the local is written once, and
+        // every use still loads it and is checked against the snapshot. Only
+        // the storage snapshot takes it; a code pointer's validity still has
+        // to come from a call.
         if !(matches!(rhs_val, ExprT::FnCall(..) | ExprT::FnPtrCall(..))
-            || (storage_snapshot && matches!(rhs_val, ExprT::Deref(..))))
+            || (storage_snapshot && loaded))
         {
             continue;
         }
@@ -33410,7 +33501,7 @@ fn aux_fn_antiquot(
                 AuxFnKind::Activate => {
                     Err("`$activate` of a struct, which has no arms".to_string())
                 }
-                AuxFnKind::Scattered | AuxFnKind::Gathered => Err(format!(
+                AuxFnKind::Scattered | AuxFnKind::Gathered | AuxFnKind::Released => Err(format!(
                     "`${}` other than as a statement of its own",
                     kind.keyword()
                 )),
@@ -33428,7 +33519,8 @@ fn aux_fn_antiquot(
                 AuxFnKind::UnfoldUninit
                 | AuxFnKind::FoldUninit
                 | AuxFnKind::Scattered
-                | AuxFnKind::Gathered => Err(format!(
+                | AuxFnKind::Gathered
+                | AuxFnKind::Released => Err(format!(
                     "`${}` of a union, which is uninitialised as a whole",
                     kind.keyword()
                 )),
@@ -33636,7 +33728,12 @@ fn aux_activate(code: &InlinePulseCode) -> Option<(&Type, &Ident, &Expr)> {
 fn uninit_open_arg(code: &InlinePulseCode) -> Option<&Expr> {
     if !matches!(
         aux_fn_kind(code),
-        Some(AuxFnKind::UnfoldUninit | AuxFnKind::Scattered | AuxFnKind::Gathered)
+        Some(
+            AuxFnKind::UnfoldUninit
+                | AuxFnKind::Scattered
+                | AuxFnKind::Gathered
+                | AuxFnKind::Released
+        )
     ) {
         return None;
     }
