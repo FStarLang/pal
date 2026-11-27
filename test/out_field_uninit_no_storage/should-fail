@@ -1,0 +1,3 @@
+Cannot prove:
+struct_counts_pts_to_uninit (var_r +! struct_report_offsetof_counts)
+Store.struct_report_hole_out var_r
