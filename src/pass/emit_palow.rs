@@ -23595,6 +23595,23 @@ impl<'a> Body<'a> {
                 values.insert(i, self.arg_value(a)?);
             }
         }
+        // A call returning a struct or union is evaluated before the lends
+        // too: in `f(&u->m, g(&u->m))` g borrows the member itself, and has
+        // to give it back before f's lend takes it.
+        for (i, a) in args.iter().enumerate() {
+            if !values.contains_key(&i)
+                && outs.get(i) != Some(&true)
+                && matches!(&strip_casts(a).val, ExprT::FnCall(..))
+                && self.ty_of(a).is_ok_and(|t| {
+                    matches!(
+                        peel(self.tds, &t).val,
+                        TypeT::TypeRef(TypeRefKind::Struct(_) | TypeRefKind::Union(_))
+                    )
+                })
+            {
+                values.insert(i, self.arg_value(a)?);
+            }
+        }
         // A read-only callee leaves the union as it was, and the ownership
         // with it; only a callee that may store needs the follow.
         let mut follows: Vec<(String, String, String)> = Vec::new();
