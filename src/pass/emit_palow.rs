@@ -19327,7 +19327,14 @@ impl<'a> Body<'a> {
         };
         let unaligned = self.unaligned_field(&ff.sn, &ff.field);
         if !writing {
-            if !self.scattered_set(target).contains(&*f.val) {
+            // A field the body has not written is only there to read if the
+            // author said the object arrived in pieces: then the contract or
+            // the author's ghost step holds each field on its own, some with
+            // values, and the read needs that field's points-to and nothing
+            // more. Focusing it instead would need the whole object to be a
+            // value, which it may never be -- a field nobody wrote.
+            if !self.scattered_set(target).contains(&*f.val) && !self.prescattered.contains(&ff.a)
+            {
                 return None;
             }
             return Some(Focus {
@@ -28424,6 +28431,21 @@ impl<'a> Body<'a> {
                     );
                 }
                 let a = self.slots[before].addr.clone();
+                // `$scattered` of a struct-typed field of an object that is
+                // itself in pieces: the field is being filled inside it, as
+                // if a write had started it. A read through it then reaches
+                // its fields by address, and if the body writes them all it
+                // counts as written in the object around it.
+                if let ExprT::Ref(place) = &strip_vattr(e).val
+                    && let ExprT::Member(base, f) = &strip_vattr(place).val
+                    && let Some(pa) = self.tracked_place_key(base)
+                    && self.scatter_target(&pa).is_some()
+                    && let Ok((psn, _)) = self.struct_of(base)
+                    && a == format!("({} +! {}_offsetof_{})", pa, psn, f.val)
+                {
+                    self.nested_scatter
+                        .insert(a.clone(), (pa, psn, f.val.to_string()));
+                }
                 self.prescattered.insert(a);
                 Ok(())
             }
