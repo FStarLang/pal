@@ -22214,6 +22214,20 @@ impl<'a> Body<'a> {
                     // no ownership at all -- which is the whole point of
                     // publishing it as one.
                     Ok(value)
+                } else if self.env.lookup_global_var(v).is_some()
+                    && self.env.addressable_global(v).is_some()
+                    && let Ok(ty) = self.ty_of(e)
+                    && readable_field(self.tds, &ty)
+                    && let Some(pn) = palow_name(self.tds, &ty)
+                {
+                    // A mutable global the contract does not hand in. Its
+                    // address is fixed, so the read is `*(&g)`: it needs a
+                    // points-to of `g` at some fraction, which ghost code has
+                    // to bring, and a fraction never allows a write.
+                    let t = self.fresh(&v.val);
+                    self.lines
+                        .push(format!("let {} = {}_read addr_var_{};", t, pn, v.val));
+                    Ok(t)
                 } else if self.env.lookup_global_var(v).is_some() {
                     Err(format!(
                         "a read of `{}`, a global whose value is not fixed here",
