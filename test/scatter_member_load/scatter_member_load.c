@@ -45,3 +45,29 @@ _ensures(_inline_pulse(exists* (bv: struct_box).
 	}
 	return r;
 }
+
+/* The same after an early exit: the `goto` puts the load and the hint
+   together in the arm that falls through, which is where they are tracked. */
+int fill_after_check(_plain struct box *b, int c)
+_requires(_inline_pulse(exists* (bv: struct_box).
+	struct_box_pts_to $(b) 1.0R bv ** struct_head_pts_to_uninit bv.fld_h))
+_ensures(_inline_pulse(exists* (bv: struct_box).
+	struct_box_pts_to $(b) 1.0R bv ** struct_head_pts_to_uninit bv.fld_h))
+{
+	struct head *h = NULL;
+	int r = 0;
+	if (c) {
+		r = 3;
+		goto done;
+	}
+	h = b->h;
+	_ghost_stmt(struct_head_scatter_uninit $(h));
+	_ghost_stmt($scattered(struct head) $(h));
+	h->list.next = 0;
+	h->qlen = 1;
+	_ghost_stmt(Fill_head.release $(h));
+	_ghost_stmt($released(struct head) $(h));
+	r = 1;
+done:
+	return r;
+}
