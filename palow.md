@@ -8082,5 +8082,8 @@ Limitations:
     step leaves behind are rejected by Pulse
     (`scatter_released_leftover`), and `$released` of an object the body is
     not filling is an emitter error (`scatter_released_unscattered`).
-    `$gathered` now resolves a snapshot local the same way
-    (`scatter_member_load`).
+    `$gathered` now resolves a snapshot local the same way, and a join frame
+    over a slot named for an address rather than a variable -- such a
+    snapshot -- binds its value under a fresh name where it used to emit a
+    binder that was not an identifier (`scatter_member_load`,
+    `scatter_gathered_join`).

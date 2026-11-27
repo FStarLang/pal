@@ -26344,7 +26344,14 @@ impl<'a> Body<'a> {
                 locals.insert(s.name.clone(), value);
                 continue;
             }
-            let b = format!("inv_{}", touch);
+            // A slot named for an address rather than a variable -- a
+            // snapshot, or an object an author's hint named by expression --
+            // has no identifier of its own to build the binder from.
+            let b = if touch.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                format!("inv_{}", touch)
+            } else {
+                self.fresh("inv")
+            };
             binders.push(format!("({}: {})", b, s.fstar_ty));
             owns.push(s.pts_to(&b));
             if let Some(o) = &walk {
