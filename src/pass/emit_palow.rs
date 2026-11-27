@@ -24361,6 +24361,17 @@ impl<'a> Body<'a> {
         // already holds a value gives it up first, which is the same step a
         // written local takes on its way to an `_out` parameter.
         if let Some(p) = self.out_place(a) {
+            // A field of an object the body holds in pieces (an asserted
+            // hole) that an `_assert` has just proved to be storage -- its
+            // `_pts_to_uninit` -- goes to the callee as that storage, as an
+            // initialising store would write it: there is no value to give
+            // up. Leaving the `_forget` out drops no obligation, since the
+            // callee's own precondition is still checked against what is
+            // there; it only stops asking for a value that never was.
+            let storage = matches!(&strip_vattr(&p).val, ExprT::Member(base, _) if self.in_pieces(base))
+                && self
+                    .place_path(&p)
+                    .is_some_and(|key| self.asserted_uninit.remove(&key));
             let f = self.place(&p, true)?;
             if f.unaligned {
                 let name = match &strip_vattr(&p).val {
@@ -24370,7 +24381,7 @@ impl<'a> Body<'a> {
                 return Err(misaligned_addr(&name));
             }
             self.lines.extend(f.open_write.iter().cloned());
-            if f.write_fn == format!("{}_write", f.pn) {
+            if !storage && f.write_fn == format!("{}_write", f.pn) {
                 self.lines.push(format!("{}_forget {};", f.pn, f.at));
             }
             self.pending_close.extend(f.close_write);
