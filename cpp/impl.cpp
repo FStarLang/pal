@@ -3650,9 +3650,17 @@ public:
       auto savedSwitchBreak = switchBreakId;
       switchBreakId = new Rc<ir::Ident>(brkId.clone());
 
-      auto caseEnss = [&]() {
+      // The switch's `_ensures` is its join, and each case's `if` carries it
+      // as its own, so a later case starts from it. That `if` is skipped
+      // until its case is reached, and the clause need not hold before then.
+      // As the join of an `if` whose arm may leave (`return`, `goto`) the
+      // clause would be checked on the skipping arm too (an `if`'s
+      // `_ensures` joins the arms that reach its end), so such a case gets
+      // none: the cases and code after it are copied into the arms that
+      // reach its end, as for any `if` that may leave without an `_ensures`.
+      auto caseEnss = [&](Vec<Rc<ir::Stmt>> &caseStmts) {
         auto enss = Vec<Rc<ir::Expr>>::new_();
-        if (!switchEnss.empty()) {
+        if (!switchEnss.empty() && !stmts_may_exit(caseStmts)) {
           auto combined = switchEnss.front().clone();
           for (size_t i = 1; i < switchEnss.size(); i++) {
             combined =
@@ -3706,9 +3714,10 @@ public:
             trStmt(thenStmts, bodyStmt);
 
           auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
+          auto enss = caseEnss(thenStmts);
           stmts.push(mk_if(std::move(childLoc), std::move(cond),
                            std::move(thenStmts), std::move(elseStmts),
-                           caseEnss()));
+                           std::move(enss)));
 
         } else {
           if (!switchCanBreak) {
@@ -3736,9 +3745,10 @@ public:
             trStmt(thenStmts, bodyStmt);
 
           auto elseStmts = Vec<Rc<ir::Stmt>>::new_();
+          auto enss = caseEnss(thenStmts);
           stmts.push(mk_if(std::move(childLoc), std::move(notBrk),
                            std::move(thenStmts), std::move(elseStmts),
-                           caseEnss()));
+                           std::move(enss)));
         }
       }
 
