@@ -7954,3 +7954,18 @@ Limitations:
     for omitted members. An explicitly false flag does not imply a zero
     storage byte (`bitfield_init_padding_bad`). This does not publish new
     bit-field constants for static objects.
+105. **Reading an object that arrived in pieces.** `$scattered(struct T) $(p)`
+    made the body's writes fill `*p` by address, but a read of a field the
+    body had not written still focused the whole object, which needs every
+    field to hold a value -- so a handler could not read a wrapper whose
+    submitter left one field unwritten, even with the other fields' cells in
+    hand. A read of any field of a `$scattered` object now goes by address
+    to that field's own points-to, which the contract or the author's ghost
+    step must hold with a value; a field that is storage, or that nothing
+    holds, is still rejected (`scattered_read_uninit`,
+    `scattered_read_no_cell`). `$scattered` of a struct-typed field of an
+    object that is itself `$scattered` -- `$scattered(struct S) $(&p->f)` --
+    marks the field as in pieces inside it, as a write would have, so
+    `p->f.g` is read by address too, where it was refused as a read of a
+    field that had not been written (`scattered_read`). An object that is
+    not `$scattered` is read as before.
