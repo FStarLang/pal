@@ -29363,11 +29363,20 @@ impl<'a> Body<'a> {
     /// on its own.
     fn drop_seeded(&mut self, mark: usize) {
         for (addr, pre, post, g) in self.seeded.split_off(mark) {
-            self.lines.push(if self.laundered.contains(&g) {
-                "drop_is_valid _ _ _;".to_string()
-            } else {
-                format!("drop_is_valid {} {} {};", addr, pre, post)
-            });
+            self.lines.push(Self::drop_line(&self.laundered, &g, &addr, &pre, &post));
+        }
+    }
+
+    /// The `drop_is_valid` for a validity seeded at `addr` with `pre`/`post`.
+    /// A laundered one is no longer stated at `addr`, so the address is left
+    /// to inference -- but only the address: with two validities in context,
+    /// `_ _ _` matches neither, while the pre and post it was seeded at are
+    /// still the target's own and pick it out.
+    fn drop_line(laundered: &HashSet<String>, g: &str, addr: &str, pre: &str, post: &str) -> String {
+        if laundered.contains(g) {
+            format!("drop_is_valid _ {} {};", pre, post)
+        } else {
+            format!("drop_is_valid {} {} {};", addr, pre, post)
         }
     }
 
@@ -29451,11 +29460,7 @@ impl<'a> Body<'a> {
                 if self.post_valid.contains(&g) {
                     continue;
                 }
-                self.lines.push(if self.laundered.contains(&g) {
-                    "drop_is_valid _ _ _;".to_string()
-                } else {
-                    format!("drop_is_valid {} {} {};", addr, pre, post)
-                });
+                self.lines.push(Self::drop_line(&self.laundered, &g, &addr, &pre, &post));
             }
         }
         // An `_out` array was handed over as storage and has to leave as a
