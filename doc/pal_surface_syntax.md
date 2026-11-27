@@ -422,7 +422,7 @@ Notes:
 - **Context sensitivity.** A parameter is a value (`var_p`), and a local lives at an address (`loc_x`). `$(x)` of a local in body position (a block / `if` `_ensures`, a `_ghost_stmt`) reads it first and substitutes the result; in a loop invariant it is the invariant's existential (`inv_x`). Use `$&(x)` to talk about a local's storage.
 - **Special names.** `this` (inside `_refine*`, the value being refined; reach fields with `this.f`) and `return` (inside `_ensures`, the returned value).
 - **Field accesses are automatic.** PAL focuses a field before reading or writing it and unfocuses afterwards, and scatters / gathers a struct being initialised field by field; `$unfold` / `$fold` are only needed when your own ghost code wants the pieces.
-- **Explicit field loans.** An `_assert(_inline_pulse(...))` naming a generated `struct_T_hole_field` selects direct field access for that object. After returning the loan, assert its `struct_T_pts_to` to resume automatic focusing. Both assertions are proof obligations; asserting the whole cannot recover a missing field.
+- **Explicit field loans.** An `_assert(_inline_pulse(...))` naming a generated `struct_T_hole_field` selects direct field access for that object. After returning the loan, assert its `struct_T_pts_to` to resume automatic focusing. Both assertions are proof obligations; asserting the whole cannot recover a missing field. The hole may also be your own predicate, in any module, whose name ends in `struct_T_hole_<suffix>` (`Loan.struct_packet_hole_lent`): one that leaves out several fields, or holds some at a smaller fraction, selects direct access the same way (`test/native_struct_user_hole`, `test/native_struct_user_hole_bad`).
 
 `test/antiquot/antiquot.c` exercises every form.
 
