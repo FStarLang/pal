@@ -6,6 +6,8 @@
 #include "clang/Lex/MacroArgs.h"
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Tooling.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #ifndef _WIN32
 #include <dlfcn.h>
 #endif
@@ -503,14 +505,14 @@ public:
         if (anchor)
           continue;
         ctx.add_c_symbol(toStr(fd->getName()), 0,
-                         toStr(fd->getType().getCanonicalType().getAsString()),
+                         toStr(linkageType(fd->getType())),
                          !fd->hasExternalFormalLinkage(),
                          fd->doesThisDeclarationHaveABody(), fd->isInlined(),
                          ignored, isAdmitted(fd),
                          getRange(fd->getSourceRange()));
       } else if (auto *vd = dyn_cast<VarDecl>(d); vd && vd->isFileVarDecl()) {
         ctx.add_c_symbol(toStr(vd->getName()), 1,
-                         toStr(vd->getType().getCanonicalType().getAsString()),
+                         toStr(linkageType(vd->getType())),
                          !vd->hasExternalFormalLinkage(),
                          vd->isThisDeclarationADefinition() !=
                              VarDecl::DeclarationOnly,
@@ -525,7 +527,7 @@ public:
           for (auto *field : rd->fields()) {
             signature +=
                 "|" + fieldNameStr(field) + ":" +
-                field->getType().getCanonicalType().getAsString() + ":" +
+                linkageType(field->getType()) + ":" +
                 std::to_string(layout.getFieldOffset(field->getFieldIndex()));
             if (field->isBitField())
               signature += ":" + std::to_string(field->getBitWidthValue());
@@ -539,7 +541,7 @@ public:
       } else if (auto *td = dyn_cast<TypedefNameDecl>(d)) {
         ctx.add_c_symbol(
             toStr(td->getName()), 4,
-            toStr(td->getUnderlyingType().getCanonicalType().getAsString()),
+            toStr(linkageType(td->getUnderlyingType())),
             false, false, false, ignored, false,
             getRange(td->getSourceRange()));
       } else if (auto *ed = dyn_cast<EnumDecl>(d)) {
@@ -594,6 +596,28 @@ public:
   // from the field's index within its record. The index is deterministic and
   // shared by the field definition and every member access referring to it, so
   // the synthesized names stay consistent across the whole translation.
+  // A linkage signature spells an unnamed tag type by where it is declared.
+  // Two translation units can reach one header by different paths (`a.h`,
+  // `sub/../a.h`), so the location is printed with its path normalized:
+  // one declaration, one spelling, and distinct unnamed members stay distinct.
+  struct LinkagePaths : PrintingCallbacks {
+    std::string remapPath(StringRef path) const override {
+      SmallString<256> real;
+      if (!llvm::sys::fs::real_path(path, real))
+        return std::string(real);
+      SmallString<256> lexical(path);
+      llvm::sys::path::remove_dots(lexical, /*remove_dot_dot=*/true);
+      return std::string(lexical);
+    }
+  };
+
+  std::string linkageType(QualType type) {
+    static const LinkagePaths paths;
+    PrintingPolicy policy = astCtx->getPrintingPolicy();
+    policy.Callbacks = &paths;
+    return type.getCanonicalType().getAsString(policy);
+  }
+
   std::string fieldNameStr(FieldDecl const *f) {
     if (f->getIdentifier())
       return f->getName().str();
@@ -3871,7 +3895,7 @@ public:
             }
             if (!vd->getCanonicalDecl()->getLexicalDeclContext()->isFileContext()) {
               ctx.add_c_symbol(toStr(vd->getName()), 1,
-                               toStr(vd->getType().getCanonicalType().getAsString()),
+                               toStr(linkageType(vd->getType())),
                                !vd->hasExternalFormalLinkage(), false, false,
                                isIgnored(vd), false, dloc.clone());
               HandleDecl(vd);
