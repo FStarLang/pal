@@ -16606,6 +16606,10 @@ struct Body<'a> {
     /// Storage `$scattered` said is already in pieces, by address, until it
     /// is gathered: the first write into it must not scatter it again.
     prescattered: HashSet<String>,
+    /// Objects a `$scattered` hint named as `m.f`, where `m` is a parameter
+    /// passed by value and never stored: `m.f` is a value that cannot change,
+    /// so `m.f->g` names the object at the address the hint tracked.
+    value_field_objects: HashMap<(String, String), String>,
     /// The declarations written above the function, as (key, name, text).
     /// Two kinds live here: a name for a constant term a literal or a
     /// constant array initialiser would otherwise repeat at every mention,
@@ -17036,7 +17040,8 @@ impl<'a> Body<'a> {
             me.lines.truncate(mark);
             me.pending_close.truncate(closing);
         };
-        let Ok(mut addr) = self.inline(e) else {
+        let field = self.snapshot_field_addr(e);
+        let Ok(mut addr) = field.map_or_else(|| self.inline(e), Ok) else {
             rollback(self);
             return;
         };
@@ -17050,6 +17055,9 @@ impl<'a> Body<'a> {
         // A pointer local has storage of its own. Track the pointed-to object
         // at a snapshot, not at a computation such as `(ptr_read loc_p)`.
         // Every subsequent use still loads the local and proves it unchanged.
+        if let Some(key) = self.value_field(e) {
+            self.value_field_objects.insert(key, addr.clone());
+        }
         let mut name = format!("*{}", addr);
         if let ExprT::Var(v) = &strip_vattr(e).val
             && self.storage_call_locals.contains(v.val.as_ref())
@@ -19488,6 +19496,9 @@ impl<'a> Body<'a> {
     /// the object: the snapshot of a pointer local that has one. Naming it
     /// must cost nothing: this is bookkeeping, not an access.
     fn hint_object_addr(&mut self, e: &Expr) -> Option<String> {
+        if let Some(a) = self.snapshot_field_addr(e) {
+            return Some(a);
+        }
         if let ExprT::Var(v) = &strip_vattr(e).val
             && let Some(local) = self.slots.iter().rev().find(|s| s.name == *v.val)
             && let Some(base) = self.snapshot_base(&local.addr)
@@ -19506,6 +19517,61 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// `m.f` where `m` is a parameter held as a value (no storage, not a
+    /// global): the key under which its pointed-to object is recorded.
+    fn value_field(&self, e: &Expr) -> Option<(String, String)> {
+        let ExprT::Member(b, f) = &strip_vattr(e).val else {
+            return None;
+        };
+        let ExprT::Var(v) = &strip_vattr(b).val else {
+            return None;
+        };
+        if self.slots.iter().any(|s| s.name == *v.val) || self.env.lookup_global_var(v).is_some() {
+            return None;
+        }
+        Some((v.val.to_string(), f.val.to_string()))
+    }
+
+    /// The tracked object `m.f` points to, if a hint named it and it is
+    /// still tracked.
+    fn value_field_object(&self, e: &Expr) -> Option<String> {
+        let at = self.value_field_objects.get(&self.value_field(e)?)?;
+        self.slots.iter().any(|s| s.addr == *at).then(|| at.clone())
+    }
+
+    /// `&p->f` (or `&p->f.g`, ...) where `p` is a pointer local whose object
+    /// is tracked at a snapshot, or a field of a by-value parameter whose
+    /// object a hint named: the field's address off the tracked object, where
+    /// the field is tracked too. Naming it through the local would take a
+    /// read of the local, which a hint must not cost.
+    fn snapshot_field_addr(&self, e: &Expr) -> Option<String> {
+        let ExprT::Ref(place) = &strip_vattr(e).val else {
+            return None;
+        };
+        if !matches!(&strip_vattr(place).val, ExprT::Member(..)) {
+            return None;
+        }
+        let mut root: &Expr = place;
+        loop {
+            match &strip_vattr(root).val {
+                ExprT::Member(b, _) => root = b,
+                ExprT::Deref(inner) => {
+                    if self.value_field_object(inner).is_some() {
+                        break;
+                    }
+                    let ExprT::Var(v) = &strip_vattr(inner).val else {
+                        return None;
+                    };
+                    let local = self.slots.iter().rev().find(|s| s.name == *v.val)?;
+                    self.snapshot_base(&local.addr)?;
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        self.tracked_place_key(place)
+    }
+
     fn snapshot_base(&self, local_addr: &str) -> Option<String> {
         self.slots.iter().rev().find_map(|s| {
             (!s.init && s.name.strip_prefix("*snapshot:") == Some(local_addr))
@@ -19521,6 +19587,9 @@ impl<'a> Body<'a> {
         }
         match &strip_vattr(e).val {
             ExprT::Deref(inner) => {
+                if let Some(at) = self.value_field_object(inner) {
+                    return Some(at);
+                }
                 let ExprT::Var(v) = &strip_vattr(inner).val else {
                     return None;
                 };
@@ -32282,6 +32351,14 @@ fn call_bound_map(body: &Stmts, storage_snapshot: bool) -> HashSet<String> {
         })
         .val;
         let loaded = matches!(rhs_val, ExprT::Deref(..) | ExprT::Member(..));
+        // `T *p = (T *)q;`, a pointer local initialised once with another
+        // name's value under a cast, which a `$scattered` hint further on
+        // names: the hint says what that value points at, and as for a load
+        // every use still reads the local and is checked against the snapshot.
+        let renamed = storage_snapshot
+            && !matches!(strip_vattr(rhs).val, ExprT::Var(..))
+            && matches!(strip_vattr(strip_casts(rhs)).val, ExprT::Var(..))
+            && scattered_hints(body, &q) >= 1;
         let noted_scattered = storage_snapshot
             && loaded
             && initialized_null.contains(&q)
@@ -32301,7 +32378,7 @@ fn call_bound_map(body: &Stmts, storage_snapshot: bool) -> HashSet<String> {
         // the storage snapshot takes it; a code pointer's validity still has
         // to come from a call.
         if !(matches!(rhs_val, ExprT::FnCall(..) | ExprT::FnPtrCall(..))
-            || (storage_snapshot && loaded))
+            || (storage_snapshot && (loaded || renamed)))
         {
             continue;
         }
@@ -33674,6 +33751,7 @@ fn emit_body(
         open_elems: Vec::new(),
         nested_scatter: BTreeMap::new(),
         prescattered: HashSet::new(),
+        value_field_objects: HashMap::new(),
         decls: Vec::new(),
         own_open: Vec::new(),
         const_lend: false,

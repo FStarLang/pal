@@ -1,0 +1,2 @@
+# Expected translation diagnostic substrings
+`$scattered` of something that is not a struct this body can name by address
