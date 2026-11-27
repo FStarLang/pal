@@ -465,6 +465,20 @@ impl<'a> Checker<'a> {
                 self.check_rvalue(&env, body);
             }
             ExprT::StructInit(name, fields) => {
+                // A compound literal in a spec expression is parsed with the
+                // name it is written with, which may be a typedef; elab
+                // replaces it with the struct's name, but runs after merge.
+                let mut name = name.clone();
+                if env.lookup_struct(&name).is_none() && env.lookup_type(&name).is_some() {
+                    let ty = TypeT::TypeRef(TypeRefKind::Typedef(name.clone()))
+                        .with_loc(name.loc.clone());
+                    if let TypeT::TypeRef(TypeRefKind::Struct(struct_name)) =
+                        &env.vtype_whnf(ty.into()).val
+                    {
+                        name = struct_name.clone();
+                    }
+                }
+                let name = &name;
                 let Some(s) = env.lookup_struct(name) else {
                     self.report(format!("unknown struct {}", name), &rval.loc);
                     return;
