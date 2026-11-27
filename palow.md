@@ -7978,14 +7978,20 @@ Limitations:
     pointer (`h = NULL; ... h = b->h;`) was not given a storage snapshot,
     because only a call's result was: a `$scattered` hint on it found
     nothing to fill by address, and every write focused the whole object.
-    When a later top-level `$scattered` hint names such a local, the load is
-    now the one assignment the snapshot stands for, exactly as a call result
-    is -- one assignment between the `NULL` and the hint and none after, at
-    the top level of the body. Each use asserts that the local still holds
-    the snapshot, which F* checks; nothing is assumed. A second load, a load
-    in only one arm, or a reassignment after the hint gets no snapshot and
-    fails in F* as before (`scatter_member_load_twice`,
-    `scatter_member_load_branch`, `scatter_member_load_retarget`). The fill
+    When a later `$scattered` hint names such a local, the load is now the
+    one assignment the snapshot stands for, exactly as a call result is --
+    one assignment between the `NULL` and the hint and none after, and the
+    only such hint in the body. The load and the hint sit either both at the
+    top level of the body, or both in the same arm of a conditional or the
+    same block a `goto` was lowered into (as when the fill follows a failed
+    status check); a nested snapshot covers that block only. Each use
+    asserts that the local still holds the snapshot, which F* checks;
+    nothing is assumed. A second load, a load in only one arm with the hint
+    outside it, a reassignment after the hint, a load and hint in a loop
+    body, or a second hint after the block that holds the load gets no
+    snapshot and fails in F* as before (`scatter_member_load_twice`,
+    `scatter_member_load_branch`, `scatter_member_load_retarget`,
+    `scatter_member_load_loop`, `scatter_member_load_after_block`). The fill
     has a new closing form, `$released(struct T) $(p)`: the author's own
     step has given the written fields' values up and gathered the storage,
     and the emitter forgets the object -- no code, no new facts. Pieces the

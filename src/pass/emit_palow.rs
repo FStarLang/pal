@@ -31835,8 +31835,20 @@ fn call_bound_map(body: &Stmts, storage_snapshot: bool) -> HashSet<String> {
         })
         .collect();
     let mut out = HashSet::new();
-    let mut initialized_null = HashSet::new();
+    let mut initialized_null = HashSet::<String>::new();
     for (i, st) in body.iter().enumerate() {
+        // The load and its hint may sit together in an arm: a `goto` out of
+        // an early failure check puts the rest of the body in an `else`.
+        if storage_snapshot && !matches!(&st.val, StmtT::Assign(..)) {
+            for q in &initialized_null {
+                if t.rebound.get(q).copied() == Some(2)
+                    && scattered_hints(body, q) == 1
+                    && nested_scattered_load(st, q)
+                {
+                    out.insert(q.clone());
+                }
+            }
+        }
         let StmtT::Assign(lhs, rhs) = &st.val else {
             continue;
         };
@@ -31895,6 +31907,73 @@ fn call_bound_map(body: &Stmts, storage_snapshot: bool) -> HashSet<String> {
         out.insert(q);
     }
     out
+}
+
+/// How many `$scattered` hints anywhere in `body` name `q`.
+fn scattered_hints(body: &Stmts, q: &str) -> usize {
+    body.iter()
+        .map(|s| match &s.val {
+            StmtT::GhostStmt(code)
+                if matches!(aux_fn_kind(code), Some(AuxFnKind::Scattered))
+                    && uninit_open_arg(code).and_then(lvalue_name).as_deref() == Some(q) =>
+            {
+                1
+            }
+            StmtT::If {
+                then_branch,
+                else_branch,
+                ..
+            } => scattered_hints(then_branch, q) + scattered_hints(else_branch, q),
+            StmtT::Match {
+                branches,
+                default_branch,
+                ..
+            } => {
+                branches
+                    .iter()
+                    .map(|br| scattered_hints(&br.body, q))
+                    .sum::<usize>()
+                    + scattered_hints(default_branch, q)
+            }
+            StmtT::While { body, .. } | StmtT::GotoBlock { body, .. } => scattered_hints(body, q),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Whether `q` is loaded from memory in a block nested in `st` -- an arm of
+/// an `if` or `switch`, or a `goto` block, not a loop body -- and a
+/// `$scattered` hint later in that same block names it. With that hint the
+/// only one naming `q`, the snapshot is taken in that block and nowhere else.
+fn nested_scattered_load(st: &Stmt, q: &str) -> bool {
+    let in_block = |b: &Stmts| {
+        b.iter().enumerate().any(|(i, s)| {
+            let loaded = matches!(&s.val, StmtT::Assign(lhs, rhs)
+                if lvalue_name(lhs).as_deref() == Some(q)
+                    && matches!(&strip_vattr(rhs).val, ExprT::Deref(..) | ExprT::Member(..)));
+            (loaded
+                && b[i + 1..].iter().any(|h| {
+                    matches!(&h.val, StmtT::GhostStmt(code)
+                        if matches!(aux_fn_kind(code), Some(AuxFnKind::Scattered))
+                            && uninit_open_arg(code).and_then(lvalue_name).as_deref() == Some(q))
+                }))
+                || nested_scattered_load(s, q)
+        })
+    };
+    match &st.val {
+        StmtT::If {
+            then_branch,
+            else_branch,
+            ..
+        } => in_block(then_branch) || in_block(else_branch),
+        StmtT::Match {
+            branches,
+            default_branch,
+            ..
+        } => branches.iter().any(|br| in_block(&br.body)) || in_block(default_branch),
+        StmtT::GotoBlock { body, .. } => in_block(body),
+        _ => false,
+    }
 }
 
 fn derived_ptr(e: &Expr) -> bool {
