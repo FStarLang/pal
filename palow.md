@@ -3733,7 +3733,11 @@ Limitations:
    made the object whole again: without it the emitter would go on treating
    the object as a heap of fields, and the next write through it would be
    lowered as a write into storage that the author's gather has already
-   consumed. A branch carries all of this: which fields of each slot have
+   consumed. The other closing form, `$released(struct T) $(p)`, says the
+   author's step has taken the pieces back *without* making a value --
+   typically to hand the object on as raw storage -- and the emitter simply
+   forgets the object: nothing is emitted, and a piece the step did not
+   consume is still in the context for Pulse to reject. A branch carries all of this: which fields of each slot have
    been written, which objects are scattered one level further in, and the
    slots standing for a nested field's own storage all cross the join, and
    the two arms must agree on them. Without that, the code after the join
@@ -8059,3 +8063,24 @@ Limitations:
     for omitted members. An explicitly false flag does not imply a zero
     storage byte (`bitfield_init_padding_bad`). This does not publish new
     bit-field constants for static objects.
+108. **Filling an object reached through a loaded pointer.** A pointer local
+    declared `NULL` and then loaded exactly once from a field or through a
+    pointer (`h = NULL; ... h = b->h;`) was not given a storage snapshot,
+    because only a call's result was: a `$scattered` hint on it found
+    nothing to fill by address, and every write focused the whole object.
+    When a later top-level `$scattered` hint names such a local, the load is
+    now the one assignment the snapshot stands for, exactly as a call result
+    is -- one assignment between the `NULL` and the hint and none after, at
+    the top level of the body. Each use asserts that the local still holds
+    the snapshot, which F* checks; nothing is assumed. A second load, a load
+    in only one arm, or a reassignment after the hint gets no snapshot and
+    fails in F* as before (`scatter_member_load_twice`,
+    `scatter_member_load_branch`, `scatter_member_load_retarget`). The fill
+    has a new closing form, `$released(struct T) $(p)`: the author's own
+    step has given the written fields' values up and gathered the storage,
+    and the emitter forgets the object -- no code, no new facts. Pieces the
+    step leaves behind are rejected by Pulse
+    (`scatter_released_leftover`), and `$released` of an object the body is
+    not filling is an emitter error (`scatter_released_unscattered`).
+    `$gathered` now resolves a snapshot local the same way
+    (`scatter_member_load`).

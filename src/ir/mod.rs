@@ -725,6 +725,13 @@ pub enum AuxFnKind {
     /// author's put it back together. Palow-only, and emits nothing; it only
     /// tells the emitter to stop treating the object as a heap of fields.
     Gathered,
+    /// `$released(struct S) $(p)` — the other closing form of `$scattered`:
+    /// says that a ghost step of the author's has taken the pieces of `*p`
+    /// back, written or not, so the body no longer holds the object at all.
+    /// Palow-only, and emits nothing; it only tells the emitter to forget
+    /// the object, so that nothing after it -- a join, the function's end --
+    /// asks for the pieces or for a whole object.
+    Released,
 }
 
 impl AuxFnKind {
@@ -737,6 +744,7 @@ impl AuxFnKind {
             AuxFnKind::Activate => "activate",
             AuxFnKind::Scattered => "scattered",
             AuxFnKind::Gathered => "gathered",
+            AuxFnKind::Released => "released",
         }
     }
 }
