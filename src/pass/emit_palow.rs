@@ -30272,7 +30272,11 @@ fn zero_value(tds: &Typedefs, ty: &Type) -> Result<String, String> {
         // bytes here -- `null_addr` says its address is 0 -- but it is the
         // value that matters, because that is what a comparison with `NULL`
         // will ask about.
-        TypeT::Pointer(..) => Ok("null".to_string()),
+        // A function pointer is the same `ptr` as a data pointer
+        // (Pulse.Lib.C.Palow.FnPtr), so its zero is the same `null`, as in
+        // `zero_initializer`. Being null grants no `is_valid`, so a zeroed
+        // callback still cannot be called.
+        TypeT::Pointer(..) | TypeT::FnPtr { .. } => Ok("null".to_string()),
         TypeT::TypeRef(TypeRefKind::Struct(name)) => {
             let Some(si) = tds.structs.get(&*name.val) else {
                 return Err(format!("a zeroed struct {}", name.val));
