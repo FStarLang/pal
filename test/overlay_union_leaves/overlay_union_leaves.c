@@ -189,6 +189,17 @@ CODE_PLUS Upper_SwapSaved(UPPER_REQUEST* Request, CODE_PLUS Code)
     return prev;
 }
 
+/* A constant literal stored whole into the island, the way a status is
+   reset: the same byte store as a value, so no view on the path need be
+   readable first. */
+void Upper_ResetSaved(UPPER_REQUEST* Request)
+    _ensures(Request->Lower.Saved.Status._active)
+    _ensures(_unchanged(Request->Lower.Common))
+    _ensures(_unchanged(Request->Lower.Result))
+{
+    Request->Lower.Saved = (CODE_PLUS){ .Status = { .Code = 0, .Location = 0 } };
+}
+
 /* A union only ever declared, reached through a pointer: it is opaque. */
 typedef union _LATER_REQUEST LATER_REQUEST;
 typedef union _overlay _OUTER_REQUEST
