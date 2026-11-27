@@ -32186,15 +32186,19 @@ fn call_bound_map(body: &Stmts, storage_snapshot: bool) -> HashSet<String> {
         if t.rebound.get(&q).copied() != Some(expected) {
             continue;
         }
-        if !matches!(
-            &(if noted_result {
-                strip_casts(rhs)
-            } else {
-                strip_vattr(rhs)
-            })
-            .val,
-            ExprT::FnCall(..) | ExprT::FnPtrCall(..)
-        ) {
+        // A pointer loaded from memory, `T *p = *q;`, is as settled as one a
+        // call returned: the local is written once, and every use still loads
+        // it and is checked against the snapshot. Only the storage snapshot
+        // takes it; a code pointer's validity still has to come from a call.
+        let rhs_val = &(if noted_result {
+            strip_casts(rhs)
+        } else {
+            strip_vattr(rhs)
+        })
+        .val;
+        if !(matches!(rhs_val, ExprT::FnCall(..) | ExprT::FnPtrCall(..))
+            || (storage_snapshot && matches!(rhs_val, ExprT::Deref(..))))
+        {
             continue;
         }
         out.insert(q);
