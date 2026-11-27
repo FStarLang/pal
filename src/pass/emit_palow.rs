@@ -26993,7 +26993,7 @@ impl<'a> Body<'a> {
                 self.close_own();
                 return Ok(());
             }
-            if self.atomic_literal_field(lhs, rhs) {
+            if self.atomic_literal_field(lhs, rhs) && !self.overlay_island_store(lhs) {
                 self.check_alias_snaps(s)?;
                 self.union_values.clear();
                 self.clear_fn_notes(lhs);
@@ -27237,6 +27237,20 @@ impl<'a> Body<'a> {
             && self
                 .ty_of(lhs)
                 .is_ok_and(|t| self.clone().write_literal_storage(&t, rhs, "a").is_ok())
+    }
+
+    // A literal stored to an island inside an overlay union is a whole-island
+    // byte store like any other value (`overlay_leaf`): it needs no arm on the
+    // path to be readable, where focusing member by member does.
+    fn overlay_island_store(&self, lhs: &Expr) -> bool {
+        let island = self.ty_of(lhs).is_ok_and(|t| match &peel(self.tds, &t).val {
+            TypeT::TypeRef(TypeRefKind::Union(u)) => u
+                .val
+                .strip_suffix("__island")
+                .is_some_and(|o| island_member(self.tds, o).is_some()),
+            _ => false,
+        });
+        island && matches!(self.clone().overlay_leaf(lhs, true), Ok(Some(_)))
     }
 
     fn zero_byte_arm_size(&self, rhs: &Expr) -> Option<u64> {
