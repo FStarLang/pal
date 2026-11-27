@@ -1,0 +1,3 @@
+Cannot prove:
+struct_head_pts_to_uninit bv.fld_h
+ptr_pts_to (bv.fld_h +! struct_head_offsetof_list +!

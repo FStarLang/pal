@@ -219,6 +219,7 @@ For the full antiquotation reference see the **Antiquotation** section of `doc/p
 - `$type(T)` / `$field(T::f)` — the generated F* type for a C type, and a field accessor.
 - `$unfold(T)` / `$fold(T)` — the name of the ghost step that opens a struct into its fields / closes it again (Palow's `struct_T_scatter` / `struct_T_gather`), e.g. `_ghost_stmt($unfold(my_pair) $(p))`. Rarely needed: PAL focuses on a field around each access itself.
 - `$scattered(struct T) $(p)` / `$gathered(struct T) $(p)` — tell PAL that your own ghost step has taken the object apart / put it back, so its field-by-field initialisation tracking stays in sync (`test/nested_scatter`).
+- `$released(struct T) $(p)` — the other close: your ghost step has given the written fields' values up and gathered the storage back (e.g. to hand it on as raw bytes); PAL forgets the object and emits nothing. A pointer local set to `NULL` and then loaded once (`h = b->h;`) before a `$scattered` hint is filled by address too, when the load and the hint are both at the top level or both in the same `if` arm / `goto` block (not a loop body), and that is the only `$scattered` hint on it (`test/scatter_member_load`).
 
 Pulse ghost-fn body syntax you will write inside `_ghost_stmt(...)`:
 
@@ -285,7 +286,7 @@ is tracked too: PAL scatters the uninitialised object, fills each field, and
 gathers it once the last one is written. You normally write none of these steps.
 
 When you *do* take an object apart in your own ghost code, tell PAL with
-`$scattered(...)` / `$gathered(...)` (§5.1); otherwise the next access is
+`$scattered(...)` / `$gathered(...)` / `$released(...)` (§5.1); otherwise the next access is
 generated against a shape that is no longer in the context, and fails with
 **Error 228** naming `struct_X_pts_to`.
 

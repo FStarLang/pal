@@ -1,0 +1,2 @@
+Cannot prove:
+struct_head_pts_to_uninit (match not (Int32.eq var_c 0l) with
