@@ -16399,6 +16399,10 @@ struct Body<'a> {
     /// Storage `$scattered` said is already in pieces, by address, until it
     /// is gathered: the first write into it must not scatter it again.
     prescattered: HashSet<String>,
+    /// Objects a `$scattered` hint named as `m.f`, where `m` is a parameter
+    /// passed by value and never stored: `m.f` is a value that cannot change,
+    /// so `m.f->g` names the object at the address the hint tracked.
+    value_field_objects: HashMap<(String, String), String>,
     /// The declarations written above the function, as (key, name, text).
     /// Two kinds live here: a name for a constant term a literal or a
     /// constant array initialiser would otherwise repeat at every mention,
@@ -16850,6 +16854,9 @@ impl<'a> Body<'a> {
         // A pointer local has storage of its own. Track the pointed-to object
         // at a snapshot, not at a computation such as `(ptr_read loc_p)`.
         // Every subsequent use still loads the local and proves it unchanged.
+        if let Some(key) = self.value_field(e) {
+            self.value_field_objects.insert(key, addr.clone());
+        }
         let mut name = format!("*{}", addr);
         if let ExprT::Var(v) = &strip_vattr(e).val
             && self.storage_call_locals.contains(v.val.as_ref())
@@ -19297,8 +19304,31 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// `m.f` where `m` is a parameter held as a value (no storage, not a
+    /// global): the key under which its pointed-to object is recorded.
+    fn value_field(&self, e: &Expr) -> Option<(String, String)> {
+        let ExprT::Member(b, f) = &strip_vattr(e).val else {
+            return None;
+        };
+        let ExprT::Var(v) = &strip_vattr(b).val else {
+            return None;
+        };
+        if self.slots.iter().any(|s| s.name == *v.val) || self.env.lookup_global_var(v).is_some() {
+            return None;
+        }
+        Some((v.val.to_string(), f.val.to_string()))
+    }
+
+    /// The tracked object `m.f` points to, if a hint named it and it is
+    /// still tracked.
+    fn value_field_object(&self, e: &Expr) -> Option<String> {
+        let at = self.value_field_objects.get(&self.value_field(e)?)?;
+        self.slots.iter().any(|s| s.addr == *at).then(|| at.clone())
+    }
+
     /// `&p->f` (or `&p->f.g`, ...) where `p` is a pointer local whose object
-    /// is tracked at a snapshot: the field's address off the snapshot, where
+    /// is tracked at a snapshot, or a field of a by-value parameter whose
+    /// object a hint named: the field's address off the tracked object, where
     /// the field is tracked too. Naming it through the local would take a
     /// read of the local, which a hint must not cost.
     fn snapshot_field_addr(&self, e: &Expr) -> Option<String> {
@@ -19313,6 +19343,9 @@ impl<'a> Body<'a> {
             match &strip_vattr(root).val {
                 ExprT::Member(b, _) => root = b,
                 ExprT::Deref(inner) => {
+                    if self.value_field_object(inner).is_some() {
+                        break;
+                    }
                     let ExprT::Var(v) = &strip_vattr(inner).val else {
                         return None;
                     };
@@ -19341,6 +19374,9 @@ impl<'a> Body<'a> {
         }
         match &strip_vattr(e).val {
             ExprT::Deref(inner) => {
+                if let Some(at) = self.value_field_object(inner) {
+                    return Some(at);
+                }
                 let ExprT::Var(v) = &strip_vattr(inner).val else {
                     return None;
                 };
@@ -33072,6 +33108,7 @@ fn emit_body(
         open_elems: Vec::new(),
         nested_scatter: BTreeMap::new(),
         prescattered: HashSet::new(),
+        value_field_objects: HashMap::new(),
         decls: Vec::new(),
         own_open: Vec::new(),
         const_lend: false,
