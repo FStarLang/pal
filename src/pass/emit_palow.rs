@@ -31956,9 +31956,10 @@ fn call_bound_map(body: &Stmts, storage_snapshot: bool) -> HashSet<String> {
                 if matches!(aux_fn_kind(code), Some(AuxFnKind::UnfoldUninit))
                     && uninit_open_arg(code).and_then(lvalue_name).as_ref() == Some(&q))
             });
-        // The same for a pointer declared NULL and then loaded from memory
-        // once, when a `$scattered` hint further on names it: the hint is
-        // where the author says what the loaded pointer points at.
+        // The same for a pointer declared NULL and then loaded from memory,
+        // or returned by a call, once, when a `$scattered` hint further on
+        // names it: the hint is where the author says what the pointer
+        // points at.
         let rhs_val = &(if noted_result {
             strip_casts(rhs)
         } else {
@@ -31966,6 +31967,7 @@ fn call_bound_map(body: &Stmts, storage_snapshot: bool) -> HashSet<String> {
         })
         .val;
         let loaded = matches!(rhs_val, ExprT::Deref(..) | ExprT::Member(..));
+        let called = matches!(rhs_val, ExprT::FnCall(..) | ExprT::FnPtrCall(..));
         // `T *p = (T *)q;`, a pointer local initialised once with another
         // name's value under a cast, which a `$scattered` hint further on
         // names: the hint says what that value points at, and as for a load
@@ -31974,14 +31976,17 @@ fn call_bound_map(body: &Stmts, storage_snapshot: bool) -> HashSet<String> {
             && !matches!(strip_vattr(rhs).val, ExprT::Var(..))
             && matches!(strip_vattr(strip_casts(rhs)).val, ExprT::Var(..))
             && scattered_hints(body, &q) >= 1;
+        // A call's result may be taken apart only in one arm of what follows,
+        // so its hint may sit in a nested block.
         let noted_scattered = storage_snapshot
-            && loaded
             && initialized_null.contains(&q)
-            && body[i + 1..].iter().any(|s| {
-                matches!(&s.val, StmtT::GhostStmt(code)
+            && ((loaded
+                && body[i + 1..].iter().any(|s| {
+                    matches!(&s.val, StmtT::GhostStmt(code)
                     if matches!(aux_fn_kind(code), Some(AuxFnKind::Scattered))
                         && uninit_open_arg(code).and_then(lvalue_name).as_ref() == Some(&q))
-            });
+                }))
+                || (called && scattered_hints(&body[i + 1..], &q) >= 1));
         let expected =
             1 + usize::from((noted_result || noted_scattered) && initialized_null.contains(&q));
         if t.rebound.get(&q).copied() != Some(expected) {
@@ -32003,7 +32008,7 @@ fn call_bound_map(body: &Stmts, storage_snapshot: bool) -> HashSet<String> {
 }
 
 /// How many `$scattered` hints anywhere in `body` name `q`.
-fn scattered_hints(body: &Stmts, q: &str) -> usize {
+fn scattered_hints(body: &[Rc<Stmt>], q: &str) -> usize {
     body.iter()
         .map(|s| match &s.val {
             StmtT::GhostStmt(code)
