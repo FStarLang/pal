@@ -31,9 +31,10 @@
  *
  * -- the multiplication, not the comparison.
  *
- * Note the shapes used below.  `sizeof(<expression>)` is rejected inside an
- * annotation, so every bound here is an ordinary
- * C guard and every `_ensures` names a literal.  `sizeof(<type>[n])` does not
+ * Note the shapes used below.  When this was written `sizeof(<expression>)`
+ * was rejected inside an annotation (now accepted, see `sizeof_expr_spec`),
+ * so every bound here is an ordinary C guard and every `_ensures` names a
+ * literal.  `sizeof(<type>[n])` does not
  * translate either, so array sizes are taken through a member.
  */
 

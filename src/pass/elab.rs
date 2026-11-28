@@ -504,6 +504,39 @@ impl<'a> Elaborator<'a> {
                     self.report(format!("expected lvalue for &, got {}", v), &rval.loc);
                 }
             }
+            ExprT::FnCall(f, args)
+                if &*f.val == "sizeof" && args.len() == 1 && env.lookup_fn(f).is_none() =>
+            {
+                // `sizeof(<expression>)` in an annotation: the annotation
+                // parser takes only `sizeof(<type>)`, so an expression operand
+                // arrives as a call. It stands for `sizeof` of the operand's
+                // type; the operand is not evaluated, as in C. The type is
+                // taken before elaboration, which may decay an array operand.
+                let arg = Rc::make_mut(&mut args[0]);
+                // `*a` with `a` a fixed array is `a[0]` in C (the array
+                // decays), the second half of the `sizeof(a) / sizeof(*(a))`
+                // idiom; inference does not decay, so it is typed here.
+                let operand_ty = match &arg.val {
+                    ExprT::Deref(a) => env.infer_expr(a).and_then(|t| {
+                        let t = env.vtype_whnf(t);
+                        match &t.val {
+                            TypeT::FixedArray(elem, _) => Ok(elem.clone().into()),
+                            _ => env.infer_expr(arg),
+                        }
+                    }),
+                    _ => env.infer_expr(arg),
+                };
+                match operand_ty {
+                    Ok(ty) => {
+                        let mut ty: Type = (*ty).clone();
+                        self.elab_type(env, &mut ty);
+                        rval.val = ExprT::SizeOf(Rc::new(ty));
+                    }
+                    Err(_) => {
+                        self.report("cannot type the operand of sizeof".to_string(), &rval.loc)
+                    }
+                }
+            }
             ExprT::FnCall(f, args) => {
                 // Collect param types before elaborating args (to pass expected types)
                 let param_types: Option<Vec<_>> = env
