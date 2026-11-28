@@ -3553,6 +3553,19 @@ public:
         }
       }
 
+      // A case written as a block, `case v: { ...; break; }`, ends in the
+      // block's last statement. A block opens no scope here (see the
+      // `CompoundStmt` case of `trStmt`), so the block's statements are the
+      // case's own.
+      for (auto &group : groups) {
+        while (!group.body.empty() && isa<CompoundStmt>(group.body.back())) {
+          auto *last = cast<CompoundStmt>(group.body.back());
+          group.body.pop_back();
+          for (auto *s : last->body())
+            group.body.push_back(s);
+        }
+      }
+
       // A switch whose cases all end in a direct break has no fall-through.
       // Emit it as one match and omit the terminal breaks.
       bool hasOnlyTerminalBreaks = !groups.empty();
