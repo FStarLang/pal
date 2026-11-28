@@ -1,0 +1,2 @@
+Cannot prove:
+ptr_pts_to_uninit (var_h +! struct_holder_offsetof_slot)
