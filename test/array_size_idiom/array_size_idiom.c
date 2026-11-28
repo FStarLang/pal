@@ -55,9 +55,9 @@ struct table {
 	struct entry entries[8];
 };
 
-/* The bound is ARRAY_SIZE, the claimed count is only a filter. The guard
- * must be an ordinary C expression: `sizeof(<expression>)` is rejected inside
- * an annotation, so it cannot appear in an `_invariant`. */
+/* The bound is ARRAY_SIZE, the claimed count is only a filter. The guard is
+ * an ordinary C expression; `sizeof(<expression>)` inside an annotation is
+ * covered by `sizeof_expr_spec`. */
 uint64_t lookup(struct table *t, uint32_t key)
 {
 	uint32_t i = 0;

@@ -418,6 +418,13 @@ impl<'a> Checker<'a> {
                     // these at the arity the library function has.
                     return;
                 }
+                if &*f.val == "sizeof" && args.len() == 1 && !self.check_types {
+                    // `sizeof(<expression>)` from an annotation; `sizeof` is a
+                    // keyword, so no C function has this name. `elab` replaces
+                    // it with `sizeof` of the operand's type. The type-checking
+                    // runs after `elab` reject any such call that is left.
+                    return;
+                }
                 let Some(fn_decl) = env.lookup_fn(f) else {
                     self.report(format!("unknown function {}", f.val), &rval.loc);
                     return;
