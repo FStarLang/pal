@@ -26250,6 +26250,17 @@ impl<'a> Body<'a> {
                 locals.insert(s.name.clone(), tmp);
                 continue;
             }
+            // An object the author's `$scattered` holds in pieces, none of
+            // them written by the body: the pieces are the author's, and
+            // only the clause can say what they hold.
+            if !s.init
+                && s.scattered.is_empty()
+                && self.prescattered.contains(&s.addr)
+                && !self.nested_scatter.contains_key(&s.addr)
+                && !self.nested_scatter.values().any(|(at, _, _)| *at == s.addr)
+            {
+                continue;
+            }
             if !s.init {
                 return Err(format!("{} with `{}` not yet written", what, s.name));
             }
@@ -28912,6 +28923,31 @@ impl<'a> Body<'a> {
                     }
                     self.blocks[i].freed = true;
                     self.blocks[i].checked = false;
+                }
+                // An object the author's `$scattered` put in pieces, with a
+                // field written on only one path: after the join the field is
+                // one the body has not written, read by address from the
+                // points-to that path left, like any field it never wrote.
+                // Only the emitter's record changes; a later write is still
+                // into storage, which the context must then supply.
+                if !then.diverged && !els.diverged && !then.returned && !els.returned {
+                    for (i, slot) in self.slots.iter().enumerate() {
+                        if then.scattered[i] != els.scattered[i]
+                            && then.inits[i] == els.inits[i]
+                            && !slot.init
+                            && then.prescattered.contains(&slot.addr)
+                            && els.prescattered.contains(&slot.addr)
+                            && !then.nested_scatter.values().any(|(a, _, _)| *a == slot.addr)
+                            && !els.nested_scatter.values().any(|(a, _, _)| *a == slot.addr)
+                        {
+                            let common: BTreeSet<String> = then.scattered[i]
+                                .intersection(&els.scattered[i])
+                                .cloned()
+                                .collect();
+                            then.scattered[i] = common.clone();
+                            els.scattered[i] = common;
+                        }
+                    }
                 }
                 // A whole local written on only one path has a common storage
                 // view. Forget its value on that path, without changing the
